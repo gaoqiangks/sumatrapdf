@@ -1281,6 +1281,8 @@ ContinueOpenWindow:
         SHGetFileInfoW(L".pdf", 0, &sfi, sizeof(sfi), flg);
     }
 
+    restoreSession = false;
+
     if (restoreSession) {
         for (SessionData* data : *sessionData) {
             win = CreateAndShowMainWindow(data);
@@ -1298,6 +1300,7 @@ ContinueOpenWindow:
             }
         }
     }
+    restoreSession = true;
 
     for (const char* path : flags.fileNames) {
         if (restoreSession) {
