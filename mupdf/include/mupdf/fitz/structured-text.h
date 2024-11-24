@@ -123,8 +123,12 @@ typedef struct fz_stext_grid_positions fz_stext_grid_positions;
 	will not be merged. Each line will thus be a span of text with the same
 	font, colour, and size.
 
-	FZ_STEXT_MEDIABOX_CLIP: If this option is set, characters entirely
-	outside each page's mediabox will be ignored.
+	FZ_STEXT_CLIP: If this option is set, characters that would be entirely
+	clipped away by the current clipping path (or, more accurate, the smallest
+	bbox that contains the current clipping path) will be ignored. The
+	clip path is guaranteed to be smaller then the page mediabox, hence
+	this option subsumes an older, now deprecated, FZ_STEXT_MEDIABOX_CLIP
+	option.
 
 	FZ_STEXT_COLLECT_STRUCTURE: If this option is set, we will collect
 	the structure as specified using begin/end_structure calls. This will
@@ -138,6 +142,10 @@ typedef struct fz_stext_grid_positions fz_stext_grid_positions;
 
 	FZ_STEXT_IGNORE_ACTUALTEXT: If this option is set, we will no longer
 	replace text by the ActualText replacement specified in the document.
+
+	FZ_STEXT_SEGMENT: If this option is set, we will attempt to segment
+	the page into different regions. This will deliberately not do anything
+	to pages with structure information present.
 */
 enum
 {
@@ -147,12 +155,16 @@ enum
 	FZ_STEXT_INHIBIT_SPACES = 8,
 	FZ_STEXT_DEHYPHENATE = 16,
 	FZ_STEXT_PRESERVE_SPANS = 32,
-	FZ_STEXT_MEDIABOX_CLIP = 64,
+	FZ_STEXT_CLIP = 64,
 	FZ_STEXT_USE_CID_FOR_UNKNOWN_UNICODE = 128,
 	FZ_STEXT_COLLECT_STRUCTURE = 256,
 	FZ_STEXT_ACCURATE_BBOXES = 512,
 	FZ_STEXT_COLLECT_VECTORS = 1024,
-	FZ_STEXT_IGNORE_ACTUALTEXT = 2048
+	FZ_STEXT_IGNORE_ACTUALTEXT = 2048,
+	FZ_STEXT_SEGMENT = 4096,
+
+	/* An old, deprecated option. */
+	FZ_STEXT_MEDIABOX_CLIP = FZ_STEXT_CLIP
 };
 
 /**
@@ -299,6 +311,7 @@ struct fz_stext_block
 		struct { fz_stext_line *first_line, *last_line; } t;
 		struct { fz_matrix transform; fz_image *image; } i;
 		struct { fz_stext_struct *down; int index; } s;
+		struct { uint8_t stroked; uint32_t argb; } v;
 		struct { fz_stext_grid_positions *xs; fz_stext_grid_positions *ys; } b;
 	} u;
 	fz_stext_block *prev, *next;
@@ -325,7 +338,7 @@ struct fz_stext_char
 	int c; /* unicode character value */
 	uint16_t bidi; /* even for LTR, odd for RTL - probably only needs 8 bits? */
 	uint16_t flags;
-	int color; /* sRGB hex color */
+	uint32_t argb; /* sRGB hex color (alpha in top 8 bits, then r, then g, then b in low bits) */
 	fz_point origin;
 	fz_quad quad;
 	float size;
@@ -457,13 +470,39 @@ void fz_print_stext_page_as_text(fz_context *ctx, fz_output *out, fz_stext_page 
 /**
 	Search for occurrence of 'needle' in text page.
 
-	Return the number of hits and store hit quads in the passed in
+	Return the number of quads and store hit quads in the passed in
 	array.
 
 	NOTE: This is an experimental interface and subject to change
 	without notice.
 */
 int fz_search_stext_page(fz_context *ctx, fz_stext_page *text, const char *needle, int *hit_mark, fz_quad *hit_bbox, int hit_max);
+
+/**
+	Callback function for use in searching.
+
+	Called with the list of quads that correspond to a single hit.
+
+	The callback should return with 0 to continue the search, or 1 to abort it.
+	All other values are reserved at this point.
+*/
+typedef int (fz_search_callback_fn)(fz_context *ctx, void *opaque, int num_quads, fz_quad *hit_bbox);
+
+/**
+	Search for occurrence of 'needle' in text page.
+
+	Call callback once for each hit. This callback will receive
+	(potentially) multiple quads for each hit.
+
+	Returns the number of hits - note that this is potentially
+	different from (i.e. is not greater than) the number of quads
+	as returned by the non callback API.
+
+	NOTE: This is an experimental interface and subject to change
+	without notice.
+*/
+int fz_search_stext_page_cb(fz_context *ctx, fz_stext_page *text, const char *needle, fz_search_callback_fn *cb, void *opaque);
+
 
 /**
 	Return a list of quads to highlight lines inside the selection
@@ -512,6 +551,20 @@ typedef struct
 	string.
 */
 fz_stext_options *fz_parse_stext_options(fz_context *ctx, fz_stext_options *opts, const char *string);
+
+/**
+	Perform segmentation analysis on an (unstructured) page to look for
+	recursive subdivisions.
+
+	Essentially this code attempts to split the page horizontally and/or
+	vertically repeatedly into smaller and smaller "segments" (divisions).
+
+	Returns 0 if no changes were made to the document.
+
+	This is experimental code, and may change (or be removed) in future
+	versions!
+*/
+int fz_segment_stext_page(fz_context *ctx, fz_stext_page *page);
 
 /**
 	Create a device to extract the text on a page.
