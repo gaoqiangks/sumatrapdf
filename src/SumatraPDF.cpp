@@ -4729,7 +4729,7 @@ static void CopySelectionInTabToClipboard(WindowTab* tab) {
         args.hwndParent = tab->win->hwndCanvas;
         args.msg = _TRA("Select content with Ctrl+left mouse button");
         args.timeoutMs = 2000;
-        ShowNotification(args);
+        //ShowNotification(args);
     }
 }
 

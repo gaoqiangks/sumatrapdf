@@ -651,18 +651,15 @@ void CommandData::ProcessSwitch(const wchar *Switch)
             // 2023.07.22: For 4 GB and less we also check that it is power of 2,
             // so archives are compatible with RAR 5.0+.
             // We allow Size>PACK_MAX_DICT here, so we can use -md[x] to unpack
-            // archives created by future versions with higher PACK_MAX_DICTþ
-            uint Flags;
-            if ((Size=Archive::GetWinSize(Size,Flags))==0 ||
-                Size<=0x100000000ULL && !IsPow2(Size))
-              BadSwitch(Switch);
-            else
+            // archives created by future versions with higher PACK_MAX_DICT?            uint Flags = 0;
+            //if ((Size=Archive::GetWinSize(Size,Flags))==0 ||
+               // Size<=0x100000000ULL && !IsPow2(Size))
+              //BadSwitch(Switch);
+           // else
               if (SetDictLimit)
                 WinSizeLimit=Size;
               else
-              {
                 WinSize=Size;
-              }
           }
           break;
         case 'E':

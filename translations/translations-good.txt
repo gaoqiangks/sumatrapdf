@@ -6361,6 +6361,8 @@ tr:&Açıklamayı Kopyala
 tw:複製註解(&M)
 uk:Копіювати коментар
 vn:Chép chú thích
+Duplicate tab:
+cn:复制标签页
 :Copy File Path
 am:Պատճենել ֆայլի ուղին
 ar:نسخ مسار الملف
