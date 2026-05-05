@@ -3,7 +3,12 @@
 
 constexpr int kInstallerWinDy = 340;
 
-enum class PreviousInstallationType { None = 0, User = 1, Machine = 2, Both = 3 };
+enum class PreviousInstallationType {
+    None = 0,
+    User = 1,
+    Machine = 2,
+    Both = 3
+};
 
 struct PreviousInstallationInfo {
     char* installationDir = nullptr;
@@ -59,15 +64,15 @@ TempStr GetShortcutPathTemp(int csidl);
 bool ExtractInstallerFiles(char* dir);
 
 char* GetExistingInstallationDir();
-
 void GetPreviousInstallInfo(PreviousInstallationInfo* info);
+bool IsOurExeInstalled();
 
-char* GetInstallationFilePathTemp(const char* name);
+char* GetInstallationFilePathTemp(const char* installDir, const char* name);
 
-void RegisterPreviewer(bool allUsers);
+void RegisterPreviewer(bool allUsers, const char* installDir);
 void UnRegisterPreviewer();
 
-void RegisterSearchFilter(bool allUsers);
+void RegisterSearchFilter(bool allUsers, const char* installDir);
 void UnRegisterSearchFilter();
 
 void UninstallBrowserPlugin();

@@ -88,7 +88,7 @@ static HANDLE gDumpEvent = nullptr;
 static HANDLE gDumpThread = nullptr;
 static bool gCrashed = false;
 
-static MINIDUMP_EXCEPTION_INFORMATION gMei{0};
+static MINIDUMP_EXCEPTION_INFORMATION gMei{};
 static LPTOP_LEVEL_EXCEPTION_FILTER gPrevExceptionFilter = nullptr;
 
 static DWORD WINAPI CrashDumpThread(void*) {
@@ -107,7 +107,7 @@ static DWORD WINAPI CrashDumpThread(void*) {
         return 0;
     }
 
-    str::Str s(16 * 1024);
+    StrBuilder s(16 * 1024);
     dbghelp::GetExceptionInfo(s, gMei.ExceptionPointers);
     dbghelp::GetAllThreadsCallstacks(s);
     s.Append("\r\n");

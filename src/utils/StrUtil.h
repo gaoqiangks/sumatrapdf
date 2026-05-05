@@ -19,29 +19,18 @@ struct Span {
 
     Span() = default;
     ~Span() = default;
-    Span(const T* d, int size) : d((T*)d), size(size) {
-    }
-    T* Data() const {
-        return d;
-    }
-    int Size() const {
-        return size;
-    }
+    Span(const T* d, int size) : d((T*)d), size(size) {}
+    T* Data() const { return d; }
+    int Size() const { return size; }
 };
 
 struct StrSpan : Span<char> {
     StrSpan() = default;
     StrSpan(const char* s);
     StrSpan(const char* s, int sLen);
-    char* CStr() const {
-        return d;
-    }
-    int Len() const {
-        return size;
-    }
-    bool IsEmpty() const {
-        return !d || size == 0;
-    }
+    char* CStr() const { return d; }
+    int Len() const { return size; }
+    bool IsEmpty() const { return !d || size == 0; }
 };
 
 struct ByteSlice {
@@ -79,24 +68,12 @@ struct ByteSlice {
         d = (u8*)data;
         sz = size;
     }
-    u8* data() const {
-        return d;
-    }
-    u8* Get() const {
-        return d;
-    }
-    size_t size() const {
-        return sz;
-    }
-    int Size() const {
-        return (int)sz;
-    }
-    bool empty() const {
-        return !d;
-    }
-    bool IsEmpty() const {
-        return !d;
-    }
+    u8* data() const { return d; }
+    u8* Get() const { return d; }
+    size_t size() const { return sz; }
+    int Size() const { return (int)sz; }
+    bool empty() const { return !d; }
+    bool IsEmpty() const { return !d; }
     ByteSlice Clone() const {
         if (empty()) {
             return {};
@@ -109,16 +86,18 @@ struct ByteSlice {
         d = nullptr;
         sz = 0;
     }
-    operator const char*() {
-        return (const char*)d;
-    }
+    operator const char*() { return (const char*)d; }
 };
 
 bool IsEqual(const ByteSlice&, const ByteSlice&);
 
 namespace str {
 
-enum class TrimOpt { Left, Right, Both };
+enum class TrimOpt {
+    Left,
+    Right,
+    Both
+};
 
 size_t Len(const WCHAR*);
 size_t Len(const char* s);
@@ -137,7 +116,7 @@ void FreePtr(char** s);
 void FreePtr(const WCHAR** s);
 void FreePtr(WCHAR** s);
 
-char* Dup(Allocator*, const char* str, size_t cch = (size_t)-1);
+char* Dup(Arena*, const char* str, size_t cch = (size_t)-1);
 char* Dup(const char* s, size_t cch = (size_t)-1);
 char* Dup(const ByteSlice&);
 
@@ -148,8 +127,8 @@ void ReplaceWithCopy(const char** s, const char* snew);
 void ReplaceWithCopy(const char** s, const ByteSlice&);
 void ReplaceWithCopy(char** s, const char* snew);
 
-char* Join(Allocator*, const char*, const char*, const char*);
-char* Join(Allocator*, const char*, const char*, const char*, const char*, const char*);
+char* Join(Arena*, const char*, const char*, const char*);
+char* Join(Arena*, const char*, const char*, const char*, const char*, const char*);
 char* Join(const char* s1, const char* s2, const char* s3 = nullptr);
 
 bool Eq(const char* s1, const char* s2);
@@ -181,6 +160,7 @@ bool IsAlNum(char c);
 
 const char* FindChar(const char* str, char c);
 char* FindChar(char* str, char c);
+int FindCharIdx(const char* str, char c);
 const char* FindCharLast(const char* str, char c);
 char* FindCharLast(char* str, char c);
 const char* Find(const char* str, const char* find);
@@ -192,7 +172,7 @@ bool ContainsI(const char* s, const char* txt);
 
 bool BufFmtV(char* buf, size_t bufCchSize, const char* fmt, va_list args);
 bool BufFmt(char* buf, size_t bufCchSize, const char* fmt, ...);
-char* FmtVWithAllocator(Allocator* a, const char* fmt, va_list args);
+char* FmtVWithAllocator(Arena* a, const char* fmt, va_list args);
 char* FmtV(const char* fmt, va_list args);
 char* Format(const char* fmt, ...);
 
@@ -217,7 +197,7 @@ const char* Parse(const char* str, size_t len, const char* fmt, ...);
 
 int CmpNatural(const char*, const char*);
 
-TempStr FormatFloatWithThousandSepTemp(double number, LCID locale = LOCALE_USER_DEFAULT);
+TempStr FormatFloatWithThousandSepTemp(double number, LCID locale = LOCALE_USER_DEFAULT, bool stripTrailingZero = true);
 TempStr FormatNumWithThousandSepTemp(i64 num, LCID locale = LOCALE_USER_DEFAULT);
 TempStr FormatSizeShortTemp(i64 size, const char* sizeUnits[3]);
 TempStr FormatFileSizeTemp(i64);
@@ -227,10 +207,10 @@ bool IsEmptyOrWhiteSpace(const char*);
 bool Skip(const char*& s, const char* toSkip);
 const char* SkipChar(const char* s, char toSkip);
 
-WCHAR* Dup(Allocator*, const WCHAR* str, size_t cch = (size_t)-1);
+WCHAR* Dup(Arena*, const WCHAR* str, size_t cch = (size_t)-1);
 WCHAR* Dup(const WCHAR* s, size_t cch = (size_t)-1);
 WCHAR* Join(const WCHAR*, const WCHAR*, const WCHAR* s3 = nullptr);
-WCHAR* Join(Allocator*, const WCHAR*, const WCHAR*, const WCHAR* s3);
+WCHAR* Join(Arena*, const WCHAR*, const WCHAR*, const WCHAR* s3);
 bool Eq(const WCHAR*, const WCHAR*);
 bool EqI(const WCHAR*, const WCHAR*);
 bool EqN(const WCHAR*, const WCHAR*, size_t);
@@ -255,7 +235,7 @@ bool IsNonCharacter(WCHAR c);
 size_t TransCharsInPlace(WCHAR* str, const WCHAR* oldChars, const WCHAR* newChars);
 WCHAR* Replace(const WCHAR* s, const WCHAR* toReplace, const WCHAR* replaceWith);
 
-WCHAR* ToWCHAR(const char* s);
+WCHAR* CastToWCHAR(const char* s);
 } // namespace str
 
 namespace url {
@@ -281,10 +261,9 @@ const char* IdxToStr(SeqStrings strs, int idx);
 #define _MemToHex(ptr) str::MemToHex((const u8*)(ptr), sizeof(*ptr))
 #define _HexToMem(txt, ptr) str::HexToMem(txt, (u8*)(ptr), sizeof(*ptr))
 
-namespace str {
-struct Str {
+struct StrBuilder {
     // allocator is not owned by Vec and must outlive it
-    Allocator* allocator = nullptr;
+    Arena* allocator = nullptr;
     // TODO: to save space (8 bytes), combine els and buf?
     char* els = nullptr;
     u32 len = 0;
@@ -295,12 +274,12 @@ struct Str {
 
     static constexpr size_t kBufChars = dimof(buf);
 
-    explicit Str(size_t capHint = 0, Allocator* allocator = nullptr);
-    Str(const Str& that);
-    Str& operator=(const Str& that);
-    Str(const char*); // NOLINT
+    explicit StrBuilder(size_t capHint = 0, Arena* allocator = nullptr);
+    StrBuilder(const StrBuilder& that);
+    StrBuilder& operator=(const StrBuilder& that);
+    StrBuilder(const char*); // NOLINT
 
-    ~Str();
+    ~StrBuilder();
 
     void Reset();
     char& at(size_t idx) const;
@@ -318,11 +297,11 @@ struct Str {
     bool AppendChar(char c);
     bool Append(const char* src, size_t count = -1);
     bool Append(const StrSpan&);
-    bool Append(const Str& s);
+    bool Append(const StrBuilder& s);
     char RemoveAt(size_t idx, size_t count = 1);
     char RemoveLast();
     char& Last() const;
-    char* StealData(Allocator* a = nullptr);
+    char* StealData(Arena* a = nullptr);
     char* LendData() const;
     bool Contains(const char* s, size_t sLen = 0);
     bool IsEmpty() const;
@@ -340,19 +319,13 @@ struct Str {
     // https://stackoverflow.com/questions/16504062/how-to-make-the-for-each-loop-function-in-c-work-with-a-custom-class
     using iterator = char*;
 
-    iterator begin() const {
-        return &(els[0]);
-    }
-    iterator end() const {
-        return &(els[len]);
-    }
+    iterator begin() const { return &(els[0]); }
+    iterator end() const { return &(els[len]); }
 };
 
-// bool Replace(Str& s, const char* toReplace, const char* replaceWith);
-
-struct WStr {
+struct WStrBuilder {
     // allocator is not owned by Vec and must outlive it
-    Allocator* allocator = nullptr;
+    Arena* allocator = nullptr;
     WCHAR* els = nullptr;
     u32 len = 0;
     u32 cap = 0;
@@ -361,11 +334,11 @@ struct WStr {
     static constexpr size_t kBufChars = dimof(buf);
     static constexpr size_t kElSize = sizeof(WCHAR);
 
-    explicit WStr(size_t capHint = 0, Allocator* allocator = nullptr);
-    WStr(const WStr&);
-    WStr(const WCHAR*); // NOLINT
-    WStr& operator=(const WStr& that);
-    ~WStr();
+    explicit WStrBuilder(size_t capHint = 0, Arena* allocator = nullptr);
+    WStrBuilder(const WStrBuilder&);
+    WStrBuilder(const WCHAR*); // NOLINT
+    WStrBuilder& operator=(const WStrBuilder& that);
+    ~WStrBuilder();
     void Reset();
     WCHAR& at(size_t idx) const;
     WCHAR& at(int idx) const;
@@ -399,18 +372,21 @@ struct WStr {
     // https://stackoverflow.com/questions/16504062/how-to-make-the-for-each-loop-function-in-c-work-with-a-custom-class
     using iterator = WCHAR*;
 
-    iterator begin() const {
-        return &(els[0]);
-    }
-    iterator end() const {
-        return &(els[len]);
-    }
+    iterator begin() const { return &(els[0]); }
+    iterator end() const { return &(els[len]); }
 };
 
-bool Replace(WStr& s, const WCHAR* toReplace, const WCHAR* replaceWith);
+namespace str {
+
+bool Replace(WStrBuilder& s, const WCHAR* toReplace, const WCHAR* replaceWith);
 
 } // namespace str
 
 int ParseInt(const char* bytes);
+i64 ParseInt64(const char* s);
 bool IsValidProgramVersion(const char* ver);
 int CompareProgramVersion(const char* ver1, const char* ver2);
+TempStr ShortenStringUtf8Temp(const char* s, int maxRunes);
+TempStr ShortenStringUtf8InTheMiddleTemp(const char* s, int maxRunes);
+bool IsTextRtl(const WCHAR* s);
+bool IsTextRtl(const char* s);

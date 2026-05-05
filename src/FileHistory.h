@@ -6,10 +6,6 @@
 //  to be remembered and not individual view settings per document)
 #define kFileHistoryMaxRecent 10
 
-// maximum number of most frequently used files that will be shown on the
-// Frequent Read list (space permitting)
-#define kFileHistoryMaxFrequent 30
-
 struct FileHistory {
     // owned by gGlobalPrefs->fileStates
     Vec<FileState*>* states = nullptr;
@@ -26,6 +22,7 @@ struct FileHistory {
     FileState* MarkFileLoaded(const char* filePath) const;
     bool MarkFileInexistent(const char* filePath, bool hide = false) const;
     void GetFrequencyOrder(Vec<FileState*>& list) const;
+    void GetRecentlyOpenedOrder(Vec<FileState*>& list) const;
     void Purge(bool alwaysUseDefaultState = false) const;
     void UpdateStatesSource(Vec<FileState*>* states);
 };

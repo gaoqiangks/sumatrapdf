@@ -41,7 +41,7 @@
 static int usage(void)
 {
 	fprintf(stderr,
-		"usage: mutool clean [options] input.pdf [output.pdf] [pages]\n"
+		"Usage: SumatraPDF clean [options] input.pdf [output.pdf] [pages]\n"
 		"\t-p -\tpassword\n"
 		"\t-g\tgarbage collect unused objects\n"
 		"\t-gg\tin addition to -g compact xref table\n"
@@ -64,6 +64,7 @@ static int usage(void)
 		"\t-t\tcompact object syntax\n"
 		"\t-tt\tindented object syntax\n"
 		"\t-L\twrite object labels\n"
+		"\t-v\tvectorize text\n"
 		"\t-A\tcreate appearance streams for annotations\n"
 		"\t-AA\trecreate appearance streams for annotations\n"
 		"\t-m\tpreserve metadata\n"
@@ -72,6 +73,7 @@ static int usage(void)
 		"\t--{color,gray,bitonal}-{,lossy-,lossless-}image-subsample-method -\n\t\taverage, bicubic\n"
 		"\t--{color,gray,bitonal}-{,lossy-,lossless-}image-subsample-dpi -[,-]\n\t\tDPI at which to subsample [+ target dpi]\n"
 		"\t--{color,gray,bitonal}-{,lossy-,lossless-}image-recompress-method -[:quality]\n\t\tnever, same, lossless, jpeg, j2k, fax, jbig2\n"
+		"\t--recompress-images-when -\n\t\tsmaller (default), always\n"
 		"\t--structure=keep|drop\tKeep or drop the structure tree\n"
 		"\tpages\tcomma separated list of page numbers and ranges\n"
 		);
@@ -126,6 +128,8 @@ int pdfclean_main(int argc, char **argv)
 
 		{ "structure=drop|keep", &structure, (void *)22 },
 
+		{ "recompress-images-when=smaller|always", &opts.image.recompress_when, (void *)23 },
+
 		{ NULL, NULL, NULL }
 	};
 
@@ -133,7 +137,7 @@ int pdfclean_main(int argc, char **argv)
 	opts.write = pdf_default_write_options;
 	opts.write.dont_regenerate_id = 1;
 
-	while ((c = fz_getopt_long(argc, argv, "ade:fgilmp:stczDAE:LO:U:P:SZ", longopts)) != -1)
+	while ((c = fz_getopt_long(argc, argv, "ade:fgilmp:stcvzDAE:LO:U:P:SZ", longopts)) != -1)
 	{
 		switch (c)
 		{
@@ -161,6 +165,7 @@ int pdfclean_main(int argc, char **argv)
 		case 'm': opts.write.do_preserve_metadata = 1; break;
 		case 'S': opts.subset_fonts = 1; break;
 		case 'Z': opts.write.do_use_objstms = 1; break;
+		case 'v': opts.vectorize++; break;
 		case 0:
 		{
 			switch((int)(intptr_t)fz_optlong->opaque)
@@ -240,6 +245,8 @@ int pdfclean_main(int argc, char **argv)
 				break;
 			case 22: /* structure */
 				opts.structure = structure; /* Allow for int/enum size mismatch. */
+				break;
+			case 23: /* recompress-when */
 				break;
 			}
 			break;

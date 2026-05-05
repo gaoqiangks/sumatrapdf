@@ -12,24 +12,20 @@ namespace uitask {
 
 static HWND gTaskDispatchHwnd = nullptr;
 
-static UINT GetExecuteTaskMessage() {
-    static UINT gExecuteTaskMessage = 0;
-    if (!gExecuteTaskMessage) {
-        gExecuteTaskMessage = RegisterWindowMessageW(L"UITask_Msg_StdFunction");
-    }
-    return gExecuteTaskMessage;
-}
+UINT gExecuteTaskMessage = 0;
+
+static DWORD gMainUIThreadId = 0;
 
 static LRESULT CALLBACK WndProcTaskDispatch(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
-    UINT wmExecTask = GetExecuteTaskMessage();
-    if (wmExecTask == msg) {
+    if (gExecuteTaskMessage == msg) {
         Kind kind = (Kind)wp;
         auto func = (Func0*)lp;
-        if (kind != nullptr) {
+        bool shouldLog = (kind != nullptr) && !str::Eq(kind, "RenderFinished");
+        if (shouldLog) {
             logf("uitask::WndProcTaskDispatch: will execute '%s', func 0x%p\n", kind, (void*)func);
         }
         func->Call();
-        if (kind != nullptr) {
+        if (shouldLog) {
             logf("uitask::WndProcTaskDispatch: did execute, will delete func 0x%p\n", (void*)func);
         }
         delete func;
@@ -38,9 +34,13 @@ static LRESULT CALLBACK WndProcTaskDispatch(HWND hwnd, UINT msg, WPARAM wp, LPAR
     return DefWindowProc(hwnd, msg, wp, lp);
 }
 
-#define UITASK_CLASS_NAME L"UITask_Wnd_Class"
+constexpr const WCHAR* UITASK_CLASS_NAME = L"UITask_Wnd_Class";
 
 void Initialize() {
+    gMainUIThreadId = GetCurrentThreadId();
+
+    ReportIf(gExecuteTaskMessage != 0);
+    gExecuteTaskMessage = RegisterWindowMessageA("UITask_Msg_StdFunction");
     WNDCLASSEX wcex;
     FillWndClassEx(wcex, UITASK_CLASS_NAME, WndProcTaskDispatch);
     RegisterClassEx(&wcex);
@@ -48,7 +48,7 @@ void Initialize() {
     ReportIf(gTaskDispatchHwnd);
     auto cls = UITASK_CLASS_NAME;
     auto title = L"UITask Dispatch Window";
-    auto m = GetModuleHandle(nullptr);
+    auto m = GetModuleHandleW(nullptr);
     DWORD style = WS_OVERLAPPED;
     gTaskDispatchHwnd = CreateWindowExW(0, cls, title, style, 0, 0, 0, 0, HWND_MESSAGE, nullptr, m, nullptr);
 }
@@ -56,7 +56,7 @@ void Initialize() {
 void DrainQueue() {
     ReportIf(!gTaskDispatchHwnd);
     MSG msg;
-    UINT wmExecTask = GetExecuteTaskMessage();
+    UINT wmExecTask = gExecuteTaskMessage;
     while (PeekMessage(&msg, gTaskDispatchHwnd, wmExecTask, wmExecTask, PM_REMOVE)) {
         DispatchMessage(&msg);
     }
@@ -70,12 +70,15 @@ void Destroy() {
 
 void Post(const Func0& f, Kind kind) {
     auto func = new Func0(f);
-    UINT wmExecTask = GetExecuteTaskMessage();
-    PostMessageW(gTaskDispatchHwnd, wmExecTask, (WPARAM)kind, (LPARAM)func);
+    PostMessageW(gTaskDispatchHwnd, gExecuteTaskMessage, (WPARAM)kind, (LPARAM)func);
 } // NOLINT
 
+bool IsMainUIThread() {
+    return GetCurrentThreadId() == gMainUIThreadId;
+}
+
 void PostOptimized(const Func0& f, Kind kind) {
-    if (IsGUIThread(FALSE)) {
+    if (IsMainUIThread()) {
         // if we're already on ui thread, execute immediately
         // faster and easier to debug
         f.Call();

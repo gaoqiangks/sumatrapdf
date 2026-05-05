@@ -1,7 +1,18 @@
 /* Copyright 2022 the SumatraPDF project authors (see AUTHORS file).
    License: GPLv3 */
 
-enum class PaperFormat { Other, A2, A3, A4, A5, A6, Letter, Legal, Tabloid, Statement };
+enum class PaperFormat {
+    Other,
+    A2,
+    A3,
+    A4,
+    A5,
+    A6,
+    Letter,
+    Legal,
+    Tabloid,
+    Statement
+};
 PaperFormat GetPaperFormatFromSizeApprox(SizeF size);
 
 struct Printer {
@@ -33,6 +44,10 @@ struct Printer {
 };
 
 Printer* NewPrinter(const char* name);
+void GetPrintersInfo(StrBuilder& out);
+
+class EngineBase;
+struct MainWindow;
 
 bool PrintFile(const char* fileName, char* printerName = nullptr, bool displayErrors = true,
                const char* settings = nullptr);

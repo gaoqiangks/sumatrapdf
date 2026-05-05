@@ -7,12 +7,14 @@
 constexpr int kInvalidPageNo = -1;
 
 struct Annotation;
+struct PageRenderRequest;
 enum class AnnotationType;
 
 /* Describes many attributes of one page in one, convenient place */
 struct PageInfo {
     /* data that is constant for a given page. page size in document units */
-    RectF page{};
+    RectF _mediaBox{};
+    PageInfoState state = PageInfoState::Unknown;
 
     /* data that is calculated when needed. actual content size within a page (View target) */
     RectF contentBox{};
@@ -32,9 +34,10 @@ struct PageInfo {
     // or kZoomFitContent, this is per-page zoom level
     float zoomReal;
 
-    /* data that needs to be set before DisplayModel::Relayout().
-       Determines whether a given page should be shown on the screen. */
-    bool shown = false;
+    bool isShown = false;
+
+    // set to true if rendering this page failed (e.g. corrupt image data)
+    bool failedToRender = false;
 };
 
 /* The current scroll state (needed for saving/restoring the scroll position) */
@@ -50,7 +53,6 @@ struct ScrollState {
     int page = 0;
 };
 
-struct DocumentTextCache;
 struct TextSelection;
 struct TextSearch;
 struct TextSel;
@@ -127,12 +129,12 @@ struct DisplayModel : DocController {
 
     Synchronizer* pdfSync = nullptr;
 
-    DocumentTextCache* textCache = nullptr;
     TextSelection* textSelection = nullptr;
     // access only from Search thread
     TextSearch* textSearch = nullptr;
 
     PageInfo* GetPageInfo(int pageNo) const;
+    RectF PageMediaBox(int pageNo) const;
 
     /* current rotation selected by user */
     int GetRotation() const;
@@ -240,7 +242,7 @@ struct DisplayModel : DocController {
        except for kZoomFitPage, kZoomFitWidth and kZoomFitContent */
     float zoomReal{kInvalidZoom};
     float zoomVirtual{kInvalidZoom};
-    int rotation = {0};
+    int rotation = 0;
     /* dpi correction factor by which _zoomVirtual has to be multiplied in
        order to get _zoomReal */
     float dpiFactor{1.0f};
@@ -250,7 +252,7 @@ struct DisplayModel : DocController {
     Vec<ScrollState> navHistory;
     /* index of the "current" history entry (to be updated on navigation),
        resp. number of Back history entries */
-    size_t navHistoryIdx = {0};
+    size_t navHistoryIdx = 0;
 
     /* whether to display pages Left-to-Right or Right-to-Left.
        this value is extracted from the PDF document */
@@ -261,6 +263,9 @@ struct DisplayModel : DocController {
 
     /* allow resizing a window without triggering a new rendering (needed for window destruction) */
     bool pauseRendering = false;
+
+    void RenderFinished(PageRenderRequest* req);
+    void RenderFinishedAsync(PageRenderRequest* req);
 };
 
 extern bool gPredictiveRender;

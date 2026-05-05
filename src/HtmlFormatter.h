@@ -62,8 +62,7 @@ struct DrawInstr {
 
     DrawInstr() = default;
 
-    explicit DrawInstr(DrawInstrType t, RectF bbox = {}) : type(t), bbox(bbox) {
-    }
+    explicit DrawInstr(DrawInstrType t, RectF bbox = {}) : type(t), bbox(bbox) {}
     ByteSlice GetImage() {
         ReportIf(type != DrawInstrType::Image);
         return {(u8*)str.s, str.len};
@@ -84,7 +83,12 @@ struct StyleRule {
     HtmlTag tag = Tag_NotFound;
     u32 classHash = 0;
 
-    enum Unit { px, pt, em, inherit };
+    enum Unit {
+        px,
+        pt,
+        em,
+        inherit
+    };
 
     float textIndent = 0;
     Unit textIndentUnit = inherit;
@@ -107,8 +111,7 @@ struct DrawStyle {
 struct IPageElement;
 
 struct HtmlPage {
-    explicit HtmlPage(int reparseIdx = 0) : reparseIdx(reparseIdx) {
-    }
+    explicit HtmlPage(int reparseIdx = 0) : reparseIdx(reparseIdx) {}
 
     Vec<DrawInstr> instructions;
     // if we start parsing html again from reparseIdx, we should
@@ -129,13 +132,9 @@ struct HtmlFormatterArgs {
     float pageDx = 0;
     float pageDy = 0;
 
-    void SetFontName(const WCHAR* s) {
-        fontName.SetCopy(s);
-    }
+    void SetFontName(const WCHAR* s) { fontName.SetCopy(s); }
 
-    const WCHAR* GetFontName() const {
-        return fontName;
-    }
+    const WCHAR* GetFontName() const { return fontName; }
 
     float fontSize = 0;
 
@@ -143,7 +142,7 @@ struct HtmlFormatterArgs {
        that is read-only and outlives us. Sometimes (e.g. when resolving
        html entities) we need a modified text. This allocator is
        used to allocate this text. */
-    Allocator* textAllocator = nullptr;
+    Arena* textAllocator = nullptr;
 
     mui::TextRenderMethod textRenderMethod = mui::TextRenderMethod::Gdiplus;
 
@@ -179,12 +178,9 @@ class HtmlFormatter {
     void HandleText(HtmlToken* t);
     void HandleText(const char* s, size_t sLen);
     // blank convenience methods to override
-    virtual void HandleTagImg(HtmlToken* t) {
-    }
-    virtual void HandleTagPagebreak(HtmlToken*) {
-    }
-    virtual void HandleTagLink(HtmlToken*) {
-    }
+    virtual void HandleTagImg(HtmlToken* t) {}
+    virtual void HandleTagPagebreak(HtmlToken*) {}
+    virtual void HandleTagLink(HtmlToken*) {}
 
     float CurrLineDx();
     float CurrLineDy();
@@ -205,12 +201,8 @@ class HtmlFormatter {
     void ForceNewPage();
     bool EnsureDx(float dx);
 
-    DrawStyle* CurrStyle() {
-        return &styleStack.Last();
-    }
-    mui::CachedFont* CurrFont() {
-        return CurrStyle()->font;
-    }
+    DrawStyle* CurrStyle() { return &styleStack.Last(); }
+    mui::CachedFont* CurrFont() { return CurrStyle()->font; }
     void SetFont(const WCHAR* fontName, FontStyle fs, float fontSize = -1);
     void SetFontBasedOn(mui::CachedFont* origFont, FontStyle fs, float fontSize = -1);
     void ChangeFontStyle(FontStyle fs, bool addStyle);
@@ -235,7 +227,7 @@ class HtmlFormatter {
     Graphics* gfx = nullptr; // for measuring text
     AutoFreeWStr defaultFontName;
     float defaultFontSize = 0;
-    Allocator* textAllocator = nullptr;
+    Arena* textAllocator = nullptr;
     mui::ITextRender* textMeasure = nullptr;
 
     // style stack of the current line
@@ -297,4 +289,4 @@ void DrawHtmlPage(Graphics* g, mui::ITextRender* textDraw, Vec<DrawInstr>* drawI
 
 mui::TextRenderMethod GetTextRenderMethod();
 void SetTextRenderMethod(mui::TextRenderMethod method);
-HtmlFormatterArgs* CreateFormatterDefaultArgs(int dx, int dy, Allocator* textAllocator = nullptr);
+HtmlFormatterArgs* CreateFormatterDefaultArgs(int dx, int dy, Arena* textAllocator = nullptr);

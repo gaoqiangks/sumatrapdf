@@ -44,7 +44,7 @@ struct Flags {
     char* forwardSearchOrigin = nullptr;
     int forwardSearchLine = 0;
     bool reuseDdeInstance = false;
-    char* destName = nullptr;
+    char* namedDest = nullptr;
     int pageNumber = -1;
     bool restrictedUse = false;
     bool enterPresentation = false;
@@ -80,12 +80,16 @@ struct Flags {
     int stressParallelCount = 1;
     bool stressRandomizeFiles = false;
     int stressTestMax = 0;
+    int maxFiles = 0;
 
     // related to testing
     bool testRenderPage = false;
     bool testExtractPage = false;
     int testPageNo = 0;
     bool testApp = false;
+    bool testPlugin = false;
+    bool testPreview = false;
+    char* upgradeFrom = nullptr;
     char* dde = nullptr;
     bool engineDump = false; // -engine-dump
 
@@ -104,8 +108,10 @@ struct Flags {
     bool withPreview = false;
     bool justExtractFiles = false;
     bool log = false;
+    char* logFile = nullptr;
     bool allUsers = false;
     bool runInstallNow = false;
+    bool storeInstaller = false;
 
     // for internal use
     char* updateSelfTo = nullptr;
@@ -119,7 +125,7 @@ struct Flags {
     ~Flags();
 };
 
-void ParseFlags(const WCHAR* cmdLine, Flags&);
+void ParseFlags(const WCHAR* cmdLine, Flags&, const char* toolNames = nullptr);
 
 bool IsValidPageRange(const char* ranges);
 bool IsBenchPagesInfo(const char* s);

@@ -13,11 +13,11 @@ const char* gLogAppName = "SumatraPDF";
 
 Mutex gLogMutex;
 
-// we use HeapAllocator because we can do logging during crash handling
+// we use a dedicated Arena so we can do logging during crash handling
 // where we want to avoid allocator deadlocks by calling malloc()
-HeapAllocator* gLogAllocator = nullptr;
+Arena* gLogAllocator = nullptr;
 
-str::Str* gLogBuf = nullptr;
+StrBuilder* gLogBuf = nullptr;
 bool gLogToConsole = false;
 // we always log if IsDebuggerPresent()
 // this forces logging to debuger always
@@ -35,6 +35,7 @@ bool gSkipDuplicateLines = false;
 
 bool gLogToPipe = true;
 HANDLE hLogPipe = INVALID_HANDLE_VALUE;
+static Mutex gPipeMutex;
 
 char* gLogFilePath = nullptr;
 
@@ -61,6 +62,27 @@ static const char* getWinError(DWORD errCode) {
 }
 #endif
 
+static LARGE_INTEGER lastPipeOpenTryTime = {};
+
+static void maybeOpenLogPipe() {
+    // only re-try every 10 secs to minimize cost because pipe is rarely
+    // opened and logging is frequent
+    if (lastPipeOpenTryTime.QuadPart != 0) {
+        LARGE_INTEGER freq;
+        QueryPerformanceFrequency(&freq);
+        LARGE_INTEGER now;
+        QueryPerformanceCounter(&now);
+        double diffSecs =
+            static_cast<double>(now.QuadPart - lastPipeOpenTryTime.QuadPart) / static_cast<double>(freq.QuadPart);
+        if (diffSecs < 10.0f) {
+            return;
+        }
+    }
+    QueryPerformanceCounter(&lastPipeOpenTryTime);
+    hLogPipe = CreateFileW(kPipeName, GENERIC_WRITE, 0, nullptr, OPEN_EXISTING, 0, nullptr);
+    // TODO: retry if ERROR_PIPE_BUSY?
+}
+
 static void logToPipe(const char* s, size_t n = 0) {
     if (!gLogToPipe) {
         return;
@@ -72,26 +94,18 @@ static void logToPipe(const char* s, size_t n = 0) {
         n = str::Len(s);
     }
 
+    gPipeMutex.Lock();
+
     DWORD cbWritten = 0;
     BOOL ok = false;
     bool didConnect = false;
     if (!IsValidHandle(hLogPipe)) {
-        // try open pipe for logging
-        hLogPipe = CreateFileW(kPipeName, GENERIC_WRITE, 0, nullptr, OPEN_EXISTING, 0, nullptr);
+        maybeOpenLogPipe();
         if (!IsValidHandle(hLogPipe)) {
-            // TODO: retry if ERROR_PIPE_BUSY ?
-            // TODO: maybe remember when last we tried to open it and don't try to open for the
-            // next 10 secs, to minimize CreateFileW() calls
+            gPipeMutex.Unlock();
             return;
         }
         didConnect = true;
-    }
-
-    // TODO: do I need this if I don't read from the pipe?
-    DWORD mode = PIPE_READMODE_MESSAGE;
-    ok = SetNamedPipeHandleState(hLogPipe, &mode, nullptr, nullptr);
-    if (!ok) {
-        OutputDebugStringA("logPipe: SetNamedPipeHandleState() failed\n");
     }
 
     if (didConnect) {
@@ -101,27 +115,31 @@ static void logToPipe(const char* s, size_t n = 0) {
     }
 
     DWORD cb = (DWORD)n;
-    // TODO: what happens when we write more than the server can read?
-    // should I loop if cbWritten < cb?
     ok = WriteFile(hLogPipe, s, cb, &cbWritten, nullptr);
     if (!ok) {
-#if 0
-        DWORD err = GetLastError();
-        OutputDebugStringA("logPipe: WriteFile() failed with error: ");
-        char buf[256]{};
-        snprintf(buf, sizeof(buf) - 1, "%d %s\n", (int)err, getWinError(err));
-        OutputDebugStringA(buf);
-#endif
         CloseHandle(hLogPipe);
         hLogPipe = INVALID_HANDLE_VALUE;
     }
+
+    gPipeMutex.Unlock();
 }
 
-// verbose log, only to debugger and pipeAdd commentMore actions
+// to use in
+void logPipe(const char* fmt, ...) {
+    if (!gLogToPipe) return;
+    va_list args;
+    va_start(args, fmt);
+    AutoFreeStr s = str::FmtV(fmt, args);
+    logToPipe(s.Get());
+    va_end(args);
+}
+
+// verbose log, only to pipe
+// used to log to debugger but 10x shows it and is really slow
 void logv(const char* s) {
-    if (gLogToDebugger || IsDebuggerPresent()) {
-        OutputDebugStringA(s);
-    }
+    // if (gLogToDebugger || IsDebuggerPresent()) {
+    //     OutputDebugStringA(s);
+    // }
     logToPipe(s);
 }
 
@@ -139,7 +157,7 @@ void logValueSize(const char* name, i64 v) {
     logToPipe(s);
 }
 
-void log(const char* s, bool always) {
+static void log2(const char* s, bool always) {
     bool skipLog = !always && gSkipDuplicateLines && gLogBuf && gLogBuf->Contains(s);
 
     if (!skipLog) {
@@ -168,8 +186,8 @@ void log(const char* s, bool always) {
     };
 
     if (!gLogBuf) {
-        gLogAllocator = new HeapAllocator();
-        gLogBuf = new str::Str(32 * 1024, gLogAllocator);
+        gLogAllocator = ArenaNew();
+        gLogBuf = new StrBuilder(32 * 1024, gLogAllocator);
     } else {
         if (gLogBuf->Size() > kMaxLogBuf) {
             // TODO: use gLogBuf->Clear(), which doesn't free the allocated space
@@ -201,11 +219,16 @@ void log(const char* s, bool always) {
     logToPipe(s, n);
     gLogMutex.Unlock();
 }
+
+void log(const char* s) {
+    log2(s, false);
+}
+
 void loga(const char* s) {
     if (gDestroyedLogging) {
         return;
     }
-    log(s, true);
+    log2(s, true);
 }
 
 void logf(const char* fmt, ...) {
@@ -216,7 +239,7 @@ void logf(const char* fmt, ...) {
     va_list args;
     va_start(args, fmt);
     AutoFreeStr s = str::FmtV(fmt, args);
-    log(s.Get(), false);
+    log2(s.Get(), false);
     va_end(args);
 }
 
@@ -228,7 +251,7 @@ void logfa(const char* fmt, ...) {
     va_list args;
     va_start(args, fmt);
     char* s = str::FmtV(fmt, args);
-    log(s, true);
+    log2(s, true);
     str::Free(s);
     va_end(args);
 }
@@ -237,11 +260,12 @@ void StartLogToFile(const char* path, bool removeIfExists) {
     ReportIf(gLogFilePath);
     gLogFilePath = str::Dup(path);
     if (removeIfExists) {
-        remove(path);
+        file::Delete(path);
     }
 }
 
 bool WriteCurrentLogToFile(const char* path) {
+    if (!gLogBuf) return false;
     ByteSlice slice = gLogBuf->AsByteSlice();
     if (slice.empty()) {
         return false;
@@ -263,7 +287,7 @@ void DestroyLogging() {
     gLogMutex.Lock();
     delete gLogBuf;
     gLogBuf = nullptr;
-    delete gLogAllocator;
+    ArenaDelete(gLogAllocator);
     gLogAllocator = nullptr;
     gLogMutex.Unlock();
     str::FreePtr(&gLogFilePath);

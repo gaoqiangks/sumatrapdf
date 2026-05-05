@@ -148,7 +148,7 @@ classify_pixmap(fz_context *ctx, fz_pixmap *pix)
 	if (pix->s)
 		return IMAGE_COLOR;
 
-	if (fz_colorspace_is_gray(ctx, pix->colorspace))
+	if (fz_colorspace_is_gray(ctx, pix->colorspace) || pix->colorspace == NULL)
 	{
 		int n = pix->n;
 		int h = pix->h;
@@ -156,7 +156,7 @@ classify_pixmap(fz_context *ctx, fz_pixmap *pix)
 		const unsigned char *s = pix->samples;
 
 		/* Loop until we know it's not bitonal */
-		if (pix->alpha)
+		if (pix->alpha && pix->n > 1)
 		{
 			while (h--)
 			{
@@ -428,18 +428,6 @@ resample(fz_context *ctx, fz_pixmap *src, int method, float from_dpi, float to_d
 	return fz_keep_pixmap(ctx, src);
 }
 
-static int
-fmt_is_lossy(int fmt)
-{
-	if (fmt == FZ_IMAGE_JBIG2 ||
-		fmt == FZ_IMAGE_JPEG ||
-		fmt == FZ_IMAGE_JPX ||
-		fmt == FZ_IMAGE_JXR)
-		return 1;
-
-	return 0;
-}
-
 static fz_compressed_buffer *
 fz_recompress_image_as_jpeg(fz_context *ctx, fz_pixmap *pix, const char *quality, fz_colorspace **cs)
 {
@@ -692,6 +680,7 @@ recompress_image(fz_context *ctx, fz_pixmap *pix, int type, int fmt, int method,
 		if (cbuf)
 		{
 			bpc = 1;
+			if (!oldimg->imagemask)
 			cs = fz_device_gray(ctx);
 		}
 	}
@@ -703,7 +692,7 @@ recompress_image(fz_context *ctx, fz_pixmap *pix, int type, int fmt, int method,
 
 	/* fz_new_image_from_compressed_buffer takes ownership of compressed buffer, even
 	 * in failure case. */
-	return fz_new_image_from_compressed_buffer(ctx, pix->w, pix->h, bpc, cs, pix->xres, pix->yres, interpolate, 0, NULL, NULL, cbuf, oldimg->mask);
+	return fz_new_image_from_compressed_buffer(ctx, pix->w, pix->h, bpc, cs, pix->xres, pix->yres, interpolate, oldimg->imagemask, NULL, NULL, cbuf, oldimg->mask);
 }
 
 static void
@@ -717,7 +706,7 @@ do_image_rewrite(fz_context *ctx, void *opaque, fz_image **image, fz_matrix ctm,
 	fz_pixmap *newpix = NULL;
 	image_type type;
 	int fmt = fz_compressed_image_type(ctx, *image);
-	int lossy = fmt_is_lossy(fmt);
+	int lossy = fz_is_lossy_image(ctx, *image);
 	size_t orig_len = pdf_dict_get_int64(ctx, im_obj, PDF_NAME(Length));
 
 	/* FIXME: We don't recompress im_obj->mask! */
@@ -744,6 +733,10 @@ do_image_rewrite(fz_context *ctx, void *opaque, fz_image **image, fz_matrix ctm,
 	/* What sort of image is this? */
 	pix = fz_get_pixmap_from_image(ctx, *image, NULL, NULL, NULL, NULL);
 	type = classify_pixmap(ctx, pix);
+
+	/* get_pixmap "helpfully" inverts imagemasks. So put them back. */
+	if ((*image)->imagemask)
+		fz_invert_pixmap(ctx, pix);
 
 	fz_var(newpix);
 
@@ -840,7 +833,7 @@ do_image_rewrite(fz_context *ctx, void *opaque, fz_image **image, fz_matrix ctm,
 			size_t newsize = fz_image_size(ctx, newimg);
 			if (orig_len != 0)
 				oldsize = orig_len;
-			if (oldsize <= newsize)
+			if (oldsize <= newsize && info->opts->recompress_when == FZ_RECOMPRESS_WHEN_SMALLER)
 			{
 				/* Old one was smaller! Don't mess with it. */
 				fz_drop_image(ctx, newimg);

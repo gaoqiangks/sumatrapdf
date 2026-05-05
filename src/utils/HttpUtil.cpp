@@ -111,7 +111,7 @@ bool HttpGetToFile(const char* urlA, const char* destFilePath, const Func1<HttpP
     WCHAR* url = ToWStrTemp(urlA);
     char* buf = nullptr;
 
-    HttpProgress progress{0};
+    HttpProgress progress{};
 
     WCHAR* pathW = ToWStrTemp(destFilePath);
     HANDLE hf =
@@ -181,8 +181,8 @@ Exit:
     return ok;
 }
 
-bool HttpPost(const char* serverA, int port, const char* urlA, str::Str* headers, str::Str* data) {
-    str::Str resp(2048);
+bool HttpPost(const char* serverA, int port, const char* urlA, StrBuilder* headers, StrBuilder* data) {
+    StrBuilder resp(2048);
     bool ok = false;
     char* hdr = nullptr;
     DWORD hdrLen = 0;

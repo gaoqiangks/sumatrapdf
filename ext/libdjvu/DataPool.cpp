@@ -792,10 +792,6 @@ DataPool::create(const GP<DataPool> & pool, int start, int length)
   DEBUG_MAKE_INDENT(3);
   if (!pool)
     G_THROW( ERR_MSG("DataPool.zero_DataPool") );
-  // SumatraPDF: https://github.com/sumatrapdfreader/sumatrapdf/issues/5035
-  if (start < 0 || length < 0) {
-      G_THROW( ERR_MSG("DataPool.create: Invalid start or length") );
-  }
   DataPool *xpool=new DataPool();
   GP<DataPool> retval=xpool;
   xpool->init();
@@ -1179,8 +1175,7 @@ DataPool::get_data(void * buffer, int offset, int sz, int level)
        if (sz<0)
          sz=0;
        
-       GP<OpenFiles_File> f=fstream;
-       if (!f)
+       GP<OpenFiles_File> f;
          {
            GCriticalSectionLock lock(&class_stream_lock);
            f=fstream;
@@ -1189,8 +1184,10 @@ DataPool::get_data(void * buffer, int offset, int sz, int level)
                fstream=f=OpenFiles::get()->request_stream(furl, this);
              }
          }
+       if (!f)
+         return 0;
        GCriticalSectionLock lock2(&(f->stream_lock));
-       f->stream->seek(start+offset, SEEK_SET); 
+       f->stream->seek(start+offset, SEEK_SET);
        return f->stream->readall(buffer, sz);
      } 
    else
@@ -1402,6 +1399,8 @@ DataPool::load_file(void)
       {
         fstream=f=OpenFiles::get()->request_stream(furl, this);
       }
+      if (!f)
+        return;
       {  // Scope to de-allocate lock2 before stream gets released
          GCriticalSectionLock lock2(&(f->stream_lock));
 

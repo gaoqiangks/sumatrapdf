@@ -244,6 +244,15 @@ next_dctd(fz_context *ctx, fz_stream *stm, size_t max)
 
 			jpeg_read_header(cinfo, 1);
 
+			/* default value is 1 if the image has components and 0 otherwise */
+			if (state->color_transform < 0)
+			{
+				if (cinfo->num_components == 3)
+					state->color_transform = 1;
+				else
+					state->color_transform = 0;
+			}
+
 			/* Adobe APP marker overrides ColorTransform from PDF */
 			if (cinfo->saw_Adobe_marker)
 				state->color_transform = cinfo->Adobe_transform;
@@ -272,8 +281,17 @@ next_dctd(fz_context *ctx, fz_stream *stm, size_t max)
 			state->wp = state->scanline;
 		}
 
-		while (state->rp < state->wp && p < ep)
-			*p++ = *state->rp++;
+		/* Sumatra: bulk memcpy of leftover scanline; byte-by-byte was 20%+ exclusive in profiles */
+		{
+			size_t avail = (size_t)(state->wp - state->rp);
+			size_t space = (size_t)(ep - p);
+			size_t n = avail < space ? avail : space;
+			if (n) {
+				memcpy(p, state->rp, n);
+				p += n;
+				state->rp += n;
+			}
+		}
 
 		while (p < ep)
 		{
@@ -296,8 +314,17 @@ next_dctd(fz_context *ctx, fz_stream *stm, size_t max)
 				state->wp = state->scanline + state->stride;
 			}
 
-			while (state->rp < state->wp && p < ep)
-				*p++ = *state->rp++;
+			/* Sumatra: see note above */
+			{
+				size_t avail = (size_t)(state->wp - state->rp);
+				size_t space = (size_t)(ep - p);
+				size_t n = avail < space ? avail : space;
+				if (n) {
+					memcpy(p, state->rp, n);
+					p += n;
+					state->rp += n;
+				}
+			}
 		}
 		stm->rp = state->buffer;
 		stm->wp = p;
