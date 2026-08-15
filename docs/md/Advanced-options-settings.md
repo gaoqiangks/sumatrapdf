@@ -87,6 +87,11 @@ HomePageSortByFrequentlyRead = false
 ; valid values: thumbnails, list (introduced in version 3.7)
 HomePageViewMode = thumbnails
 
+; directory used to store cached document thumbnails. Empty uses the
+; sumatrapdfcache directory in SumatraPDF's application data directory
+; (introduced in version 3.7)
+CacheDir =
+
 ; valid values: (empty), os, sumatrapdf (introduced in version 3.7)
 FilePicker = 
 

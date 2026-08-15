@@ -6049,28 +6049,22 @@ static void DuplicateInNewWindow(MainWindow* win) {
     DuplicateTabInNewWindow(tab);
 }
 
-// create a new tab in current window and load currently shown document into it
-// meant to make it easy to compare 2 documents side by side
-static void DuplicateInNewTab(MainWindow* win) {
-    if (win->IsCurrentTabAbout()) {
+// Create a new tab in the same window with the same document and view state.
+void DuplicateTabInNewTab(WindowTab* tab) {
+    if (!tab || tab->IsAboutTab() || !tab->filePath) {
         return;
     }
-    if (!win->IsDocLoaded()) {
+    MainWindow* win = tab->win;
+    if (!win) {
         return;
     }
-    WindowTab* currentTab = win->CurrentTab();
-    if (!currentTab || !currentTab->filePath) {
-        return;
-    }
-
-    Str path = currentTab->filePath;
+    Str path = tab->filePath;
     ReportIf(!path);
     if (!path) {
         return;
     }
 
-    // Save current window/tab state before loading new tab
-    TabState* state = NewTabStateFromTab(currentTab);
+    TabState* state = NewTabStateFromTab(tab);
     SaveSettings();
 
     LoadArgs args(path, win);
@@ -6083,6 +6077,14 @@ static void DuplicateInNewTab(MainWindow* win) {
         SetTabState(win->CurrentTab(), state);
         DeleteTabState(state);
     }
+}
+
+// Create a copy of the current tab, making it easy to compare two views.
+static void DuplicateInNewTab(MainWindow* win) {
+    if (win->IsCurrentTabAbout() || !win->IsDocLoaded()) {
+        return;
+    }
+    DuplicateTabInNewTab(win->CurrentTab());
 }
 
 // File-type filters for IFileOpenDialog. Heap-owned wide strings stay alive

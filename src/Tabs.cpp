@@ -371,7 +371,11 @@ static MenuDef menuDefContextTab[] = {
         CmdDuplicateInNewWindow,
     },
     {
-        _TRN("Change Tab Color"),
+        _TRN("Duplicate Tab"),
+        CmdDuplicateInNewTab,
+    },
+    {
+        _TRN("Set Tab Color"),
         CmdSetTabColor,
     },
     {
@@ -554,6 +558,10 @@ static void TabsContextMenu(TabsCtrl* tabsCtrl, VirtMouseEvent* ev) {
         }
         case CmdDuplicateInNewWindow: {
             DuplicateTabInNewWindow(tabUnderMouse);
+            return;
+        }
+        case CmdDuplicateInNewTab: {
+            DuplicateTabInNewTab(tabUnderMouse);
             return;
         }
         case CmdProperties: {

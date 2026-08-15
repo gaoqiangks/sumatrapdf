@@ -44,7 +44,7 @@ static const int kIdPreset0 = 10;
 static const int kIdCustom0 = 20;
 
 // HSV picker, hex edit, swatches and OK/Cancel. Same WindowBase layout as
-// Settings. Used for both Change Background Color and Change Tab Color.
+// Settings. Used for both Change Background Color and Set Tab Color.
 struct ChangeColorWnd : WindowBase {
     ~ChangeColorWnd() override;
 
@@ -743,7 +743,7 @@ void ChangeColorWnd::SetTargetTab(MainWindow* mainWin, WindowTab* colorTab) {
     selectedCustomIdx = -1;
     previewSelected = true;
     if (hwnd) {
-        HwndSetText(hwnd, _TRA("Change Tab Color"));
+        HwndSetText(hwnd, _TRA("Set Tab Color"));
         RelayoutRadios();
         UpdateEditFromColor();
         int dx = DpiScale(400);
@@ -786,7 +786,7 @@ bool ChangeColorWnd::Create(MainWindow* mainWin) {
 
     {
         CreateCustomArgs args;
-        args.title = forTabColor ? _TRA("Change Tab Color") : _TRA("Change Background Color");
+        args.title = forTabColor ? _TRA("Set Tab Color") : _TRA("Change Background Color");
         args.visible = false;
         args.style = WS_POPUPWINDOW | WS_CAPTION;
         args.font = GetFont();

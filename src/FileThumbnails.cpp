@@ -11,6 +11,7 @@
 #include "ImageReader.h"
 
 #include "AppTools.h"
+#include "GlobalPrefs.h"
 #include "FileThumbnails.h"
 
 TempStr GetThumbnailPathTemp(Str filePath) {
@@ -42,8 +43,10 @@ TempStr GetThumbnailPathTemp(Str filePath) {
 }
 
 TempStr GetThumbnailCacheDirTemp() {
-    TempStr thumbsDir = GetPathInAppDataDirTemp("sumatrapdfcache");
-    return thumbsDir;
+    if (gGlobalPrefs && len(gGlobalPrefs->cacheDir) > 0) {
+        return str::DupTemp(gGlobalPrefs->cacheDir);
+    }
+    return GetPathInAppDataDirTemp("sumatrapdfcache");
 }
 
 // Empty rather than remove: SaveThumbnail runs on the UI thread and re-creates

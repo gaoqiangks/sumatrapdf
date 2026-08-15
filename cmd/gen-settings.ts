@@ -814,12 +814,9 @@ const fileEBookUI: Field[] = [
     "white space around the text for this document, in points; one, two or four " +
       "values like EBookUI.Margin. empty uses EBookUI.Margin",
   ).ver("3.7"),
-  field(
-    "LineSpacing",
-    Float,
-    0,
-    "line-height multiplier for this document (e.g. 1.5); 0 uses EBookUI.LineSpacing",
-  ).ver("3.7"),
+  field("LineSpacing", Float, 0, "line-height multiplier for this document (e.g. 1.5); 0 uses EBookUI.LineSpacing").ver(
+    "3.7",
+  ),
   field(
     "LayoutDx",
     Float,
@@ -838,12 +835,7 @@ const fileEBookUI: Field[] = [
     "",
     "whether the CSS in this document is ignored: true or false; " + "empty uses EBookUI.IgnoreDocumentCSS",
   ).ver("3.7"),
-  field(
-    "CustomCSS",
-    Str,
-    "",
-    "additional CSS applied to this document; empty uses EBookUI.CustomCSS",
-  ).ver("3.7"),
+  field("CustomCSS", Str, "", "additional CSS applied to this document; empty uses EBookUI.CustomCSS").ver("3.7"),
 ];
 
 const fileSettings: Field[] = [
@@ -1058,6 +1050,13 @@ const globalPrefs: Field[] = [
   )
     .ver("3.7")
     .doc("valid values: thumbnails, list"),
+  field(
+    "CacheDir",
+    Str,
+    null,
+    "directory used to store cached document thumbnails. Empty uses the sumatrapdfcache directory " +
+      "in SumatraPDF's application data directory",
+  ).ver("3.7"),
   field(
     "FilePicker",
     Str,

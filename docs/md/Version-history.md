@@ -12,7 +12,7 @@ Available in [pre-release](https://www.sumatrapdfreader.org/prerelease) builds.
 - Enter password is a WindowBase dialog like Change Theme; it stays modal because opening an encrypted file has to wait for the password
 - Set inverse search command line is a modeless window like Change Theme instead of a modal dialog
 - Settings (Options) is a modeless window like Change Theme instead of a modal dialog
-- Change Background Color and Change Tab Color share a modeless window like Change Theme instead of a modal dialog
+- Change Background Color and Set Tab Color share a modeless window like Change Theme instead of a modal dialog
 - Navigate Files in Folder is a normal modeless window that stays open (no longer a popup that closes when it loses focus or after opening a file); Esc or the close button dismisses it, and Enter / double-click replaces the document in the current tab, while `Ctrl + Enter` / `Ctrl + double-click` switches to the tab already showing that file, or opens it in a new tab. `Alt + Up` goes to the parent directory (like Explorer), as does the `..` entry. `Del` moves the selected file to the recycle bin without asking (directories are not deleted); if that file is open in a tab, the tab closes first. The window uses the app icon and the regular UI font (fixes #5877). The listing re-reads the directory whenever the window is activated or the command is invoked again, so files renamed (`F2`), added or removed meanwhile show up; `F5` refreshes on demand (fixes #5878). It also works on the home page — there's a **Navigate Files in Folder** link next to **Open a document...** — starting in the folder of the most recently opened document
 - Renamed the companion engine DLL from `libmupdf.dll` to `libsumatrapdf.dll` (through 3.6 the name was `libmupdf.dll`; 3.7 and later use `libsumatrapdf.dll`). Installer upgrades move the old name aside; see [Portable vs installer](SumatraPDF-portable.md) and [Failed to load libsumatrapdf.dll](Failed-to-load-libmupdf.md)
 - Themes can set optional UI colors (`DisabledTextColor`, `DarkerTextColor`, `HotBackgroundColor`, `EdgeColor`, `HotEdgeColor`, `DisabledEdgeColor`, `ErrorBackgroundColor`, and notification highlight colors) so disabled and hover states are not derived only from `TextColor` / backgrounds; built-in themes (including Dracula) set them so tinted foregrounds no longer look muddy yellow (issue #4721)
@@ -21,6 +21,8 @@ Available in [pre-release](https://www.sumatrapdfreader.org/prerelease) builds.
 - Screen readers (Narrator, NVDA, and other UI Automation clients) can access document text on the canvas for PDF, XPS, and DjVu; the experimental UIA provider is now enabled in release builds, not only debug, reading through the document character by character, word by word, line by line or page by page now advances instead of repeating the first line, and reading the text under the mouse pointer or finger works (Narrator mouse mode / touch exploration), including telling the screen reader where that text is on screen (issue #321)
 - smoother mouse-wheel scrolling when `SmoothScroll` is enabled (default **true**): continuous exponential chase of the target, sub-pixel steps, 1 ms timer while animating; set `SmoothScroll = false` for instant wheel steps
 - add `ScrollLineAmount` advanced setting: distance scrolled by an arrow-key press or one mouse-wheel line; defaults to 16 screen pixels at 96 DPI (fixes #2447)
+- add `CacheDir` advanced setting to choose where cached document thumbnails are stored; empty keeps the existing application-data `sumatrapdfcache` directory
+- the tab right-click menu has **Duplicate Tab**, which opens a copy with the same page, zoom and scroll position
 - Favorites can open as a full-window tab so long paths and names use the whole window; the sidebar Favorites panel still works independently. The sidebar Favorites/ToC width can also be dragged past half the window (keeps ~200px for the document)
 - Favorites list has a search box (like Bookmarks), in both the sidebar panel and the Favorites tab
 - Favorites can be sorted alphabetically by name (or page label) within each file instead of by page number: `SortFavoritesByName = true`, or the **Sort By Name** checkbox in the Favorites tree context menu (fixes #2277)
@@ -337,7 +339,7 @@ Available in [pre-release](https://www.sumatrapdfreader.org/prerelease) builds.
 - `CmdCloseAllTabs` : "Close All Tabs"
 - `CmdCloseTabsToTheLeft` : "Close Tabs To The Left"
 - `CmdDeleteFile` : "Delete File"
-- `CmdDuplicateInNewTab` : "Open Current Document In New Tab"
+- `CmdDuplicateInNewTab` : "Duplicate Tab"
 - `CmdHideAnnotations` : "Hide Annotations"
 - `CmdInvokeInverseSearch` : "Invoke Inverse Search"
 - `CmdMoveTabLeft` : "Move Tab Left" (`Ctrl + Shift + PageDown`)
