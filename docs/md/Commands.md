@@ -19,7 +19,7 @@ CmdCommandPalette,Ctrl + K,Command Palette,
 CmdCommandPaletteTOC,Shift + F12,Command Palette: Table Of Contents,"Jump to a table of contents entry of the current document, ver 3.7+"
 CmdCommandPaletteFavorites,,Command Palette: Favorites,"Jump to a favorite, ver 3.7+"
 CmdDuplicateInNewWindow,Shift + Ctrl + N,Open Current Document In New Window,
-CmdDuplicateInNewTab,,Duplicate Tab,ver 3.6+
+CmdDuplicateInNewTab,Ctrl + Shift + D,Duplicate Tab,"Copy the current document into a new tab in the same window, preserving page, zoom, rotation and scroll position"
 CmdExit,Ctrl + Q,Exit Application,
 CmdMoveFrameFocus,F6,Move Frame Focus,
 CmdNewWindow,Ctrl + N,Open New SumatraPDF Window,

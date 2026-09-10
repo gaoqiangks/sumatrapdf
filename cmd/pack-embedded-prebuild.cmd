@@ -10,7 +10,16 @@ set CMDDIR=%~dp0
 set ROOT=%CMDDIR:~0,-1%\..
 
 if not exist "%ROOT%\.work" mkdir "%ROOT%\.work"
-if not exist "%ROOT%\.work\translations.txt" type nul > "%ROOT%\.work\translations.txt"
+REM Seed clean/offline builds from the bundled language pack, including builds
+REM made directly in Visual Studio without bun or apptranslator credentials.
+if not exist "%ROOT%\.work\translations.txt" (
+  copy /y "%ROOT%\translations\translations.txt" "%ROOT%\.work\translations.txt" >nul
+  if errorlevel 1 exit /b 1
+)
+for %%F in ("%ROOT%\.work\translations.txt") do if %%~zF==0 (
+  copy /y "%ROOT%\translations\translations.txt" "%ROOT%\.work\translations.txt" >nul
+  if errorlevel 1 exit /b 1
+)
 
 if not exist "%ROOT%\.work\embedded-src\translations.txt" (
   if not exist "%ROOT%\.work\embedded-src" mkdir "%ROOT%\.work\embedded-src"

@@ -448,6 +448,11 @@ CommandVisibility GetCommandVisibility(int cmdId, const AppCommandCtx& ctx, Comm
         return CommandVisibility::Hide;
     }
 
+    if (cmdId == CmdDuplicateInNewTab &&
+        (gPluginMode || !ctx.tab || ctx.tab->IsNonDocumentTab() || !ctx.tab->ctrl || !ctx.tab->filePath)) {
+        return CommandVisibility::Hide;
+    }
+
     CustomCommand* cmd = FindCustomCommand(cmdId);
     int origCmdId = cmd ? cmd->origId : 0;
     if (origCmdId == CmdSetTheme) {

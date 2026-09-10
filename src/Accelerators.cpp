@@ -66,6 +66,7 @@ static ACCEL gBuiltInAccelerators[] = {
     {FCONTROL | FVIRTKEY, 'W', CmdClose},
     {FCONTROL | FVIRTKEY, 'N', CmdNewWindow},
     {FSHIFT | FCONTROL | FVIRTKEY, 'N', CmdDuplicateInNewWindow},
+    {FSHIFT | FCONTROL | FVIRTKEY, 'D', CmdDuplicateInNewTab},
     {FCONTROL | FVIRTKEY, 'S', CmdSaveAs},
     //{FSHIFT | FCONTROL | FVIRTKEY, 'S', CmdCreateShortcutToFile},
 

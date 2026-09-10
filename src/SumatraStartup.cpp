@@ -57,6 +57,7 @@
 #include "SearchAndDDE.h"
 #include "SumatraProperties.h"
 #include "Tabs.h"
+#include "TableOfContents.h"
 #include "Translations.h"
 #include "StressTesting.h"
 #include "Version.h"
@@ -395,19 +396,13 @@ void SetTabState(WindowTab* tab, TabState* state) {
         }
     }
 
+    ClearTocBox(win);
     tab->tocState = *state->tocState;
     SetSidebarVisibility(win, state->showToc, gGlobalPrefs->showFavorites);
 
     DisplayMode displayMode = DisplayModeFromString(state->displayMode, DisplayMode::Automatic);
     if (displayMode != DisplayMode::Automatic) {
         SwitchToDisplayMode(win, displayMode);
-    }
-
-    if (dm) {
-        ScrollState scrollState = {state->pageNo, state->scrollPos.x, state->scrollPos.y};
-        dm->SetScrollState(scrollState);
-    } else {
-        ctrl->GoToPage(state->pageNo, true);
     }
 
     float zoom = ZoomFromString(state->zoom, kInvalidZoom);
@@ -417,6 +412,15 @@ void SetTabState(WindowTab* tab, TabState* state) {
         } else {
             ctrl->SetZoomVirtual(zoom, nullptr);
         }
+    }
+
+    // Scroll coordinates belong to the saved zoom and rotation. Restoring them
+    // before relayout can move the copied tab to a different reading position.
+    if (dm) {
+        ScrollState scrollState = {state->pageNo, state->scrollPos.x, state->scrollPos.y};
+        dm->SetScrollState(scrollState);
+    } else {
+        ctrl->GoToPage(state->pageNo, true);
     }
 }
 

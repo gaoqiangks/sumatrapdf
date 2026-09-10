@@ -318,6 +318,7 @@ LoadArgs* LoadArgs::Clone() {
     res->tabState = this->tabState;
     res->targetTab = this->targetTab;
     res->forceReuse = this->forceReuse;
+    res->forceNewTab = this->forceNewTab;
     res->noSavePrefs = this->noSavePrefs;
     res->onFinished = this->onFinished;
     res->hwndPwdParent = this->hwndPwdParent;
@@ -3563,7 +3564,7 @@ MainWindow* LoadDocumentFinish(LoadArgs* args) {
     // it loaded, so it's no longer one of the files next/prev skips
     MarkFileOpenedOk(fullPath);
 
-    bool openNewTab = SettingsUseTabs() && !args->forceReuse;
+    bool openNewTab = (SettingsUseTabs() || args->forceNewTab) && !args->forceReuse;
     ReportIf(openNewTab && args->forceReuse);
 
     // Clear any tip from the previous document/tab (LoadModelIntoTab also does
@@ -3704,7 +3705,7 @@ MainWindow* LoadDocumentFinish(LoadArgs* args) {
 
 static MainWindow* MaybeCreateWindowForFileLoad(LoadArgs* args) {
     MainWindow* win = args->win;
-    bool openNewTab = SettingsUseTabs() && !args->forceReuse;
+    bool openNewTab = (SettingsUseTabs() || args->forceNewTab) && !args->forceReuse;
     if (openNewTab && !args->win) {
         // modify the args so that we always reuse the same window
         // TODO: enable the tab bar if tabs haven't been initialized
@@ -5997,8 +5998,7 @@ static TabState* NewTabStateFromTab(WindowTab* tab) {
 
     FileState* fs = NewFileState(tab->filePath);
     tab->ctrl->GetDisplayState(fs);
-    fs->showToc = tab->showToc;
-    *fs->tocState = tab->tocState;
+    UpdateSidebarDisplayState(tab, fs);
 
     TabState* state = NewTabState(fs);
     DeleteFileState(fs);
@@ -6051,32 +6051,57 @@ static void DuplicateInNewWindow(MainWindow* win) {
 
 // Create a new tab in the same window with the same document and view state.
 void DuplicateTabInNewTab(WindowTab* tab) {
-    if (!tab || tab->IsAboutTab() || !tab->filePath) {
+    if (!tab || tab->IsNonDocumentTab() || !tab->ctrl || !tab->filePath || gPluginMode) {
         return;
     }
     MainWindow* win = tab->win;
     if (!win) {
         return;
     }
-    Str path = tab->filePath;
-    ReportIf(!path);
-    if (!path) {
-        return;
-    }
-
+    LoadArgs args(tab->filePath, win);
+    args.SetDisplayName(tab->displayName);
     TabState* state = NewTabStateFromTab(tab);
+    DisplayModel* sourceModel = tab->AsFixed();
+    bool restoreViewOrigin = sourceModel && !sourceModel->InPresentation() && state;
+    bool displayR2L = sourceModel && sourceModel->GetDisplayR2L();
+    PointF viewOrigin;
+    if (restoreViewOrigin) {
+        viewOrigin = sourceModel->CvtFromScreen(Point{}, state->pageNo);
+    }
     SaveSettings();
 
-    LoadArgs args(path, win);
     args.showWin = true;
     args.noPlaceWindow = true;
-    args.forceReuse = false; // Force creation of new tab instead of reusing current
-    LoadDocument(&args);
+    // An explicit duplicate stays in this window even when ordinary file opens
+    // use separate windows (UseTabs = false).
+    args.forceNewTab = true;
+    MainWindow* loadedWin = LoadDocument(&args);
 
-    if (state) {
-        SetTabState(win->CurrentTab(), state);
-        DeleteTabState(state);
+    // A failed load can leave an unrelated tab selected. Only restore the
+    // snapshot onto the controller created by this load.
+    if (loadedWin && IsMainWindowValid(loadedWin) && args.ctrl) {
+        WindowTab* newTab = loadedWin->CurrentTab();
+        if (newTab && newTab != tab && newTab->ctrl == args.ctrl && state) {
+            DisplayModel* newModel = newTab->AsFixed();
+            if (sourceModel && newModel) {
+                newModel->SetDisplayR2L(displayR2L);
+            }
+            SetTabState(newTab, state);
+            if (restoreViewOrigin && newModel) {
+                // ScrollState's margin sentinels can omit a document coordinate
+                // needed after rotation. Keep the full page-relative viewport
+                // origin when copying a live view.
+                Point pt = newModel->CvtToScreen(state->pageNo, viewOrigin);
+                if (pt.x != 0) {
+                    newModel->ScrollXBy(pt.x);
+                }
+                if (pt.y != 0) {
+                    newModel->ScrollYBy(pt.y, false);
+                }
+            }
+        }
     }
+    DeleteTabState(state);
 }
 
 // Create a copy of the current tab, making it easy to compare two views.

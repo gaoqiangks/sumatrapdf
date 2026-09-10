@@ -10,13 +10,24 @@
  *
  * Usage: bun cmd/pack-embedded.ts
  */
-import { copyFileSync, existsSync, mkdirSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import {
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { join, relative, resolve } from "node:path";
+import { addLocalTranslations } from "./local-translations";
 
 const workDir = ".work";
 const stagingDir = join(workDir, "embedded-src");
 const archivePath = join(workDir, "embedded.dat");
 const translationsTxt = join(workDir, "translations.txt");
+const bundledTranslationsTxt = join("translations", "translations.txt");
 const docsDir = join(workDir, "docs");
 const makeLzsaExe = resolve(join("bin", "MakeLZSA.exe"));
 
@@ -49,10 +60,10 @@ export async function packEmbedded(): Promise<void> {
     throw new Error(`'${makeLzsaExe}' doesn't exist`);
   }
   mkdirSync(workDir, { recursive: true });
-  if (!existsSync(translationsTxt)) {
-    writeFileSync(translationsTxt, "");
-    console.log(`created empty ${translationsTxt}`);
-  }
+  const downloadedTranslations = existsSync(translationsTxt) ? readFileSync(translationsTxt, "utf-8") : "";
+  const translations = downloadedTranslations.trim()
+    ? downloadedTranslations
+    : readFileSync(bundledTranslationsTxt, "utf-8");
   for (const p of ["ext/marked.min.js", "ext/mermaid.min.js"]) {
     if (!existsSync(p)) {
       throw new Error(`missing ${p}`);
@@ -63,7 +74,7 @@ export async function packEmbedded(): Promise<void> {
   rmSync(stagingDir, { recursive: true, force: true });
   mkdirSync(stagingDir, { recursive: true });
 
-  copyFileSync(translationsTxt, join(stagingDir, "translations.txt"));
+  writeFileSync(join(stagingDir, "translations.txt"), addLocalTranslations(translations));
   copyFileSync("ext/marked.min.js", join(stagingDir, "marked.min.js"));
   copyFileSync("ext/mermaid.min.js", join(stagingDir, "mermaid.min.js"));
 

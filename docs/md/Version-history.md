@@ -22,7 +22,7 @@ Available in [pre-release](https://www.sumatrapdfreader.org/prerelease) builds.
 - smoother mouse-wheel scrolling when `SmoothScroll` is enabled (default **true**): continuous exponential chase of the target, sub-pixel steps, 1 ms timer while animating; set `SmoothScroll = false` for instant wheel steps
 - add `ScrollLineAmount` advanced setting: distance scrolled by an arrow-key press or one mouse-wheel line; defaults to 16 screen pixels at 96 DPI (fixes #2447)
 - add `CacheDir` advanced setting to choose where cached document thumbnails are stored; empty keeps the existing application-data `sumatrapdfcache` directory
-- the tab right-click menu has **Duplicate Tab**, which opens a copy with the same page, zoom and scroll position
+- the tab right-click menu has **Duplicate Tab** (`Ctrl + Shift + D`), which opens an independent view in the same window with the same page, zoom, rotation and scroll position, even when `UseTabs` is disabled
 - Favorites can open as a full-window tab so long paths and names use the whole window; the sidebar Favorites panel still works independently. The sidebar Favorites/ToC width can also be dragged past half the window (keeps ~200px for the document)
 - Favorites list has a search box (like Bookmarks), in both the sidebar panel and the Favorites tab
 - Favorites can be sorted alphabetically by name (or page label) within each file instead of by page number: `SortFavoritesByName = true`, or the **Sort By Name** checkbox in the Favorites tree context menu (fixes #2277)

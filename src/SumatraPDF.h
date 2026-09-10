@@ -273,6 +273,7 @@ struct LoadArgs {
 
     bool showWin = true;
     bool forceReuse = false;
+    bool forceNewTab = false;
     // over-writes placeWindow and other flags and forces no changing
     // of window location after loading
     bool noPlaceWindow = false;

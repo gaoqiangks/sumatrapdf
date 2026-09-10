@@ -111,6 +111,7 @@ You can [customize keyboard shortcuts](Customize-keyboard-shortcuts.md). Also se
 - `Ctrl + P` Print
 - `F2` Rename file and reopen with new name
 - `Ctrl + Shift + N` Open current document in new window
+- `Ctrl + Shift + D` Duplicate current tab
 - `r` Reload document
 - `Ctrl + F` Find text
 - `/` Find text

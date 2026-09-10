@@ -49,6 +49,10 @@ With `RestoreSession = true`, SumatraPDF reopens tabs (and window positions) fro
 
 `-for-testing` deliberately skips session restore and does not save settings.
 
+## Duplicate a tab
+
+Right-click a document tab and choose **Duplicate Tab**, or press `Ctrl + Shift + D` to copy the current tab. The copy opens in the same window with the same page, zoom, rotation and reading position. You can navigate either tab independently. This also works when `UseTabs = false`.
+
 ## Keyboard shortcuts for tabs
 
 See [Keyboard shortcuts](Keyboard-shortcuts.md):
@@ -57,6 +61,7 @@ See [Keyboard shortcuts](Keyboard-shortcuts.md):
 - `Ctrl + PageDown` / `Ctrl + PageUp` — next / previous tab in **tab-strip order**, immediately, without the switcher popup (`CmdNextTab` / `CmdPrevTab`)
 - `Ctrl + W` or `q` — close current tab
 - `Ctrl + Shift + N` — open current document in a new window
+- `Ctrl + Shift + D` — duplicate current tab in the same window
 - `Alt + 1` … `Alt + 8`, `Alt + 9` (last tab) — jump to tab by number
 
 Use the [command palette](Command-Palette.md): type `@` to switch tabs by name.
