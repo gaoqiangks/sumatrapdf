@@ -157,7 +157,9 @@ TempStr GetAppDataDirTemp() {
             ReportIf(true);
             dir = GetTempDirTemp(); // shouldn't happen, last chance thing
         }
-        dir = path::JoinTemp(dir, kAppName);
+        // Preserve portable settings beside the executable, but never fall back
+        // to the standard viewer's settings if this directory is not writable.
+        dir = path::JoinTemp(dir, StrL("SumatraPDF-TeXstudio37"));
     }
     logf("GetAppDataDirTemp(): '%s'%s\n", dir, Str(isPortable ? " (portable)" : "(installed)"));
     SetAppDataDir(dir);

@@ -64,7 +64,7 @@ void InitScreenshotHost() {
 static bool IsOtherSumatraProcessRunning() {
     DWORD myPid = GetCurrentProcessId();
     HWND hwnd = nullptr;
-    while ((hwnd = FindWindowEx(HWND_DESKTOP, hwnd, L"SUMATRA_PDF_FRAME", nullptr)) != nullptr) {
+    while ((hwnd = FindWindowEx(HWND_DESKTOP, hwnd, FRAME_CLASS_NAME, nullptr)) != nullptr) {
         DWORD pid;
         GetWindowThreadProcessId(hwnd, &pid);
         if (pid != myPid) {

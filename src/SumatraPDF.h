@@ -6,8 +6,9 @@ enum class FileType : u8;
 
 #include "OverlayScrollbar.h"
 
-#define CANVAS_CLASS_NAME L"SUMATRA_PDF_CANVAS"
-#define FRAME_CLASS_NAME L"SUMATRA_PDF_FRAME"
+// This TeXstudio build must not be discovered by the standard viewer's instance lookup.
+#define CANVAS_CLASS_NAME L"SUMATRA_TEXSTUDIO37_PDF_CANVAS"
+#define FRAME_CLASS_NAME L"SUMATRA_TEXSTUDIO37_PDF_FRAME"
 
 constexpr int kFrameResizeHitTest = 5;
 

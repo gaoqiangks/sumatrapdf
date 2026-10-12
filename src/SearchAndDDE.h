@@ -1,7 +1,8 @@
 /* Copyright 2022 the SumatraPDF project authors (see AUTHORS file).
    License: GPLv3 */
 
-#define kSumatraDdeServer L"SUMATRA"
+// Keep legacy -reuse-instance and external DDE clients inside this build's namespace.
+#define kSumatraDdeServer L"SUMATRA_TEXSTUDIO37"
 #define kSumatraDdeTopic L"control"
 
 struct Gfx;
