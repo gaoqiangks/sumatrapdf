@@ -14,6 +14,7 @@
 #include "gui/GuiColors.h"
 #include "gui/VirtCtrl.h"
 #include "gui/win/TabsCtrl.h"
+#include "AppHelpersCommon.h"
 
 // Forward declaration - defined in MainWindow.cpp
 struct MainWindow;
@@ -27,10 +28,7 @@ MainWindow* FindMainWindowByHwnd(HWND hwnd);
 
 static Kind kindTabs = "tabs";
 static Kind kindTabCtrl = "tabCtrl";
-
-// non-selected tabs narrower than this hide their close button so that
-// clicks drag/select instead of accidentally closing the tab
-constexpr int kMinTabWidthForClose = 64;
+static Kind kindTabsPlus = "tabsPlus";
 
 using Gdiplus::Bitmap;
 using Gdiplus::CompositingQualityHighQuality;
@@ -53,18 +51,7 @@ static bool IsTabsRtl(HWND hwnd) {
 TabInfo::~TabInfo() {
     str::Free(text);
     str::Free(tooltip);
-}
-
-static Gdiplus::Color GdipCol(Color c) {
-    return GdiRgbFromColor(c);
-}
-
-// the text stays readable on a tab that carries a color of its own
-static Color TabTextColorForBackground(Color text, Color tabBg) {
-    if (abs((int)GetLightness(text) - (int)GetLightness(tabBg)) >= 80) {
-        return text;
-    }
-    return IsLightColor(tabBg) ? kColBlack : kColWhite;
+    str::Free(pageText);
 }
 
 //--- TabCtrl: one tab
@@ -111,7 +98,7 @@ TabCtrl::TabCtrl() {
 }
 
 int TabCtrl::Idx() {
-    return tabsCtrl ? tabsCtrl->tabs.Find(ti) : -1;
+    return tabsCtrl ? VecFind(tabsCtrl->tabs, ti) : -1;
 }
 
 bool TabCtrl::IsSelected() {
@@ -132,6 +119,7 @@ bool TabCtrl::IsUnderMouse() {
 
 Color TabCtrl::BgColor() {
     Color selected = GetColor(kColTabBg);
+    Color inactive = GetColor(kColTabInactiveBg);
     bool isSelected = IsSelected();
     bool isUnderMouse = IsUnderMouse();
     // a tab with a color of its own keeps it, shaded when it isn't selected
@@ -144,11 +132,30 @@ Color TabCtrl::BgColor() {
     if (isSelected) {
         return selected;
     }
-    return AccentColor(selected, isUnderMouse ? 35 : 25);
+    return isUnderMouse ? AccentColor(inactive, 10) : inactive;
 }
 
 Size TabCtrl::GetIdealSize() {
     return idealSize;
+}
+
+// Close glyph grows with tab height (taller UI fonts / tab bar) so it
+// stays usable on touch; floor 16 DIP, cap 28 DIP (issue #5220).
+static int CloseGlyphDx(int tabDy) {
+    int closeDy = limitValue(tabDy - DpiScale(6), DpiScale(16), DpiScale(28));
+    return std::min(closeDy, tabDy);
+}
+
+// Padding between circle and tab edge; grow with the button.
+static int CloseGlyphPad(int closeDx) {
+    return std::max(DpiScale(6), closeDx / 2);
+}
+
+// what the ✕ takes from a tab sized to its label: the glyph, its padding and
+// the gap before the label
+static int CloseRoomDx(int tabDy) {
+    int closeDx = CloseGlyphDx(tabDy);
+    return closeDx + CloseGlyphPad(closeDx) + DpiScale(4);
 }
 
 // the ✕ is inset from the tab's edge, but its hit area is the whole gutter
@@ -159,19 +166,9 @@ void TabCtrl::SetBounds(Rect r) {
     int dx = r.dx;
     int dy = r.dy;
 
-    // Close glyph grows with tab height (taller UI fonts / tab bar) so it
-    // stays usable on touch; floor 16 DIP, cap 28 DIP (issue #5220).
-    int closeMin = DpiScale(16);
-    int closeMax = DpiScale(28);
-    int closeDy = dy - DpiScale(6);
-    closeDy = limitValue(closeDy, closeMin, closeMax);
-    if (closeDy > dy) {
-        closeDy = dy;
-    }
-    int closeDx = closeDy;
-
-    // Padding between circle and tab edge; grow with the button.
-    int closePad = std::max(DpiScale(6), closeDx / 2);
+    int closeDx = CloseGlyphDx(dy);
+    int closeDy = closeDx;
+    int closePad = CloseGlyphPad(closeDx);
     // Keep the glyph inside the tab when tabs are very narrow.
     if (closeDx + closePad > dx && dx > 0) {
         closeDx = std::min(closeDx, std::max(DpiScale(12), dx - 2));
@@ -205,11 +202,12 @@ void TabCtrl::SetBounds(Rect r) {
     closeBtn->SetBounds(hit);
 }
 
+// like Chrome: only the selected tab shows (and hit-tests) its ✕, so a click
+// on a non-selected tab always selects it and can't accidentally close it.
+// The pinned Home tab has no room for one
 bool TabCtrl::CloseVisible() {
-    if (!ti->canClose) {
-        return false;
-    }
-    return IsSelected() || (IsUnderMouse() && bounds.dx >= kMinTabWidthForClose);
+    bool hasRoom = !ti->fitToLabel || !ti->isPinned;
+    return ti->canClose && hasRoom && IsSelected();
 }
 
 void TabCtrl::Paint(VirtPaintCtx& ctx) {
@@ -218,38 +216,89 @@ void TabCtrl::Paint(VirtPaintCtx& ctx) {
     Rect r = ctx.bounds;
     Color tabBgCol = BgColor();
     Color textColor = TabTextColorForBackground(GetColor(kColTabText), tabBgCol);
+    if (ti->isError) {
+        // a tab whose document failed to load shows its title in red, shaded
+        // to stay readable on light and dark tab backgrounds
+        textColor = IsLightColor(tabBgCol) ? MkRgb(0xC4, 0x1E, 0x1E) : MkRgb(0xFF, 0x6A, 0x6A);
+    }
 
     gfx->FillRect(r, tabBgCol);
 
     bool isRtl = IsTabsRtl(hwnd);
     PlatformFont* font = tabsCtrl->GetFont();
 
-    // draw text — inset from the close glyph (size varies with tab height)
+    // draw text — inset from the close glyph (size varies with tab height),
+    // or using the full tab width when the ✕ is hidden
     Rect rTxt = r;
     int textPad = DpiScale(8);
     int textGap = DpiScale(4);
+    bool closeVisible = CloseVisible();
     if (isRtl) {
         // RTL: close on the left — text after the close circle
-        int textLeft = rClose.x + rClose.dx + textGap;
+        int textLeft = closeVisible ? rClose.x + rClose.dx + textGap : r.x + textPad;
         rTxt.x = textLeft;
         rTxt.dx = std::max(0, (r.x + r.dx - textPad) - textLeft);
     } else {
         // LTR: close on the right — text before the close circle
         rTxt.x = r.x + textPad;
-        rTxt.dx = std::max(0, rClose.x - textGap - rTxt.x);
+        int textRight = closeVisible ? rClose.x - textGap : r.x + r.dx - textPad;
+        rTxt.dx = std::max(0, textRight - rTxt.x);
     }
+    PlatformFont* pageFont = font;
+    int pageDx = 0;
+    if (len(ti->pageText) > 0) {
+        PlatformFont* scaled = GetScaledPlatformFont(font, 85);
+        if (scaled) {
+            pageFont = scaled;
+        }
+        pageDx = gfx->MeasureText(ti->pageText, pageFont).dx;
+        if (pageDx + DpiScale(12) >= rTxt.dx) {
+            pageDx = 0;
+        }
+    }
+
+    Rect rFile = rTxt;
+    Rect rPage{};
+    if (pageDx > 0) {
+        if (isRtl) {
+            rPage = {rTxt.x, rTxt.y, pageDx, rTxt.dy};
+            rFile.x = rTxt.x + pageDx;
+            rFile.dx = rTxt.dx - pageDx;
+        } else {
+            rFile.dx = rTxt.dx - pageDx;
+            rPage = {rFile.Right(), rTxt.y, pageDx, rTxt.dy};
+        }
+    }
+
     u32 fmt = gfxTextEllipsis | gfxTextVCenter | (isRtl ? gfxTextRight : gfxTextLeft);
-    gfx->DrawText(ti->text, rTxt, fmt, font, textColor);
+    if (ti->fitToLabel) {
+        // the margins are the tab's own: see FitToLabelDx(). The label keeps its
+        // place whether the ✕ shows or not
+        rFile = r;
+        if (!ti->isPinned) {
+            int room = CloseRoomDx(r.dy);
+            rFile.dx = std::max(0, rFile.dx - room);
+            if (isRtl) {
+                rFile.x += room;
+            }
+        }
+        fmt = gfxTextEllipsis | gfxTextVCenter | gfxTextCenter;
+    }
+    gfx->DrawText(ti->text, rFile, fmt, font, textColor);
+    if (pageDx > 0) {
+        Color pageCol = AccentColor(textColor, 40);
+        u32 pageFmt = gfxTextVCenter | gfxTextNoClip | (isRtl ? gfxTextRight : gfxTextLeft);
+        gfx->DrawText(ti->pageText, rPage, pageFmt, pageFont, pageCol);
+    }
 
     // draw red dot after tab text for dirty (unsaved) tabs
     if (ti->isDirty) {
         int dotRadius = DpiScale(3);
         // the text may have been ellipsized, so the dot goes after whichever is
         // narrower: the text or the room it had
-        int textDx = std::min(gfx->MeasureText(ti->text, font).dx, rTxt.dx);
-        int textEnd = isRtl ? rTxt.Right() : rTxt.x + textDx;
-        // clamp to not exceed the text area
-        int maxX = rTxt.Right() - (dotRadius * 2);
+        int textDx = std::min(gfx->MeasureText(ti->text, font).dx, rFile.dx);
+        int textEnd = isRtl ? rFile.Right() : rFile.x + textDx;
+        int maxX = rFile.Right() - (dotRadius * 2);
         int dotX = std::min(textEnd + dotRadius, maxX);
         int dotY = r.y + ((r.dy - (dotRadius * 2)) / 2);
         gfx->FillEllipse({dotX, dotY, dotRadius * 2, dotRadius * 2}, MkRgb(0xEE, 0x22, 0x22));
@@ -281,6 +330,60 @@ void TabCtrl::OnGetTooltip(VirtTooltipEvent* ev) {
 
 void TabCtrl::OnCloseClick(VirtMouseEvent*) {
     tabsCtrl->CloseTab(Idx());
+}
+
+//--- TabsPlusBtn: the "+" after the tabs
+
+struct TabsPlusBtn : VirtCtrl {
+    TabsCtrl* tabsCtrl = nullptr;
+
+    TabsPlusBtn();
+    ~TabsPlusBtn() override = default;
+
+    Size GetIdealSize() override;
+    void Paint(VirtPaintCtx&) override;
+    void OnInvalidate();
+    void OnClick(VirtMouseEvent*);
+};
+
+TabsPlusBtn::TabsPlusBtn() {
+    kind = kindTabsPlus;
+    colorDefaults = gColsTab;
+    nColors = kColTabCount;
+    cursor = CursorId::Hand;
+    onMouseEnter = MkMethod0<TabsPlusBtn, &TabsPlusBtn::OnInvalidate>(this);
+    onMouseLeave = MkMethod0<TabsPlusBtn, &TabsPlusBtn::OnInvalidate>(this);
+    onClick = MkMethod1<TabsPlusBtn, VirtMouseEvent*, &TabsPlusBtn::OnClick>(this);
+}
+
+Size TabsPlusBtn::GetIdealSize() {
+    return bounds.Size();
+}
+
+void TabsPlusBtn::Paint(VirtPaintCtx& ctx) {
+    Gfx* gfx = ctx.gfx;
+    Rect r = ctx.bounds;
+    Color bgCol = GetColor(kColTabBg);
+    if (HasFlag(vwfHovered)) {
+        bgCol = AccentColor(GetColor(kColTabInactiveBg), 10);
+        gfx->FillRect(r, bgCol);
+    }
+    Color col = TabTextColorForBackground(GetColor(kColTabText), bgCol);
+    int cx = r.x + (r.dx / 2);
+    int cy = r.y + (r.dy / 2);
+    int arm = r.dy / 5;
+    gfx->DrawLineAA({cx - arm, cy}, {cx + arm, cy}, col, 2.0f, 255);
+    gfx->DrawLineAA({cx, cy - arm}, {cx, cy + arm}, col, 2.0f, 255);
+}
+
+void TabsPlusBtn::OnInvalidate() {
+    Invalidate();
+}
+
+void TabsPlusBtn::OnClick(VirtMouseEvent*) {
+    if (tabsCtrl->onPlusClick.IsValid()) {
+        tabsCtrl->onPlusClick.Call();
+    }
 }
 
 //--- TabsCtrl host window
@@ -336,7 +439,7 @@ void TabsCtrl::Destroy() {
     }
     if (vroot) {
         // tops do not own us; clear root pointer before deleting
-        vroot->tops.Reset();
+        VecReset(vroot->tops);
         delete vroot;
         vroot = nullptr;
     }
@@ -392,15 +495,61 @@ bool TabsCtrl::IsVisible() const {
 // and it keeps the tree and the list impossible to get out of step
 void TabsCtrl::RebuildTabCtrls() {
     RemoveAllChildren(true);
-    tabCtrls.Reset();
+    VecReset(tabCtrls);
     int n = TabCount();
     for (int i = 0; i < n; i++) {
         auto* w = new TabCtrl();
         w->tabsCtrl = this;
         w->ti = tabs[i];
-        tabCtrls.Append(w);
+        VecAppend(tabCtrls, w);
         AddChild(w);
     }
+    plusBtn = new TabsPlusBtn();
+    plusBtn->tabsCtrl = this;
+    AddChild(plusBtn);
+}
+
+// label plus 1rem (the font's size in pixels) on each side, and room for the
+// ✕ unless it's the pinned Home tab (#6469)
+static int FitToLabelDx(TabsCtrl* tabs, TabInfo* ti, int tabDy) {
+    PlatformFont* font = tabs->GetFont();
+    if (!font) {
+        return tabs->tabDefaultDx;
+    }
+    constexpr float kPxPerPt = 96.f / 72.f;
+    int rem = DpiScale((int)(font->GetSize() * kPxPerPt + 0.5f));
+    int dx = PlatformFontMeasureText(font, ti->text).dx + (2 * rem);
+    if (!ti->isPinned) {
+        dx += CloseRoomDx(tabDy);
+    }
+    return dx;
+}
+
+// a document tab sized to its file name (TabsEqualWidth = false): the margins
+// TabCtrl::Paint() uses, so the name isn't ellipsized. Room for the ✕ is kept
+// when it's hidden, so selecting a tab doesn't resize it
+static int FitToNameDx(TabsCtrl* tabs, TabInfo* ti, int tabDy) {
+    PlatformFont* font = tabs->GetFont();
+    if (!font) {
+        return tabs->tabDefaultDx;
+    }
+    int dx = DpiScale(8) + PlatformFontMeasureText(font, ti->text).dx + 1;
+    if (len(ti->pageText) > 0) {
+        PlatformFont* pageFont = GetScaledPlatformFont(font, 85);
+        dx += PlatformFontMeasureText(pageFont ? pageFont : font, ti->pageText).dx;
+    }
+    if (ti->isDirty) {
+        dx += DpiScale(9); // the red dot
+    }
+    dx += CloseRoomDx(tabDy);
+    return std::min(dx, tabs->tabDefaultDx);
+}
+
+int TabsCtrl::TabDx(int idx) {
+    if (idx < 0 || idx >= len(tabCtrls)) {
+        return 0;
+    }
+    return tabCtrls[idx]->idealSize.dx;
 }
 
 // Calculates the size of a tab and lays the children out.
@@ -417,40 +566,75 @@ void TabsCtrl::LayoutTabs() {
         // (issue #5861). The parent hides the control when there are no tabs.
         return;
     }
+    // the "+" is square and always there. Fit-to-label tabs take what their label
+    // needs, the others share the rest
+    int plusDx = dy;
+    int availDx = rect.dx - 5 - plusDx;
+    int restDx = availDx;
+    int nRest = 0;
+    for (int i = 0; i < nTabs; i++) {
+        if (!tabs[i]->fitToLabel) {
+            nRest++;
+            continue;
+        }
+        int fitDx = std::min(FitToLabelDx(this, tabs[i], dy), availDx / nTabs);
+        tabCtrls[i]->idealSize = {fitDx, dy};
+        restDx -= fitDx;
+    }
+    // TabsEqualWidth = false: as wide as the name, shrunk like equal-width
+    // tabs when they don't fit, but never wider than the name needs
+    Vec<int> nameDx;
+    if (!equalWidth) {
+        for (int i = 0; i < nTabs; i++) {
+            if (!tabs[i]->fitToLabel) {
+                VecAppend(nameDx, FitToNameDx(this, tabs[i], dy));
+            }
+        }
+    }
     int dx;
     if (tabWidthFrozen && frozenTabDx > 0) {
         dx = frozenTabDx;
+    } else if (equalWidth) {
+        dx = std::min(tabDefaultDx, nRest > 0 ? restDx / nRest : restDx);
     } else {
-        auto maxDx = (rect.dx - 5) / nTabs;
-        dx = std::min(tabDefaultDx, maxDx);
+        dx = FairShareCap(nameDx, restDx);
     }
     tabSize = {dx, dy};
-    if (IsRunningOnWine()) {
-        logf("TabsCtrl::LayoutTabs: hwnd=%p client=(%d,%d) tabSize=(%d,%d) nTabs=%d\n", hwnd, rect.dx, rect.dy,
-             tabSize.dx, tabSize.dy, nTabs);
-    }
 
+    int totalW = 0;
+    int nameIdx = 0;
     for (int i = 0; i < nTabs; i++) {
-        tabCtrls[i]->idealSize = tabSize;
+        if (!tabs[i]->fitToLabel) {
+            int tabDx = equalWidth ? dx : std::min(dx, nameDx[nameIdx++]);
+            tabCtrls[i]->idealSize = {tabDx, dy};
+        }
+        totalW += tabCtrls[i]->idealSize.dx;
     }
 
     // pack tabs left-to-right (LTR) or right-aligned with reversed order (RTL)
     bool isRtl = IsTabsRtl(hwnd);
-    int totalW = nTabs * tabSize.dx;
     int x = 0;
-    if (isRtl && totalW < rect.dx) {
-        x = rect.dx - totalW;
+    if (isRtl && totalW + plusDx < rect.dx) {
+        x = rect.dx - totalW - plusDx;
     }
     vroot->SetBounds(rect);
     VirtCtrl::SetBounds(rect);
 
+    // RTL: the tabs run right to left, so what comes after them is on the left
+    if (isRtl) {
+        plusBtn->SetBounds({rect.x + x, rect.y, plusDx, dy});
+        x += plusDx;
+    }
     for (int i = 0; i < nTabs; i++) {
         int idx = isRtl ? (nTabs - 1 - i) : i;
         TabCtrl* t = tabCtrls[idx];
-        Rect r = {x, 0, tabSize.dx, tabSize.dy};
+        Rect r = {x, 0, t->idealSize.dx, t->idealSize.dy};
         // absolute client coords; TabCtrl::SetBounds rebases via parent origin
         t->SetBounds({rect.x + r.x, rect.y + r.y, r.dx, r.dy});
-        x += tabSize.dx;
+        x += r.dx;
+    }
+    if (!isRtl) {
+        plusBtn->SetBounds({rect.x + x, rect.y, plusDx, dy});
     }
 }
 
@@ -521,29 +705,62 @@ HBITMAP TabsCtrl::RenderForDragging(int idx) {
     gfx->SetTextRenderingHint(TextRenderingHintClearTypeGridFit);
     gfx->SetPageUnit(UnitPixel);
 
-    StringFormat sf(StringFormat::GenericDefault());
-    sf.SetFormatFlags(Gdiplus::StringFormatFlagsNoWrap);
-    sf.SetLineAlignment(StringAlignmentCenter);
-    sf.SetTrimming(Gdiplus::StringTrimmingEllipsisCharacter);
+    StringFormat sfFile(StringFormat::GenericDefault());
+    sfFile.SetFormatFlags(Gdiplus::StringFormatFlagsNoWrap);
+    sfFile.SetLineAlignment(StringAlignmentCenter);
+    sfFile.SetTrimming(Gdiplus::StringTrimmingEllipsisCharacter);
+    StringFormat sfPage(StringFormat::GenericDefault());
+    sfPage.SetFormatFlags(Gdiplus::StringFormatFlagsNoWrap);
+    sfPage.SetLineAlignment(StringAlignmentCenter);
+    sfPage.SetTrimming(Gdiplus::StringTrimmingNone);
 
     // the drag image is the tab as it looks while selected
     Color bgCol = GetColor(kColTabBg);
     Color textCol = TabTextColorForBackground(GetColor(kColTabText), bgCol);
 
-    SolidBrush br(GdipCol(bgCol));
+    SolidBrush br(GdiRgbFromColor(bgCol));
     Gdiplus::Rect gr(0, 0, r.dx, r.dy);
     gfx->FillRectangle(&br, gr);
 
-    HDC hdc = GetDC(hwnd);
-    Font f(hdc, GetFont()->GetHFont());
-    ReleaseDC(hwnd, hdc);
+    Gdiplus::Font* f = GetFont() ? GetFont()->GetGdiplusFont() : nullptr;
+    bool ownedFont = false;
+    if (!f && GetFont()) {
+        HDC hdc = GetDC(hwnd);
+        f = new Font(hdc, GetFont()->GetHFont());
+        ReleaseDC(hwnd, hdc);
+        ownedFont = true;
+    }
 
     Gdiplus::RectF rTxt(0, 0, (float)r.dx, (float)r.dy);
     rTxt.X += 8;
     rTxt.Width -= (8 + 8);
-    br.SetColor(GdipCol(textCol));
+
+    int pageDx = 0;
+    if (len(ti->pageText) > 0 && GetFont()) {
+        pageDx = PlatformFontMeasureText(GetFont(), ti->pageText).dx;
+        if (pageDx + 12 >= (int)rTxt.Width) {
+            pageDx = 0;
+        }
+    }
+    Gdiplus::RectF rFile = rTxt;
+    Gdiplus::RectF rPage = rTxt;
+    if (pageDx > 0) {
+        rFile.Width = rTxt.Width - (float)pageDx;
+        rPage.X = rFile.X + rFile.Width;
+        rPage.Width = (float)pageDx;
+    }
+
+    br.SetColor(GdiRgbFromColor(textCol));
     WCHAR* ws = CWStrTemp(ti->text);
-    gfx->DrawString(ws, -1, &f, rTxt, &sf, &br);
+    gfx->DrawString(ws, -1, f, rFile, &sfFile, &br);
+    if (pageDx > 0) {
+        br.SetColor(GdiRgbFromColor(AccentColor(textCol, 40)));
+        WCHAR* wsPage = CWStrTemp(ti->pageText);
+        gfx->DrawString(wsPage, -1, f, rPage, &sfPage, &br);
+    }
+    if (ownedFont) {
+        delete f;
+    }
 
     HBITMAP ret;
     bitmap.GetHBITMAP(Gdiplus::Color(255, 255, 255), &ret);
@@ -629,20 +846,20 @@ static void UpdateAfterDrag(TabsCtrl* tabsCtrl, int tabIdxFrom, int tabIdxTo) {
     bool badState =
         (tabIdxFrom == tabIdxTo) || (tabIdxFrom < 0) || (tabIdxTo < 0) || (tabIdxFrom >= nTabs) || (tabIdxTo > nTabs);
     if (badState) {
-        logfa("tabIdxFrom: %d, tabIdxTo: %d, nTabs: %d\n", tabIdxFrom, tabIdxTo, nTabs);
+        logf("tabIdxFrom: %d, tabIdxTo: %d, nTabs: %d\n", tabIdxFrom, tabIdxTo, nTabs);
         ReportDebugIf(true);
         return;
     }
 
     auto&& tabs = tabsCtrl->tabs;
     TabInfo* moved = tabs[tabIdxFrom];
-    tabs.RemoveAt(tabIdxFrom);
+    VecRemoveAt(tabs, tabIdxFrom);
     if (tabIdxFrom < tabIdxTo) {
         // we moved from left to right e.g. from 1 to 3
         // after removing 1 we insert not at 3 but 2
         tabIdxTo -= 1;
     }
-    tabs.InsertAt(tabIdxTo, moved);
+    VecInsertAt(tabs, tabIdxTo, moved);
     tabsCtrl->RebuildTabCtrls();
     tabsCtrl->SetSelected(tabIdxTo);
     tabsCtrl->LayoutTabs();
@@ -689,13 +906,6 @@ void TabsCtrl::CloseTab(int idx) {
     }
     ScheduleRepaint();
     tabBeingClosed = -1;
-}
-
-static bool CanDragTab(TabInfo* tab) {
-    if (tab->isPinned) {
-        return false;
-    }
-    return true;
 }
 
 void TabsCtrl::Paint(VirtPaintCtx&) {
@@ -755,7 +965,7 @@ LRESULT TabsCtrl::WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             }
             mousePos = HwndScreenToClient(hwnd, mousePos);
             tabState = TabStateFromMousePosition(mousePos);
-            if (tabState.tabIdx >= 0) {
+            if (tabState.tabIdx >= 0 || (plusBtn && plusBtn->BoundsInWindow().Contains(mousePos))) {
                 return HTCLIENT;
             }
             return HTTRANSPARENT;
@@ -792,7 +1002,7 @@ LRESULT TabsCtrl::WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 TabCtrl* hlCtrl = TabCtrlAt(hl);
                 HBITMAP hbmp = RenderForDragging(hl);
                 if (!hbmp || !hlCtrl) {
-                    logfa("TabsCtrl::WndProc: RenderForDragging failed for tab %d\n", hl);
+                    logf("TabsCtrl::WndProc: RenderForDragging failed for tab %d\n", hl);
                     return 0;
                 }
                 Rect r = hlCtrl->BoundsInWindow();
@@ -812,16 +1022,6 @@ LRESULT TabsCtrl::WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             }
 
             if (hl != tabUnderMouse) {
-                // note: hl == -1 possible repro: we start drag, a file gets loaded via DDE etc.
-                // which re-layouts tabs and mouse is no longer over a tab
-                if (isDragging && hl != -1 && tabUnderMouse != -1) {
-                    // send notification if the highlighted tab is dragged over another
-                    if (!CanDragTab(GetTab(tabUnderMouse))) {
-                        TriggerTabDragged(this, hl, tabUnderMouse);
-                        UpdateAfterDrag(this, hl, tabUnderMouse);
-                        return 0;
-                    }
-                }
                 UpdateHover(tabUnderMouse);
                 return 0;
             }
@@ -837,9 +1037,8 @@ LRESULT TabsCtrl::WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         }
 
         case WM_LBUTTONDOWN: {
-            if (overClose) {
-                tabBeingClosed = tabUnderMouse;
-            }
+            // a ✕ closes only when both press and release are on it
+            tabBeingClosed = overClose ? tabUnderMouse : -1;
             LRESULT res = 0;
             if (vroot) {
                 vroot->OnMessage(msg, wp, lp, res);
@@ -848,6 +1047,12 @@ LRESULT TabsCtrl::WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         }
 
         case WM_LBUTTONUP: {
+            // end the drag before ReleaseCapture() so WM_CAPTURECHANGED doesn't cancel it
+            bool droppingTab = draggingTab;
+            if (draggingTab) {
+                draggingTab = false;
+                ImageList_EndDrag();
+            }
             bool isDragging = (GetCapture() == hwnd);
             if (isDragging) {
                 ReleaseCapture();
@@ -864,15 +1069,13 @@ LRESULT TabsCtrl::WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             // update the hover state
             UpdateHover(tabUnderMouse);
 
-            if (!draggingTab) {
+            if (!droppingTab) {
                 LRESULT res = 0;
                 if (vroot) {
                     vroot->OnMessage(msg, wp, lp, res);
                 }
                 return 0;
             }
-            draggingTab = false;
-            ImageList_EndDrag();
             int selectedTab = selectedIdx;
             if (tabUnderMouse < 0) {
                 // migrate to new/different window
@@ -894,6 +1097,16 @@ LRESULT TabsCtrl::WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             UpdateAfterDrag(this, selectedTab, dstIdx);
             ScheduleRepaint();
             return 0;
+        }
+
+        case WM_CAPTURECHANGED: {
+            // capture lost mid-drag (Alt+Tab, a dialog): cancel it, or the next
+            // button-up on the strip would drop the tab
+            if (draggingTab) {
+                draggingTab = false;
+                ImageList_EndDrag();
+            }
+            break;
         }
 
         case WM_MBUTTONDOWN: {
@@ -971,6 +1184,7 @@ HWND TabsCtrl::Create(TabsCtrl::CreateArgs& args) {
     RegisterTabsCtrlClass();
     withToolTips = args.withToolTips;
     tabDefaultDx = args.tabDefaultDx;
+    equalWidth = args.equalWidth;
     font = args.font;
     ctrlID = args.ctrlID;
 
@@ -993,7 +1207,7 @@ HWND TabsCtrl::Create(TabsCtrl::CreateArgs& args) {
     vroot = new VirtRoot(hwnd);
     // non-owning top: MainWindow owns TabsCtrl, TabsCtrl owns vroot
     Vec<VirtCtrl*> tops;
-    tops.Append(this);
+    VecAppend(tops, this);
     vroot->SetTops(tops);
     return hwnd;
 }
@@ -1006,7 +1220,7 @@ Size TabsCtrl::GetIdealSize() {
 // takes ownership of tab
 int TabsCtrl::InsertTab(int idx, TabInfo* tab, bool update) {
     ReportIf(idx < 0);
-    tabs.InsertAt(idx, tab);
+    VecInsertAt(tabs, idx, tab);
     RebuildTabCtrls();
     if (update) {
         // LayoutTabs() must be before SetSelected() because SetSelected()
@@ -1017,6 +1231,21 @@ int TabsCtrl::InsertTab(int idx, TabInfo* tab, bool update) {
         TabsCtrlUpdateAfterChangingTabsCount(this);
     }
     return idx;
+}
+
+void TabsCtrl::SetPageText(int idx, Str page) {
+    TabInfo* tab = GetTab(idx);
+    if (!tab) {
+        return;
+    }
+    if (tab->pageText && page && str::Eq(tab->pageText, page)) {
+        return;
+    }
+    str::ReplaceWithCopy(&tab->pageText, page);
+    if (!equalWidth) {
+        LayoutTabs();
+    }
+    ScheduleRepaint();
 }
 
 void TabsCtrl::SetTextAndTooltip(int idx, Str text, Str tooltip2) {
@@ -1045,12 +1274,20 @@ void TabsCtrl::SetTabDirty(int idx, bool dirty) {
 
 // returns userData because it's not owned by TabsCtrl
 UINT_PTR TabsCtrl::RemoveTab(int idx) {
-    ReportIf(idx < 0);
-    ReportIf(idx >= TabCount());
+    // GetTabIdx's "not found" is -1; a nested DDE CloseAllTabs / CloseWindow can
+    // remove the tab before the outer CloseTab resumes. Do not index tabs[-1].
+    if (idx < 0 || idx >= TabCount()) {
+        if (idx < -1) {
+            ReportIf(true);
+        } else {
+            logf("TabsCtrl::RemoveTab: out-of-range idx=%d (tabs=%d)\n", idx, TabCount());
+        }
+        return 0;
+    }
     int selectedTab = selectedIdx;
     TabInfo* tab = tabs[idx];
     UINT_PTR userData = tab->userData;
-    tabs.RemoveAt(idx);
+    VecRemoveAt(tabs, idx);
     delete tab;
     RebuildTabCtrls();
     if (TabCount() > 0 && selectedTab >= 0) {
@@ -1064,6 +1301,11 @@ UINT_PTR TabsCtrl::RemoveTab(int idx) {
         selectedIdx = -1;
     }
     LayoutTabs();
+    // the rebuilt tabs only show once painted; a close not from a tab's X (a
+    // command, the context menu) has nothing else repaint the strip (#6469)
+    if (TabCount() > 0) {
+        ScheduleRepaint();
+    }
     TabsCtrlUpdateAfterChangingTabsCount(this);
     return userData;
 }
@@ -1078,7 +1320,7 @@ void TabsCtrl::SwapTabs(int idx1, int idx2) {
 // Note: the caller should take care of deleting userData
 void TabsCtrl::RemoveAllTabs() {
     DeleteVecMembers(tabs);
-    tabs.Reset();
+    VecReset(tabs);
     selectedIdx = -1;
     RebuildTabCtrls();
     LayoutTabs();

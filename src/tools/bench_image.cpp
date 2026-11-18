@@ -13,7 +13,7 @@
 #include "base/Base.h"
 #include "base/DirScan.h"
 #include "base/File.h"
-#include "base/ScopedWin.h"
+#include "base/AutoWin.h"
 #include "base/Timer.h"
 #include "base/Win.h"
 
@@ -29,18 +29,7 @@ extern "C" {
 #include "jpeglib.h"
 }
 
-void log(Str s) {
-    if (!s) {
-        return;
-    }
-    fwrite(s.s, 1, (size_t)s.len, stderr);
-}
-
-void loga(Str s) {
-    log(s);
-}
-
-void _uploadDebugReport(Str, Str, bool, bool) {}
+void _uploadDebugReport(Str, Str, bool) {}
 
 enum class BenchFormat {
     Jpeg,
@@ -127,7 +116,7 @@ static void JpegErrorExit(j_common_ptr cinfo) {
 }
 
 static bool DecodeLibjpegTurbo(Str data, int* outW, int* outH) {
-    if (!data || data.len < 2) {
+    if (len(data) == 0 || data.len < 2) {
         return false;
     }
     jpeg_decompress_struct cinfo{};
@@ -180,7 +169,7 @@ static bool DecodeLibjpegTurbo(Str data, int* outW, int* outH) {
 // --- libwebp ----------------------------------------------------------------
 
 static bool DecodeLibwebp(Str data, int* outW, int* outH) {
-    if (!data) {
+    if (len(data) == 0) {
         return false;
     }
     int w = 0, h = 0;
@@ -211,7 +200,7 @@ static bool DecodeLibwebp(Str data, int* outW, int* outH) {
 // --- jxldec -----------------------------------------------------------------
 
 static bool DecodeJxldec(Str data, int* outW, int* outH) {
-    if (!data) {
+    if (len(data) == 0) {
         return false;
     }
     jxl_ctx* ctx = jxl_ctx_new(nullptr, nullptr, nullptr, nullptr);
@@ -238,7 +227,7 @@ static bool DecodeJxldec(Str data, int* outW, int* outH) {
 // --- heicdec (+ dav1d for AV1/AVIF, pure-C HEVC for HEIC) -------------------
 
 static bool DecodeHeicdec(Str data, int* outW, int* outH) {
-    if (!data) {
+    if (len(data) == 0) {
         return false;
     }
     heic_ctx* ctx = heic_ctx_new(nullptr, nullptr, nullptr, nullptr);
@@ -466,10 +455,9 @@ static const char* NativeLongName(BenchFormat fmt) {
             return "libjpeg";
         case BenchFormat::Webp:
             return "libwebp";
-        case BenchFormat::Avif:
-            return "heicdec"; // AV1 via dav1d
-        case BenchFormat::Heif:
-            return "heicdec"; // HEVC pure-C
+        case BenchFormat::Avif: // AV1 via dav1d
+        case BenchFormat::Heif: // HEVC pure-C
+            return "heicdec";
         case BenchFormat::Jxl:
             return "jxldec";
     }
@@ -535,7 +523,7 @@ static const char* WinnerName(double native, bool nOk, double wic, bool wOk, dou
 
 static void BenchFile(Str path, BenchFormat fmt, Totals& tot) {
     Str data = file::ReadFile(path);
-    if (!data) {
+    if (len(data) == 0) {
         printf("READ FAIL  %.*s\n", path.len, path.s);
         return;
     }
@@ -596,7 +584,7 @@ int main(int argc, char** argv) {
     Str root{};
 
     for (int i = 1; i < argc; i++) {
-        Str arg = argv[i];
+        Str arg(argv[i]);
         if (str::EqI(arg, StrL("-jpeg")) || str::EqI(arg, StrL("--jpeg"))) {
             fmt = BenchFormat::Jpeg;
             haveFmt = true;
@@ -620,7 +608,7 @@ int main(int argc, char** argv) {
             printf("unknown option: %s\n", arg.s);
             Usage();
             return 1;
-        } else if (!root) {
+        } else if (len(root) == 0) {
             root = arg;
         } else {
             printf("extra argument: %s\n", arg.s);
@@ -629,13 +617,13 @@ int main(int argc, char** argv) {
         }
     }
 
-    if (!haveFmt || !root) {
+    if (!haveFmt || len(root) == 0) {
         Usage();
         return 1;
     }
 
-    ScopedCom com;
-    ScopedGdiPlus gdiplus;
+    AutoCoUninitialize com;
+    AutoGdiPlusShutdown gdiplus;
     heic_init();
 
     StrVec files;

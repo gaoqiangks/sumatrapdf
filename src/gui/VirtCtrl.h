@@ -16,6 +16,7 @@
 struct VirtCtrl;
 struct VirtRoot;
 struct Pixmap;
+struct GfxDoubleBuffer;
 struct WindowBase;
 struct ControlBase;
 struct Tooltip;
@@ -62,9 +63,12 @@ struct VirtMouseEvent {
     Point ptWindow;
     int button = 0; // 0 left, 1 right, 2 middle
     int wheelDelta = 0;
+    // touch pan: how far the finger moved down since the last event, in pixels
+    int panDy = 0;
     bool isCtrl = false;
     bool isShift = false;
     bool isAlt = false;
+    bool isLeftDown = false;
     // true = consume (stop bubbling)
     bool didHandle = false;
 };
@@ -80,7 +84,7 @@ struct VirtKeyEvent {
 
 struct VirtSetCursorEvent {
     VirtCtrl* w = nullptr;
-    Point ptLocal{};
+    Point ptLocal;
     bool didHandle = false;
 };
 
@@ -97,7 +101,7 @@ struct VirtFocusEvent {
 
 struct VirtTooltipEvent {
     VirtCtrl* w = nullptr;
-    Point ptLocal{};
+    Point ptLocal;
     TempStr tip; // set by handler
 };
 
@@ -120,6 +124,10 @@ struct VirtCtrl : ILayout {
     Insets padding{};
     int id = 0;
     uintptr_t userData = 0;
+    // keyboard mnemonic ("&File" => 'F', 0 = none). Parsed when the text is
+    // set, so readers (mnemonic navigation in WindowBase) don't re-parse the
+    // text every time
+    char mnemonic = 0;
     // for debugging; not owned
     Str name;
     // static tooltip (owned); used when onGetTooltip is empty
@@ -144,7 +152,6 @@ struct VirtCtrl : ILayout {
 
     Color GetColor(int idx) const;
     void SetColor(int idx, Color);
-    void ResetColors();
 
     // ILayout
     int MinIntrinsicHeight(int width) override;
@@ -171,6 +178,7 @@ struct VirtCtrl : ILayout {
     bool OnMouseUp(VirtMouseEvent&);
     bool OnMouseMove(VirtMouseEvent&);
     bool OnMouseWheel(VirtMouseEvent&);
+    bool OnPan(VirtMouseEvent&);
     bool OnDoubleClick(VirtMouseEvent&);
     bool OnContextMenu(VirtMouseEvent&);
     void OnMouseEnter();
@@ -208,7 +216,6 @@ struct VirtCtrl : ILayout {
     bool IsEnabled() const;
 
     HWND GetHwnd() const;
-    bool IsPaintable() const;
     bool IsHitTestable() const;
     void SetFlag(u32 f, bool on);
     bool HasFlag(u32 f) const;
@@ -221,6 +228,7 @@ struct VirtCtrl : ILayout {
     VirtMouseHandler onMouseUp;
     VirtMouseHandler onMouseMove;
     VirtMouseHandler onMouseWheel;
+    VirtMouseHandler onPan;
     VirtMouseHandler onDoubleClick;
     VirtMouseHandler onContextMenu;
     Func0 onMouseEnter;
@@ -241,6 +249,7 @@ bool IsVirtCtrlOfKind(VirtCtrl*, Kind);
 // all plain layouts. Doesn't descend into a VirtCtrl's own children - it paints
 // and hit-tests those itself. A tree of only HWND controls yields none
 void CollectVirtCtrls(ILayout* root, Vec<VirtCtrl*>& out);
+void AppendVirtTreeDump(str::Builder& out, Str classFilter);
 
 // One stop in a window's Tab ring: exactly one of the two is set. The ring is
 // the layout order, so an Edit and a virtual button sitting in the same VBox
@@ -283,6 +292,7 @@ bool VirtTreeOnMessage(HWND, VirtRoot*, UINT, WPARAM, LPARAM, LRESULT&);
 // two - and they are not owned here; the layout tree owns them
 struct VirtRoot {
     HWND hwnd = nullptr;
+    GfxDoubleBuffer* gfxBuf = nullptr;
     Vec<VirtCtrl*> tops;
     // set only by SetChild(), which owns what it is given
     VirtCtrl* owned = nullptr;
@@ -300,6 +310,10 @@ struct VirtRoot {
     // legacy single-tree hosts lay out lazily from Paint(); see SetChild()
     bool layoutInPaint = false;
     bool trackingMouseLeave = false;
+    // a touch pan in progress: where it started (window coords) and the last y
+    bool panActive = false;
+    Point panStart;
+    int panLastY = 0;
 
     explicit VirtRoot(HWND);
     ~VirtRoot();
@@ -308,6 +322,8 @@ struct VirtRoot {
     void SetChild(VirtCtrl*);
     // the tops found in a layout tree; not owned
     void SetTops(const Vec<VirtCtrl*>&);
+    void ForgetTops();
+    void DropStaleInputState();
     void SetBounds(Rect);
     void LayoutIfNeeded();
     void RequestLayout();
@@ -354,8 +370,8 @@ struct VirtScroll : VirtCtrl {
     void SetBounds(Rect) override;
     Point ScrollOffset() override;
     void OnMouseWheel(VirtMouseEvent*);
+    void OnPan(VirtMouseEvent*);
 
-    void SetContentDy(int);
     int MaxScrollY() const;
     bool ScrollTo(int y);
     bool ScrollBy(int dy);
@@ -369,6 +385,38 @@ struct VirtScroll : VirtCtrl {
 
     void UpdateScrollbar();
     void NotifyVisibleRange();
+};
+
+// Scrolls an ILayout child (VBox/HBox/Table) inside a clipped viewport.
+struct ScrollBox : VirtCtrl {
+    ILayout* child = nullptr; // owned
+    int scrollY = 0;
+    Size contentSize;
+    int lineDy = 16;
+    bool syncScrollbar = true;
+
+    explicit ScrollBox(ILayout* child);
+    ~ScrollBox() override;
+
+    Size Layout(Constraints bc) override;
+    void SetBounds(Rect) override;
+    Point ScrollOffset() override;
+    void Paint(VirtPaintCtx&) override;
+    int MinIntrinsicHeight(int width) override;
+    int MinIntrinsicWidth(int height) override;
+    Size GetIdealSize() override;
+    int LayoutChildCount() override;
+    ILayout* LayoutChildAt(int) override;
+
+    int MaxScrollY() const;
+    bool ScrollTo(int y);
+    bool ScrollBy(int dy);
+    bool ScrollPage(int dir);
+    void OnMouseWheel(VirtMouseEvent*);
+    void OnVScroll(WPARAM);
+
+  private:
+    void UpdateScrollbar();
 };
 
 // A list of rows: it owns the model, the selection and the scroll position, and
@@ -411,6 +459,13 @@ struct VirtListBox : VirtCtrl {
     int dpi = 96;
 
     int scrollY = 0;
+    // Shift/Ctrl click, Shift+arrows and Ctrl+A; off by default so other
+    // lists stay single-select
+    bool multiSelect = false;
+    // the dashed outline while the list has the keys
+    bool showFocusRing = true;
+    // false: rows cut by the viewport's edges are shown too
+    bool wholeRows = true;
 
     VirtListBox();
     ~VirtListBox() override;
@@ -422,6 +477,7 @@ struct VirtListBox : VirtCtrl {
     void OnMouseUp(VirtMouseEvent*);
     void OnMouseMove(VirtMouseEvent*);
     void OnMouseWheel(VirtMouseEvent*);
+    void OnPan(VirtMouseEvent*);
     void OnDoubleClick(VirtMouseEvent*);
     void OnKeyDown(VirtKeyEvent*);
     void OnCaptureLost();
@@ -434,12 +490,18 @@ struct VirtListBox : VirtCtrl {
     int GetCurrentSelection();
     // -1 clears the selection; doesn't call onSelectionChanged
     bool SetCurrentSelection(int);
+    bool IsSelected(int idx);
+    int SelectedCount();
+    void GetSelectedIndices(Vec<int>& out);
+    void SelectAll();
+    void SelectRange(int from, int to);
+    void ToggleSelected(int idx);
     int ItemFromPoint(Point ptLocal);
     // the row's rectangle in window coords; empty when the row isn't visible
     Rect ItemRect(int idx);
     void EnsureVisible(int idx);
     int ViewportDy();
-    // ViewportDy() rounded down to whole rows
+    // ViewportDy() rounded down to whole rows, if wholeRows
     int UsableDy();
     int MaxScrollY();
     bool ScrollTo(int y);
@@ -447,6 +509,8 @@ struct VirtListBox : VirtCtrl {
 
   private:
     int selIdx = -1;
+    int anchorIdx = -1;
+    Vec<u8> selected;
     // EnsureVisible() called before the first layout; applied by SetBounds()
     int pendingVisibleIdx = -1;
     bool draggingThumb = false;
@@ -455,6 +519,9 @@ struct VirtListBox : VirtCtrl {
     int dragStartY = 0;
     int dragStartScrollY = 0;
 
+    void EnsureSelectedSize();
+    void ApplyClick(int idx, bool ctrl, bool shift);
+    void ApplyNav(int idx, bool ctrl, bool shift);
     int GetDpi();
     int ScrollbarDx();
     Rect ContentRectLocal();
@@ -573,6 +640,8 @@ struct VirtText : VirtCtrl {
     bool prefix = false;
     // nudges the underline off the text baseline box
     int underlineOffsetY = 0;
+    // kColorUnset: the text color
+    Color underlineColor = kColorUnset;
     VirtTextAlign align = VirtTextAlign::Left;
 
     Size sz = {0, 0};
@@ -585,7 +654,6 @@ struct VirtText : VirtCtrl {
     Size Layout(Constraints bc) override;
     Size GetIdealSize() override;
 
-    Size MinIntrinsicSize(int width, int height);
     Size GetIdealSize(bool onlyIfEmpty);
     void SetText(Str);
 
@@ -595,6 +663,8 @@ struct VirtText : VirtCtrl {
 };
 
 VirtText* NewVirtText(const VirtTextArgs&);
+
+char MnemonicCharInStr(Str s);
 
 // Checked downcasts: null unless the layout really is that control. Code that
 // walks a layout tree it didn't build (the toolbar, whose items are a mix of
@@ -618,7 +688,8 @@ struct VirtLink : VirtText {
 
 struct VirtButton : VirtText {
     // colors: kColBtn*, defaulting to gColsBtnDefault when isDefault
-    Insets textPadding{4, 8, 4, 8};
+    Insets textPadding{.top = 4, .right = 8, .bottom = 4, .left = 8};
+    int cornerRadius = 0;
 
     VirtButton(Str s, PlatformFont* font = nullptr);
     ~VirtButton() override;
@@ -629,6 +700,7 @@ struct VirtButton : VirtText {
     void SetIsDefault(bool);
 
     Size GetIdealSize() override;
+    Color TextColor(Color bg) const;
     void Paint(VirtPaintCtx&) override;
     void OnMouseEnter();
     void OnMouseLeave();
@@ -640,6 +712,16 @@ struct VirtButton : VirtText {
 };
 
 VirtButton* AsVirtButton(ILayout*);
+
+// the redrawn dialogs' buttons, in the gui colors the app pushes: the one
+// action filled with the text color, Cancel outlined, the quiet ones muted
+// words that fill on hover
+enum class VirtButtonStyle {
+    Filled,
+    Outline,
+    Ghost
+};
+void SetVirtButtonStyle(VirtButton* b, VirtButtonStyle style);
 
 struct VirtIconButton : VirtCtrl {
     // not owned; in SumatraPDF it comes from GetCachedPixmapForSvg()
@@ -695,7 +777,10 @@ struct LabelWithClose {
     VirtCloseButton* closeBtn = nullptr;
 };
 
+VirtCloseButton* AsVirtCloseButton(ILayout*);
 LabelWithClose NewLabelWithClose(HWND hwndForDpi, PlatformFont*, const VirtMouseHandler& onClose);
+void ApplyLabelWithCloseDpi(VirtText*, VirtCloseButton*, int dpi);
+void ApplyCloseButtonDpi(VirtCloseButton*, int dpi);
 
 struct VirtImage : VirtCtrl {
     Pixmap* pixmap = nullptr; // not owned
@@ -733,6 +818,43 @@ struct VirtLine : VirtCtrl {
 };
 
 VirtLine* AsVirtLine(ILayout*);
+
+// Discrete horizontal slider: a bar with a circle thumb. value is minVal..maxVal.
+struct VirtSlider : VirtCtrl {
+    int minVal = 0;
+    int maxVal = 0;
+    int value = 0;
+    int idealDx = 0;
+    Func0 onValueChanged;
+    Func0 onValueCommitted;
+
+    VirtSlider();
+    ~VirtSlider() override;
+
+    void SetValue(int v, bool notify);
+    bool IsAdjusting() const;
+    int ValueFromLocalX(int xLocal);
+    Rect ThumbHaloRectLocal() const;
+    Size GetIdealSize() override;
+    void Paint(VirtPaintCtx&) override;
+    void OnKeyDown(VirtKeyEvent*);
+    void OnMouseDown(VirtMouseEvent*);
+    void OnMouseMove(VirtMouseEvent*);
+    void OnMouseUp(VirtMouseEvent*);
+    void OnMouseWheel(VirtMouseEvent*);
+    void OnMouseEnter();
+    void OnMouseLeave();
+    void OnCaptureLost();
+
+  private:
+    bool adjusting = false;
+    int committed = 0;
+    int ThumbRadius() const;
+    int HaloWidth() const;
+    Rect TrackRectLocal() const;
+    Point ThumbCenterLocal() const;
+    void ApplyFromEvent(const VirtMouseEvent&, bool commit);
+};
 
 struct VirtSpacer : VirtCtrl {
     Size idealSize;
@@ -834,6 +956,7 @@ struct VirtRichText : VirtCtrl {
     void AddPlainText(Str);
     void AddPlainLink(Str text, Str cmd);
     void LayoutText(int areaWidth);
+    void WrapToBounds();
     bool HasRichContent();
     TempStr PlainTextTemp();
     TipLink* LinkAt(Point ptLocal);
@@ -850,7 +973,27 @@ struct VirtRichText : VirtCtrl {
     void OnGetTooltip(VirtTooltipEvent*); // link under cursor
 };
 
+// always nLines tall: the text wraps to the width and is cut off past the
+// last line, so the layout around it doesn't move as texts of different
+// lengths come and go
+struct VirtFixedLinesText : VirtRichText {
+    int nLines = 6;
+    Color borderCol = kColorUnset;
+
+    int FixedDy();
+    int MinIntrinsicWidth(int height) override;
+    int MinIntrinsicHeight(int width) override;
+    Size Layout(Constraints bc) override;
+    Size GetIdealSize() override;
+    void Paint(VirtPaintCtx&) override;
+    void SetText(Str);
+};
+
 VirtRichText* ParseTip(Str s);
+void TipLinkUnderlines(TipLink* link, Vec<Rect>& out);
+// "Enter run": the key as a key cap before the words, padded 8 on each side
+void InitKeyHint(VirtRichText* t, PlatformFont* font, Str key, Str desc, Color colTxt, Color colBg);
+VirtRichText* NewKeyHint(PlatformFont* font, Str key, Str desc, Color colTxt, Color colBg);
 // same, but into a VirtRichText the caller made (e.g. a subclass of it)
 void ParseTipInto(VirtRichText*, Str s);
 int TipWordCount(VirtRichText*);

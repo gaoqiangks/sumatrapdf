@@ -37,12 +37,22 @@ Diagnostics:
     - readability-qualified-auto
     - modernize-use-auto
     - modernize-use-nodiscard
+    - bugprone-derived-method-shadowing-base-method
     - readability-simplify-boolean-expr
     - readability-use-std-min-max
     - readability-named-parameter
     - readability-non-const-parameter
     - readability-braces-around-statements
     - readability-uppercase-literal-suffix
+    - modernize-macro-to-enum
+    - bugprone-reserved-identifier
+    - readability-named-parameter
+    - misc-multiple-inheritance
+    - readability-avoid-nested-conditional-operator
+    - misc-use-internal-linkage
+    - modernize-use-auto
+    - misc-use-internal-linkage
+    - modernize-avoid-setjmp-longjmp
 ---
 # When editing a header under src/base/, force-include Base.h plus other
 # src/base/*.h not already included by Base.h (headers are not self-sufficient).
@@ -60,6 +70,8 @@ CompileFlags:
     - base/ByteReaderWriter.h
     - -include
     - base/CmdLineArgsIter.h
+    - -include
+    - base/CrashHandler.h
     - -include
     - base/Crypto.h
     - -include
@@ -97,7 +109,7 @@ CompileFlags:
     - -include
     - base/Pixmap.h
     - -include
-    - base/ScopedWin.h
+    - base/AutoWin.h
     - -include
     - base/SettingsUtil.h
     - -include
@@ -137,6 +149,8 @@ CompileFlags:
     - -include
     - base/CmdLineArgsIter.h
     - -include
+    - base/CrashHandler.h
+    - -include
     - base/Crypto.h
     - -include
     - base/CssParser.h
@@ -173,7 +187,7 @@ CompileFlags:
     - -include
     - base/Pixmap.h
     - -include
-    - base/ScopedWin.h
+    - base/AutoWin.h
     - -include
     - base/SettingsUtil.h
     - -include
@@ -213,10 +227,6 @@ CompileFlags:
     - -include
     - AvifReader.h
     - -include
-    - BuildConfig_default.h
-    - -include
-    - BuildConfig.h
-    - -include
     - Canvas.h
     - -include
     - CaptionGlyphs.h
@@ -237,7 +247,6 @@ CompileFlags:
     - -include
     - Commands.h
     - -include
-    - CrashHandler.h
     - -include
     - DisplayMode.h
     - -include
@@ -428,4 +437,3 @@ CompileFlags:
     - WebpReader.h
     - -include
     - WindowTab.h
-

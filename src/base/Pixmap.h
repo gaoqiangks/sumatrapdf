@@ -41,6 +41,11 @@ struct Pixmap {
     int stride = 0; // bytes per row; top-down (row y starts at data + y*stride); multiple of 4
     PixmapFormat format = PixmapFormat::BGRA8;
     bool premultiplied = false; // alpha premultiplied into RGB
+    // the alpha channel is meaningful, so drawing has to composite this pixmap
+    // over whatever is already on the target instead of doing a plain SRCCOPY
+    // (which paints the transparent parts black). Renderers that produce an
+    // opaque result leave this false so the common case stays a straight blit.
+    bool hasAlpha = false;
     float xres = 96.0f;
     float yres = 96.0f;
     u8* data = nullptr; // pixel buffer; owned by malloc, or by hbmp when DIB-section-backed
@@ -53,8 +58,15 @@ struct Pixmap {
 #endif
 };
 
+void CopyPixmapRows(Pixmap* dst, const u8* src, int srcStride);
+void FlipPixmapHorizontally(Pixmap* p);
 Str PixmapToBmpFormat(const Pixmap* pixmap);
 Pixmap* GetClipboardImageAsPixmap();
+Pixmap* PixmapToBgr(Pixmap* p);
+Pixmap* PixmapToBgra(Pixmap* p);
+
+// Gives a decoder an RGB24 or straight-alpha RGBA32 destination buffer.
+typedef u8* (*DecodeDstAllocFn)(void* user, int dx, int dy, bool hasAlpha, int* stride);
 
 #if OS_WIN
 struct RenderedBitmap;
@@ -63,21 +75,30 @@ struct RenderedBitmap;
 // or must adopt a GDI HBITMAP / Native DIB. Heap pixels blit via StretchDIBits
 // with no extra copy (BlitPixmap / BlitPixmapAlpha).
 Pixmap* AllocPixmapDIB(int w, int h);
+Pixmap* PixmapFromHICON(HICON);
 bool BlitPixmap(Pixmap* p, HDC hdc, Rect target);
 bool BlitPixmapAlpha(Pixmap* p, HDC hdc, Rect target);
 bool BlitPixmapRegion(Pixmap* p, HDC hdc, Rect target, Rect source);
+bool BlitPixmapDibBits(const Pixmap* p, HDC hdc, Rect target, Rect source);
 Pixmap* PixmapFromHBITMAP(HBITMAP hbmp, Size size, HANDLE hMap = nullptr);
 // an opaque 32bpp copy of a DIB-backed Pixmap, for code that needs to read pixels
 // out of one whose format is Native. Returns null if there's nothing to copy
 Pixmap* PixmapCopyAs32bppDIB(const Pixmap* p);
 Pixmap* PixmapFromRenderedBitmap(RenderedBitmap* rb);
 RenderedBitmap* RenderedBitmapFromPixmap(Pixmap* px);
-void RecolorPixmap(Pixmap* px, Color textColor, Color bgColor, Color linkColor = 0, Vec<Rect>* skipRects = nullptr);
 
 void FreePixmapNativeBitmap(Pixmap* p);
 #endif
 
+// remaps a rendered page bitmap onto a text / background / link color ramp
+// (dark mode). ng: portable, orig declares it in the win32 half
+void RecolorPixmap(Pixmap* px, Color textColor, Color bgColor, Color linkColor = 0, Vec<Rect>* skipRects = nullptr);
+
+// 0 for Native: those pixels can only be read through GDI
 inline int PixmapBytesPerPixel(PixmapFormat fmt) {
+    if (fmt == PixmapFormat::Native) {
+        return 0;
+    }
     return fmt == PixmapFormat::BGR8 ? 3 : 4;
 }
 
@@ -94,13 +115,16 @@ inline Pixmap* AllocPixmap(int w, int h, PixmapFormat fmt = PixmapFormat::BGRA8,
         return nullptr;
     }
     size_t bpp = (size_t)PixmapBytesPerPixel(fmt);
+    if (bpp == 0) {
+        return nullptr;
+    }
     size_t stride = (((size_t)w * bpp) + 3) & ~(size_t)3;
     size_t nBytes = stride * (size_t)h;
     // guard against overflow on absurd dimensions
     if (stride > INT_MAX || nBytes / stride != (size_t)h) {
         return nullptr;
     }
-    u8* data = (u8*)malloc(nBytes);
+    u8* data = (u8*)Alloc(nullptr, nBytes);
     if (!data) {
         return nullptr;
     }
@@ -119,6 +143,11 @@ inline Pixmap* AllocPixmap(int w, int h, PixmapFormat fmt = PixmapFormat::BGRA8,
 inline Pixmap* AllocPixmapDIB(int w, int h) {
     return AllocPixmap(w, h);
 }
+
+// ng: the Windows half is GDI+ (GdiPlusUtil.h); off Windows it moves pixels.
+// Applies an EXIF orientation (2..8) and frees the input; anything else
+// returns px unchanged.
+Pixmap* PixmapApplyExifOrientation(Pixmap* px, int orientation);
 #endif
 
 inline void FreePixmap(Pixmap* p) {
@@ -141,12 +170,19 @@ inline Pixmap* ClonePixmap(const Pixmap* src) {
     if (!src || !src->data) {
         return nullptr;
     }
+#if OS_WIN
+    // ng: Native pixels have no layout to copy; the clone is a 32bpp DIB
+    if (src->format == PixmapFormat::Native) {
+        return PixmapCopyAs32bppDIB(src);
+    }
+#endif
     Pixmap* p = AllocPixmap(src->width, src->height, src->format, src->premultiplied);
     if (!p) {
         return nullptr;
     }
     p->xres = src->xres;
     p->yres = src->yres;
+    p->hasAlpha = src->hasAlpha;
     memcpy(p->data, src->data, (size_t)src->stride * (size_t)src->height);
     return p;
 }

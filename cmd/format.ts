@@ -1,7 +1,7 @@
 import { $, Glob } from "bun";
-import { join, basename } from "node:path";
+import { basename } from "node:path";
 import { cpus } from "node:os";
-import { detectVisualStudio } from "./util";
+import { findClangFormat } from "./util";
 
 async function globFiles(patterns: string[]): Promise<string[]> {
   const files: string[] = [];
@@ -35,13 +35,43 @@ async function formatFile(clangFormatPath: string, path: string): Promise<void> 
   }
 }
 
+// prettier owns our .ts sources; .prettierrc.json / .prettierignore have the settings
+const prettierGlobs = ["cmd/**/*.ts", "tests/**/*.ts"];
+
+async function formatTsFiles(): Promise<void> {
+  console.log(`running prettier on ${prettierGlobs.join(" ")}`);
+  await $`bunx prettier --write --log-level warn ${prettierGlobs}`;
+}
+
+function usage(): string {
+  return `Usage: bun cmd/format.ts [-ts]
+
+  (no options)  format C/C++ sources with clang-format and .ts sources with prettier
+  -ts           only run prettier on the .ts sources
+`;
+}
+
 async function main() {
-  const { clangFormatPath: cfPath } = detectVisualStudio();
-  const clangFormatPath = cfPath || "clang-format.exe";
+  const args = process.argv.slice(2);
+  const tsOnly = args.includes("-ts");
+  const unknown = args.filter((a) => a !== "-ts");
+  if (unknown.length > 0) {
+    console.error(`unknown option: ${unknown[0]}\n`);
+    console.error(usage());
+    process.exit(1);
+  }
+
+  await formatTsFiles();
+  if (tsOnly) {
+    return;
+  }
+
+  const clangFormatPath = findClangFormat();
   console.log(`using '${clangFormatPath}'`);
 
   const patterns = [
     "src/*.cpp",
+    "src/shared/**/*.{cpp,c,h}",
     "src/*.h",
     "src/mui/*.cpp",
     "src/mui/*.h",
@@ -49,15 +79,19 @@ async function main() {
     "src/base/*.h",
     "src/base/tests/*.cpp",
     "src/base/tests/*.h",
+    "src/tests/*.cpp",
+    "src/tests/*.h",
     "src/gui/*",
     "src/gui/win/*",
+    "src/gui/tests/*",
     "src/uia/*",
     "src/tools/**/*.{cpp,c,h,hpp}",
     "src/ifilter/*.cpp",
     "src/ifilter/*.h",
     "src/previewer/*.cpp",
     "src/previewer/*.h",
-    "ext/mupdf_load_system_font.c",
+    "src/mupdf/*.c",
+    "src/mupdf/*.h",
   ];
 
   const files = await globFiles(patterns);

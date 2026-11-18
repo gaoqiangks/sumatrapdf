@@ -2,13 +2,12 @@
    License: GPLv3 */
 
 struct AnnotCreateArgs;
+struct CustomCommand;
+struct IPageElement;
 enum class FileType : u8;
 
 #include "OverlayScrollbar.h"
-
-// This TeXstudio build must not be discovered by the standard viewer's instance lookup.
-#define CANVAS_CLASS_NAME L"SUMATRA_TEXSTUDIO37_PDF_CANVAS"
-#define FRAME_CLASS_NAME L"SUMATRA_TEXSTUDIO37_PDF_FRAME"
+#include "AppIdentity.h"
 
 constexpr int kFrameResizeHitTest = 5;
 
@@ -18,83 +17,60 @@ constexpr const char* kWebsiteURL = "https://www.sumatrapdfreader.org/";
 constexpr const char* kManualURL = "https://www.sumatrapdfreader.org/manual";
 constexpr const char* kContributeTranslationsURL = "https://www.sumatrapdfreader.org/docs/Contribute-translation";
 
-#ifndef CRASH_REPORT_URL
-#define CRASH_REPORT_URL "https://www.sumatrapdfreader.org/docs/Contribute-to-SumatraPDF"
+#ifndef kCrashReportUrl
+#define kCrashReportUrl "https://www.sumatrapdfreader.org/docs/Contribute-to-SumatraPDF"
 #endif
 
 // scrolls half a page down/up (needed for Shift+Up/Down)
-#define SB_HALF_PAGEUP (WM_USER + 102)
-#define SB_HALF_PAGEDOWN (WM_USER + 103)
+constexpr int kSbHalfPageUp = (WM_USER + 102);
+constexpr int kSbHalfPageDown = (WM_USER + 103);
 
 constexpr int kHideCursorTimerID = 3;
 constexpr int kHideCursorDelayInMs = 3000;
 
-#define REPAINT_TIMER_ID 1
-#define REPAINT_MESSAGE_DELAY_IN_MS 1000
+constexpr int kRepaintTimerID = 1;
+constexpr int kRepaintMessageDelayInMs = 1000;
 
-#define AUTO_RELOAD_TIMER_ID 5
+constexpr int kAutoReloadTimerID = 5;
 
-#define READ_ALOUD_HIGHLIGHT_TIMER_ID 8
-#define READ_ALOUD_HIGHLIGHT_DELAY_IN_MS 80
+// polls the mouse for the floating sidebar (SidebarAutoHide)
+constexpr UINT_PTR kSidebarOverlayTimerID = 18;
+enum class SidebarOverlayUpdate {
+    Layout,
+    Mouse
+};
+
 // debounce: coalesce bursts of file-change notifications (a single save can
 // fire several) into one reload. SetTimer() with the same id resets it, so the
 // reload only happens once the file has been quiet for this long (#5690).
 // The timer also re-arms itself while the file keeps changing, so a slow
 // writer doesn't get us to load a half-written document
-#define AUTO_RELOAD_DELAY_IN_MS 500
+constexpr int kAutoReloadDelayInMs = 500;
 // stop waiting for the writer after this long and reload whatever is there
 constexpr u64 kAutoReloadMaxWaitMs = 5000;
 
-// permissions that can be revoked through sumatrapdfrestrict.ini or the -restrict command line flag
-enum class Perm : uint {
-    // enables Update checks, crash report submitting and hyperlinks
-    InternetAccess = 1 << 0,
-    // enables opening and saving documents and launching external viewers
-    DiskAccess = 1 << 1,
-    // enables persistence of preferences to disk (includes the Frequently Read page and Favorites)
-    SavePreferences = 1 << 2,
-    // enables setting as default viewer
-    RegistryAccess = 1 << 3,
-    // enables printing
-    PrinterAccess = 1 << 4,
-    // enables image/text selections and selection copying (if permitted by the document)
-    CopySelection = 1 << 5,
-    // enables fullscreen and presentation view modes
-    FullscreenAccess = 1 << 6,
-    // enables all of the above
-    All = 0x0FFFFFF,
-    // set if either sumatrapdfrestrict.ini or the -restrict command line flag is present
-    RestrictedUse = 0x1000000,
-};
-
-inline constexpr Perm operator|(Perm lhs, Perm rhs) {
-    using T = std::underlying_type_t<Perm>;
-    return static_cast<Perm>(static_cast<T>(lhs) | static_cast<T>(rhs));
-}
-
-inline constexpr Perm operator&(Perm lhs, Perm rhs) {
-    using T = std::underlying_type_t<Perm>;
-    return static_cast<Perm>(static_cast<T>(lhs) & static_cast<T>(rhs));
-}
-
-inline constexpr Perm operator<<(Perm lhs, uint rhs) {
-    using T = std::underlying_type_t<Perm>;
-    return static_cast<Perm>(static_cast<T>(lhs) << static_cast<T>(rhs));
-}
-
-inline constexpr Perm operator~(Perm lhs) {
-    using T = std::underlying_type_t<Perm>;
-    T v = static_cast<T>(lhs);
-    v = ~v;
-    return static_cast<Perm>(v);
-}
+#include "Permissions.h"
+#include "SidebarMetrics.h"
 
 struct Favorites;
 struct FileHistory;
 struct MainWindow;
+extern Func1<MainWindow*> gAfterLayout;
+extern Func0 gOnSessionRestored;
+void ShowWinScrollBar(HWND hwnd, int bar, BOOL show);
+void CancelDrag(MainWindow* win);
+void NotifySessionRestoreFinished();
+bool IsSessionRestoreFinished();
+bool HasPendingDocumentLoads();
+bool AreLoadThreadsActive();
 // tells the frame's virtual tree which splitters exist (they are created
 // with their panes)
 void FrameSyncSplitters(MainWindow*);
+void UpdateSidebarOverlay(MainWindow*, SidebarOverlayUpdate);
+void SetSidebarTestCursor(Point pt);
+void SetAnnotCreateArgs(AnnotCreateArgs&, CustomCommand*);
+void BeginPdfEditOperation(MainWindow*, const char* name);
+void EndPdfEditOperation(MainWindow*);
 struct NotificationWnd;
 struct RenderCache;
 struct WindowTab;
@@ -113,7 +89,6 @@ extern RenderCache* gRenderCache;
 extern bool gSupressNextAltMenuTrigger;
 extern HBITMAP gBitmapReloadingCue;
 extern HCURSOR gCursorDrag;
-extern bool gCrashOnOpen;
 extern HWND gLastActiveFrameHwnd;
 
 struct DocController;
@@ -124,15 +99,15 @@ DocControllerCallback* CreateControllerCallbackHandler(MainWindow* win);
 
 #define gPluginMode ((bool)gPluginURL)
 
-bool NeedsWindowEmbeddingHacks();
 bool SettingsUseTabs();
-bool SettingsRestoreSession();
 bool SettingsRememberOpenedFiles();
 
+void CrashHandlerSetSettings(Str settings);
+
 void InitializePolicies(bool restrict);
-void RestrictPolicies(Perm revokePermission);
 bool HasPermission(Perm permission);
 bool CanAccessDisk();
+TempStr AskForFolderTemp(HWND owner, Str title, Str startDir);
 bool AnnotationsAreDisabled();
 bool IsUIRtl();
 bool SumatraLaunchBrowser(Str url);
@@ -141,41 +116,30 @@ bool MaybeLaunchDocumentation(Str url);
 bool OpenFileExternally(Str path);
 void CloseCurrentTab(MainWindow* win, bool quitIfLast);
 void CloseTab(WindowTab* tab, bool quitIfLast);
-bool CanContinueReadAloud(WindowTab* tab);
 bool MaybeSaveAnnotations(WindowTab* tab);
+bool SaveAnnotationsToExistingFile(WindowTab*);
+bool SaveAnnotationsToMaybeNewPdfFile(WindowTab*);
+enum class UnsavedChangesAction {
+    Discard,
+    SaveExisting,
+    SaveNew
+};
+bool ResolveUnsavedChanges(WindowTab* tab, UnsavedChangesAction action, Str newPath = {});
 void DeleteFileFromDiskAndHistory(Str path);
-WindowTab* FindTabByFilePath(Str path);
+WindowTab* FindTabByFilePath(Str path, MainWindow* limitWin = nullptr);
+WindowTab* FindTabInWindow(Str path, MainWindow* win);
 // the tab that currently owns this controller, null if it is no longer shown
 WindowTab* FindTabByController(DocController*);
-WindowTab* GetReadAloudSourceTab();
-void ReadAloudForgetTab(WindowTab*);
-
-constexpr UINT CmdTtsVoiceDefault = 0x7100;
-constexpr UINT CmdTtsVoiceFirst = 0x7101;
-constexpr UINT CmdTtsVoiceLast = 0x71ff;
-constexpr UINT CmdTtsMenuReadCurrentPage = 0x7200;
-constexpr UINT CmdTtsMenuContinueReading = 0x7201;
-constexpr UINT CmdTtsMenuReadSelection = 0x7202;
-constexpr UINT CmdTtsMenuPauseReading = 0x7203;
-constexpr UINT CmdTtsMenuReadFromCursor = 0x7204;
-constexpr UINT CmdTtsMenuStopReading = 0x7205;
-constexpr UINT CmdTtsSpeedFirst = 0x7300;
-constexpr UINT CmdTtsSpeedLast = 0x730f;
-
-TempStr ReadAloudSpeedLabelTemp(float speed);
-
-void RebuildReadAloudMenu(MainWindow* win, HMENU menu, bool includeCursorItem = false, bool canReadFromCursor = false);
-bool HandleReadAloudMenuCommand(MainWindow* win, int cmdId);
-void SetReadAloudAppSubmenu(HMENU menu);
-bool IsReadAloudAppSubmenu(HMENU menu);
-void SetReadAloudContextSubmenu(HMENU menu);
-void ShowTtsVoiceMenu(MainWindow* win, Rect buttonScreen);
-bool IsReadAloudContextSubmenu(HMENU menu);
-HMENU GetReadAloudContextSubmenu();
 bool CanCloseWindow(MainWindow* win);
 void CloseWindow(MainWindow* win, bool quitIfLast, bool forceClose);
 void PostAppExit();
-void SetSidebarVisibility(MainWindow* win, bool tocVisible, bool showFavorites);
+enum class SidebarResizeFrame {
+    Keep,
+    Adjust
+};
+void SetSidebarVisibility(MainWindow* win, bool topVisible, bool bottomVisible,
+                          SidebarResizeFrame = SidebarResizeFrame::Keep);
+void SetTocVisibility(MainWindow* win, bool tocVisible, SidebarResizeFrame = SidebarResizeFrame::Keep);
 void RememberFavTreeExpansionState(MainWindow* win);
 void AdvanceFocus(MainWindow* win);
 void SetCurrentLanguageAndRefreshUI(Str langCode);
@@ -202,7 +166,6 @@ constexpr int kToolbarHide = 1;
 constexpr int kToolbarOverlay = 2;
 extern SeqStrings gToolbarModeNames;
 int ToolbarModeFromPrefs();
-bool ToolbarModeIsOverlay();
 bool ToolbarModeIsHidden();
 void SetToolbarMode(int mode);
 int FullscreenToolbarModeFromPrefs();
@@ -218,7 +181,6 @@ void UpdateTabFileDisplayStateForTab(WindowTab* tab);
 void ReloadDocument(MainWindow* win, bool autoRefresh, bool canAskForPassword = true);
 bool AutoReloadFileStillChanging(WindowTab* tab);
 void DeleteControllerAsync(DocController* ctrl);
-void WaitForPendingControllerDeletes();
 void ToggleFullScreen(MainWindow* win, bool presentation = false);
 
 // flags for ScheduleUiUpdate
@@ -234,15 +196,18 @@ constexpr u32 kUiTabsDirty = 0x8;    // repaint the tab bar
 // ignored if another pending request wants them updated
 constexpr u32 kUiNoToolbars = 0x10;
 constexpr u32 kUiSidebarDirty = 0x20; // repaint toc/favorites boxes and their splitters
+constexpr u32 kUiPanelsDrag = 0x40;   // live drag of the splitter between the sidebar panels
 
 void ScheduleUiUpdate(MainWindow* win, u32 flags = kUiRelayout, int sidebarDx = -1);
 void DuplicateTabInNewWindow(WindowTab* tab);
 void DuplicateTabInNewTab(WindowTab* tab);
 void CopyFilePath(WindowTab*);
+void CopyLocationToClipboard(WindowTab*);
 
 MainWindow* FindMainWindowByFile(Str file, bool focusTab, MainWindow* limitWin = nullptr);
 MainWindow* FindMainWindowBySyncFile(Str path, bool focusTab);
-WindowTab* FindTabByFile(Str file, MainWindow* limitWin = nullptr);
+void ExecuteCmd(MainWindow* win, int cmdId);
+void OpenNextPrevFileInFolder(MainWindow* win, bool forward, Str pathToDelete = {});
 void SelectTabInWindow(WindowTab*);
 
 bool IsDocumentOpenOrLoading(Str file);
@@ -275,6 +240,8 @@ struct LoadArgs {
     bool showWin = true;
     bool forceReuse = false;
     bool forceNewTab = false;
+    // do not add as a tab of an existing window (-new-window with several files)
+    bool forceNewWindow = false;
     // over-writes placeWindow and other flags and forces no changing
     // of window location after loading
     bool noPlaceWindow = false;
@@ -287,17 +254,27 @@ struct LoadArgs {
     bool noSavePrefs = false;
 
     bool lazyLoad = false;
+    bool deferTabUpdate = false;
     bool async = false;
     bool activateExisting = false;
+    // do not add to File History / Windows Recent (CmdOpenFileNoHistory)
+    bool skipHistory = false;
     // with activateExisting: only switch to an existing tab in args->win (UI
     // open paths). DDE and other global lookups leave this false.
     bool activateExistingInWindow = false;
+
+    DisplayMode initialDisplayMode = DisplayMode::Automatic;
+    float initialZoom = kInvalidZoom;
+    float ebookLayoutAspect = 0;
 
     DocController* ctrl = nullptr;
 
     FileArgs* fileArgs = nullptr;
 
     TabState* tabState = nullptr;
+    // Clone() deep-copies tabState so an async or parked load never reads a
+    // session snapshot that SaveSettings() has since rebuilt
+    bool ownsTabState = false;
     WindowTab* targetTab = nullptr;
 
     // if set, called on the UI thread when the load finishes,
@@ -312,19 +289,22 @@ struct LoadArgs {
 struct PasswordUI;
 
 MainWindow* LoadDocument(LoadArgs* args);
+MainWindow* LoadDocument(MainWindow* win, Str path);
+void RememberDefaultWindowPosition(MainWindow* win);
 MainWindow* LoadDocumentFinish(LoadArgs* args);
 void StartLoadDocument(LoadArgs* args);
-void StartLoadDocuments(StrVec& paths, MainWindow* win);
+void StartLoadDocuments(StrVec& paths, MainWindow* win, bool skipHistory = false);
 MainWindow* CreateAndShowMainWindow(SessionData* data = nullptr, bool showWin = true);
 void ShowMainWindow(MainWindow* win, int windowState);
-void MaybeShowDefaultAppNotification(MainWindow* win);
 DocController* CreateControllerForEngineOrFile(EngineBase* engine, Str path, PasswordUI* pwdUI, MainWindow* win);
+bool OpenDocumentFromMemory(MainWindow* win, Str data, Str nameHint);
 
 uint MbRtlReadingMaybe();
-void MessageBoxWarning(HWND hwnd, Str msg, Str title = nullptr);
+void MessageBoxWarning(HWND hwnd, Str msg, Str title = {});
 void UpdateCursorPositionHelper(MainWindow* win, Point pos, NotificationWnd* wnd);
 void EnterFullScreen(MainWindow* win, bool presentation = false);
 void ExitFullScreen(MainWindow* win);
+void SwitchToFullScreen(MainWindow* win, bool presentation);
 void SetCurrentLang(Str langCode);
 void RebuildMenuBarForWindow(MainWindow* win);
 void DeleteMainWindow(MainWindow* win);
@@ -338,6 +318,14 @@ struct SettingsApplyState {
     bool disableAntiAlias = false;
     bool chmUseFixedPageUI = false;
     bool markdownUseFixedPageUI = false;
+    bool markdownPreserveLineBreaks = false;
+    bool explorerQuickLook = false;
+    // owned copy of the ebook layout inputs; ApplyChangedSettingsAndRelayout frees it
+    Str ebookLayout;
+    // owned copy of the AI chat look (AIChat section, BgColor); freed the same way
+    Str aiChatStyle;
+    // owned copy of ThumbnailsType; freed the same way
+    Str thumbnailsType;
 };
 SettingsApplyState GetSettingsApplyState();
 void ApplyChangedSettingsAndRelayout(const SettingsApplyState& before);
@@ -346,16 +334,21 @@ void SwitchToDisplayMode(MainWindow* win, DisplayMode displayMode, bool keepCont
 void OnDocumentVerticalScrollIntent(MainWindow* win, bool down);
 void DismissNextFileScrollHint(MainWindow* win);
 void MainWindowRerender(MainWindow* win, bool includeNonClientArea = false);
-LRESULT CALLBACK WndProcSumatraFrame(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp);
-void ShutdownCleanup();
+void ReplaceImageFromFile(MainWindow* win, IPageElement* imageEl);
+void EditImageExternally(MainWindow* win, IPageElement* imageEl);
+TempStr TestImageReplace(MainWindow* win, Str action, int pageNo, int imageIdx, Str path);
+void RerenderTabPage(WindowTab*, int pageNo);
+void GetFrameNcStrips(MainWindow*, Vec<Rect>& out);
+EngineBase* CreatePdfEngineForDialog(Str path, HWND hwnd);
 
 TempStr PageInfoOverlayResultTemp(Str pathTwoPages, Str pathOnePage, int* exitCodeOut = nullptr);
 TempStr WindowStateDuringLoadResultTemp(int* exitCodeOut = nullptr);
-bool DocIsSupportedFileType(FileType);
-TempStr GetLogFilePathTemp();
+TempStr SaveFileAsResultTemp(Str dstPath, int* exitCodeOut);
+TempStr RenameFileResultTemp(Str dstPath, int* exitCodeOut);
 void ShowErrorLoadingNotification(MainWindow* win, Str path, bool noSavePrefs, bool showWin = true);
-void SumatraOpenPathInDefaultFileManager(Str path);
+void ShowFileInFolder(MainWindow* win, Str path);
 void SmartZoom(MainWindow* win, float factor, Point* pt, bool smartZoom);
 TempStr GetSumatraDataDirTemp();
-TempStr GetCrashInfoDirTemp();
 TempStr GetSumatraBuildSpecificDirTemp();
+
+extern Kind kNotifTemporaryFile;

@@ -2,7 +2,6 @@
    License: Simplified BSD (see COPYING.BSD) */
 
 #include "base/Base.h"
-#include "base/BitManip.h"
 #include "base/Win.h"
 
 #include "gui/UIModels.h"
@@ -46,6 +45,10 @@ HWND TreeView::Create(const CreateArgs& args) {
     cargs.style = WS_CHILD | WS_VISIBLE | WS_TABSTOP;
     cargs.style |= TVS_HASBUTTONS | TVS_HASLINES | TVS_LINESATROOT | TVS_SHOWSELALWAYS;
     cargs.style |= TVS_TRACKSELECT | TVS_NOHSCROLL | TVS_INFOTIP;
+    // nothing handles TVN_BEGINDRAG; without this the control runs a modal
+    // drag-detect loop on every button-down, which never ends for a synthetic
+    // (sent) click that has no button-up behind it
+    cargs.style |= TVS_DISABLEDRAGDROP;
     cargs.exStyle = args.exStyle | TVS_EX_DOUBLEBUFFER;
     cargs.isRtl = args.isRtl;
 
@@ -68,7 +71,6 @@ HWND TreeView::Create(const CreateArgs& args) {
 
     SetToolTipsDelayTime(TTDT_AUTOPOP, 32767);
 
-    // TODO:
     // must be done at the end. Doing  HwndSetWindowStyle() sends bogus (?)
     // TVN_ITEMCHANGED notification. As an alternative we could ignore TVN_ITEMCHANGED
     // if hItem doesn't point to an TreeItem
@@ -80,10 +82,22 @@ Size TreeView::GetIdealSize() {
     return {idealSize.dx, idealSize.dy};
 }
 
+void TreeView::SetBounds(Rect bounds) {
+    int prevDx = lastBounds.dx;
+    ControlBase::SetBounds(bounds);
+    // Width changes (sidebar splitter) need a new paint so ellipsis and
+    // full-row selection match the new clip. Height-only (window resize)
+    // must not: MoveWindow copies the rows and only the new strip paints.
+    if (hwnd && bounds.dx != prevDx) {
+        RemeasureItems();
+        HwndInvalidate(hwnd, false);
+    }
+}
+
 void TreeView::SetToolTipsDelayTime(int type, int timeInMs) {
     ReportIf(!IsValidDelayType(type));
     ReportIf(timeInMs < 0);
-    ReportIf(timeInMs > 32767); // TODO: or is it 65535?
+    ReportIf(timeInMs > 32767);
     HWND hwndToolTips = GetToolTipsHwnd();
     SendMessageW(hwndToolTips, TTM_SETDELAYTIME, type, (LPARAM)timeInMs);
 }
@@ -94,7 +108,17 @@ HWND TreeView::GetToolTipsHwnd() {
 }
 
 HTREEITEM TreeView::GetHandleByTreeItem(TreeItem item) {
-    return treeModel->GetHandle(item);
+    auto h = (HTREEITEM)treeModel->GetUserData(item);
+    if (h || !lazyChildren) {
+        return h;
+    }
+    // not inserted yet: insert from the nearest inserted ancestor down
+    TreeItem parent = treeModel->Parent(item);
+    if (parent == TreeModel::kNullItem || parent == treeModel->Root()) {
+        return nullptr; // top-level items are always inserted
+    }
+    EnsureChildrenPopulated(parent, GetHandleByTreeItem(parent));
+    return (HTREEITEM)treeModel->GetUserData(item);
 }
 
 // the result only valid until the next GetItem call
@@ -120,6 +144,7 @@ static TVITEMW* GetTVITEM(TreeView* tree, TreeItem ti) {
 // expand if collapse, collapse if expanded
 static void TreeViewToggle(TreeView* tree, HTREEITEM hItem, bool recursive) {
     HWND hTree = tree->hwnd;
+    tree->EnsureChildrenPopulated(tree->GetTreeItemByHandle(hItem), hItem);
     HTREEITEM child = TreeView_GetChild(hTree, hItem);
     if (!child) {
         // only applies to nodes with children
@@ -131,7 +156,7 @@ static void TreeViewToggle(TreeView* tree, HTREEITEM hItem, bool recursive) {
         return;
     }
     uint flag = TVE_EXPAND;
-    bool isExpanded = bitmask::IsSet(item->state, TVIS_EXPANDED);
+    bool isExpanded = bit::IsMaskSet(item->state, TVIS_EXPANDED);
     if (isExpanded) {
         flag = TVE_COLLAPSE;
     }
@@ -140,13 +165,6 @@ static void TreeViewToggle(TreeView* tree, HTREEITEM hItem, bool recursive) {
     } else {
         TreeView_Expand(hTree, hItem, flag);
     }
-}
-
-static void SetTreeItemState(uint uState, TreeItemState& state) {
-    state.isExpanded = bitmask::IsSet(uState, TVIS_EXPANDED);
-    state.isSelected = bitmask::IsSet(uState, TVIS_SELECTED);
-    uint n = (uState >> 12) - 1;
-    state.isChecked = n != 0;
 }
 
 static bool HandleKey(TreeView* tree, WPARAM wp) {
@@ -195,6 +213,15 @@ void TreeView::WndProc(ControlBase::WndProcEvent* ev) {
         return;
     }
 
+    // A 0-sized tree scrolls a newly selected item to just above its top.
+    if (WM_SIZE == msg && revealSelOnSize && LOWORD(lparam) > 0 && HIWORD(lparam) > 0) {
+        revealSelOnSize = false;
+        ev->result = FinalWindowProc(msg, wparam, lparam);
+        ev->didHandle = true;
+        TreeView_EnsureVisible(hwnd, TreeView_GetSelection(hwnd));
+        return;
+    }
+
     if (WM_KEYDOWN == msg) {
         // Enter is handled here (expand/collapse) before DefWindowProc, so TVN_KEYDOWN
         // never fires for it. Let onKeyDown run first — Favorites uses Enter to open
@@ -227,8 +254,8 @@ void TreeView::WndProc(ControlBase::WndProcEvent* ev) {
 }
 
 bool TreeView::IsExpanded(TreeItem ti) {
-    auto state = GetItemState(ti);
-    return state.isExpanded;
+    TVITEMW* item = GetTVITEM(this, ti);
+    return item && bit::IsMaskSet(item->state, TVIS_EXPANDED);
 }
 
 // https://docs.microsoft.com/en-us/windows/win32/api/commctrl/nf-commctrl-treeview_getitemrect
@@ -253,7 +280,17 @@ bool TreeView::SelectItem(TreeItem ti) {
     if (ti != TreeModel::kNullItem) {
         hi = GetHandleByTreeItem(ti);
     }
+    if (hi && hi == TreeView_GetSelection(hwnd)) {
+        return true;
+    }
+    // TVM_SELECTITEM focuses the tree, which activates the parent frame and
+    // buries other top-level windows (annotations editor, command palette).
+    HWND prev = ::GetFocus();
     BOOL ok = TreeView_SelectItem(hwnd, hi);
+    revealSelOnSize = hi && HwndClientRect(hwnd).IsEmpty();
+    if (prev && prev != hwnd && ::GetFocus() == hwnd) {
+        ::SetFocus(prev);
+    }
     return ok == TRUE;
 }
 
@@ -275,13 +312,6 @@ void TreeView::ExpandAll() {
     SuspendRedraw();
     auto* root = TreeView_GetRoot(this->hwnd);
     TreeViewExpandRecursively(this->hwnd, root, TVE_EXPAND, false);
-    ResumeRedraw();
-}
-
-void TreeView::CollapseAll() {
-    SuspendRedraw();
-    auto* root = TreeView_GetRoot(this->hwnd);
-    TreeViewExpandRecursively(this->hwnd, root, TVE_COLLAPSE, false);
     ResumeRedraw();
 }
 
@@ -311,20 +341,6 @@ void TreeView::Clear() {
     SendMessageW(hwnd, WM_SETREDRAW, TRUE, 0);
     uint flags = RDW_ERASE | RDW_FRAME | RDW_INVALIDATE | RDW_ALLCHILDREN;
     ::RedrawWindow(hwnd, nullptr, nullptr, flags);
-}
-
-TempStr TreeView::GetDefaultTooltipTemp(TreeItem ti) {
-    auto* hItem = GetHandleByTreeItem(ti);
-    WCHAR buf[INFOTIPSIZE + 1]{}; // +1 just in case
-
-    TVITEMW it{};
-    it.hItem = hItem;
-    it.mask = TVIF_TEXT;
-    it.pszText = buf;
-    it.cchTextMax = dimof(buf);
-    TreeView_GetItem(hwnd, &it);
-
-    return ToUtf8Temp(buf);
 }
 
 // get the item at a given (x,y) position in the window
@@ -364,6 +380,39 @@ static void FillTVITEM(TVITEMEXW* tvitem, TreeModel* tm, TreeItem ti) {
     tvitem->pszText = CWStrTemp(title);
 }
 
+static int ItemDepth(HWND hwnd, HTREEITEM h) {
+    int depth = 0;
+    for (HTREEITEM p = h ? TreeView_GetParent(hwnd, h) : nullptr; p; p = TreeView_GetParent(hwnd, p)) {
+        depth++;
+    }
+    return depth;
+}
+
+// wrapText: the rows an item at this depth needs at the tree's width. The text
+// starts one indent further per level than a top-level item's
+int TreeView::ItemLines(TreeItem ti, int depth) {
+    if (!wrapText || !onMeasureLines.IsValid()) {
+        return 1;
+    }
+    Rect cr = HwndClientRect(hwnd);
+    if (cr.dx <= 0) {
+        return 1;
+    }
+    int indent = TreeView_GetIndent(hwnd);
+    int left0 = indent;
+    HTREEITEM root = TreeView_GetRoot(hwnd);
+    RECT rc{};
+    if (root && TreeView_GetItemRect(hwnd, root, &rc, TRUE)) {
+        left0 = rc.left;
+    }
+    MeasureLinesEvent ev;
+    ev.treeView = this;
+    ev.treeItem = ti;
+    ev.availDx = cr.dx - (left0 + depth * indent);
+    onMeasureLines.Call(&ev);
+    return std::max(ev.lines, 1);
+}
+
 // inserting in front is faster:
 // https://devblogs.microsoft.com/oldnewthing/20111125-00/?p=9033
 static HTREEITEM insertItemFront(TreeView* treeView, TreeItem ti, HTREEITEM parent) {
@@ -374,22 +423,61 @@ static HTREEITEM insertItemFront(TreeView* treeView, TreeItem ti, HTREEITEM pare
 
     TVITEMEXW* tvitem = &toInsert.itemex;
     FillTVITEM(tvitem, treeView->treeModel, ti);
+    if (treeView->lazyChildren && treeView->treeModel->ChildCount(ti) > 0) {
+        // show the expand button before the children are inserted
+        tvitem->mask |= TVIF_CHILDREN;
+        tvitem->cChildren = 1;
+    }
+    if (treeView->wrapText) {
+        int depth = parent ? ItemDepth(treeView->hwnd, parent) + 1 : 0;
+        tvitem->mask |= TVIF_INTEGRAL;
+        tvitem->iIntegral = treeView->ItemLines(ti, depth);
+    }
     HTREEITEM res = TreeView_InsertItem(treeView->hwnd, &toInsert);
     return res;
 }
 
-bool TreeView::UpdateItem(TreeItem ti) {
-    HTREEITEM ht = GetHandleByTreeItem(ti);
-    ReportIf(!ht);
-    if (!ht) {
-        return false;
+static void RemeasureSiblings(TreeView* tv, HTREEITEM first, int depth) {
+    HWND hwnd = tv->hwnd;
+    for (HTREEITEM h = first; h; h = TreeView_GetNextSibling(hwnd, h)) {
+        TVITEMEXW it{};
+        it.mask = TVIF_PARAM | TVIF_INTEGRAL;
+        it.hItem = h;
+        if (!TreeView_GetItem(hwnd, &it)) {
+            continue;
+        }
+        int lines = tv->ItemLines((TreeItem)it.lParam, depth);
+        if (lines != it.iIntegral) {
+            it.mask = TVIF_INTEGRAL;
+            it.iIntegral = lines;
+            TreeView_SetItem(hwnd, &it);
+        }
+        RemeasureSiblings(tv, TreeView_GetChild(hwnd, h), depth + 1);
     }
+}
 
-    TVITEMEXW tvitem;
-    tvitem.hItem = ht;
-    FillTVITEM(&tvitem, treeModel, ti);
-    BOOL ok = TreeView_SetItem(hwnd, &tvitem);
-    return ok != 0;
+// the width changed: items wrap differently (only the inserted ones, a lazy
+// tree measures the rest when they're inserted)
+void TreeView::RemeasureItems() {
+    if (!wrapText || !hwnd) {
+        return;
+    }
+    RemeasureSiblings(this, TreeView_GetRoot(hwnd), 0);
+}
+
+// wrapping rows are several lines tall and never scroll sideways. Takes
+// effect for the items inserted from now on (SetTreeModel inserts them all)
+void TreeView::SetWrapText(bool wrap) {
+    wrapText = wrap;
+    if (!hwnd) {
+        return;
+    }
+    LONG_PTR style = GetWindowLongPtrW(hwnd, GWL_STYLE);
+    LONG_PTR bits = TVS_NONEVENHEIGHT | TVS_NOHSCROLL;
+    LONG_PTR newStyle = wrap ? (style | bits) : (style & ~bits);
+    if (newStyle != style) {
+        SetWindowLongPtrW(hwnd, GWL_STYLE, newStyle);
+    }
 }
 
 // complicated because it inserts items backwards, as described in
@@ -409,10 +497,29 @@ static void PopulateTreeItem(TreeView* treeView, TreeItem item, HTREEITEM parent
     for (int i = 0; i < n; i++) {
         auto ti = a[i];
         HTREEITEM h = insertItemFront(treeView, ti, parent);
-        tm->SetHandle(ti, h);
-        // avoid recursing if not needed because we use a lot of stack space
-        if (tm->ChildCount(ti) > 0) {
+        tm->SetUserData(ti, (uintptr_t)h);
+        // Lazy trees populate collapsed branches on their first expansion.
+        if (tm->ChildCount(ti) > 0 && (!treeView->lazyChildren || tm->IsExpanded(ti))) {
             PopulateTreeItem(treeView, ti, h);
+        }
+    }
+}
+
+// lazy: insert the item's children if that hasn't happened yet
+void TreeView::EnsureChildrenPopulated(TreeItem item, HTREEITEM h) {
+    if (lazyChildren && h && !TreeView_GetChild(hwnd, h) && treeModel->ChildCount(item) > 0) {
+        PopulateTreeItem(this, item, h);
+    }
+}
+
+// Clear handles from the model's previous native tree.
+static void ResetUserData(TreeModel* tm, TreeItem item) {
+    int n = tm->ChildCount(item);
+    for (int i = 0; i < n; i++) {
+        TreeItem ti = tm->ChildAt(item, i);
+        tm->SetUserData(ti, 0);
+        if (tm->ChildCount(ti) > 0) {
+            ResetUserData(tm, ti);
         }
     }
 }
@@ -434,7 +541,12 @@ void TreeView::SetTreeModel(TreeModel* tm) {
     TreeView_DeleteAllItems(hwnd);
 
     treeModel = tm;
+    if (lazyChildren) {
+        ResetUserData(tm, tm->Root());
+    }
     PopulateTree(this, tm);
+    // the first items were measured before there was a row to take the indent from
+    RemeasureItems();
     ResumeRedraw();
 
     uint flags = RDW_ERASE | RDW_FRAME | RDW_INVALIDATE | RDW_ALLCHILDREN;
@@ -452,20 +564,6 @@ bool TreeView::GetState(TreeItem item) {
     ReportIf(!hi);
     auto res = TreeView_GetCheckState(hwnd, hi);
     return res != 0;
-}
-
-TreeItemState TreeView::GetItemState(TreeItem ti) {
-    TreeItemState res;
-
-    TVITEMW* it = GetTVITEM(this, ti);
-    if (!it) {
-        // could be missing if filtered
-        return res;
-    }
-    SetTreeItemState(it->state, res);
-    res.nChildren = it->cChildren;
-
-    return res;
 }
 
 // if context menu invoked via keyboard, get selected item
@@ -526,7 +624,7 @@ static void InvalidateTreeItemRow(HWND hwnd, HTREEITEM hItem) {
 void TreeView::OnNotifyReflect(ControlBase::NotifyReflectEvent* rev) {
     TreeView* w = this;
     LPARAM lp = rev->lparam;
-    NMTREEVIEWW* nmtv = (NMTREEVIEWW*)(lp);
+    NMTREEVIEWW* nmtv = (NMTREEVIEWW*)lp;
 
     auto code = nmtv->hdr.code;
     // https://docs.microsoft.com/en-us/windows/win32/controls/tvn-getinfotip
@@ -536,7 +634,7 @@ void TreeView::OnNotifyReflect(ControlBase::NotifyReflectEvent* rev) {
         }
         TreeView::GetTooltipEvent ev;
         ev.treeView = w;
-        ev.info = (NMTVGETINFOTIPW*)(nmtv);
+        ev.info = (NMTVGETINFOTIPW*)nmtv;
         ev.treeItem = GetTreeItemByHandle(ev.info->hItem);
         onGetTooltip.Call(&ev);
         rev->result = 0;
@@ -572,9 +670,17 @@ void TreeView::OnNotifyReflect(ControlBase::NotifyReflectEvent* rev) {
         return;
     }
 
+    if (code == TVN_ITEMEXPANDING && lazyChildren) {
+        NMTREEVIEWW* nmExp = (NMTREEVIEWW*)lp;
+        if (nmExp->action == TVE_EXPAND) {
+            EnsureChildrenPopulated((TreeItem)nmExp->itemNew.lParam, nmExp->itemNew.hItem);
+        }
+        return;
+    }
+
     // https://docs.microsoft.com/en-us/windows/win32/controls/tvn-selchanged
     if (code == TVN_SELCHANGED) {
-        // log("tv: TVN_SELCHANGED\n");
+        // log(StrL("tv: TVN_SELCHANGED\n"));
         // only needed when a handler paints beyond the label; without one the
         // control's own invalidation is enough and this would just cost repaints
         if (onCustomDraw.IsValid()) {
@@ -602,7 +708,7 @@ void TreeView::OnNotifyReflect(ControlBase::NotifyReflectEvent* rev) {
 
     // https://docs.microsoft.com/en-us/windows/win32/controls/nm-click-tree-view
     if (code == NM_CLICK || code == NM_DBLCLK) {
-        // log("tv: NM_CLICK\n");
+        // log(StrL("tv: NM_CLICK\n"));
         if (!onClick.IsValid()) {
             return;
         }

@@ -5,6 +5,15 @@ struct HtmlWindowCallback;
 struct WebViewResourceResult;
 struct BrowserWebviewWnd;
 
+// Which embedded browser hosts the document. Auto = WebView2 when installed.
+enum class HtmlBackend {
+    Auto,
+    IE,
+    WebView2,
+};
+
+void SetHtmlBackend(HtmlBackend);
+
 // Hosts a document's HTML content (CHM, markdown) in an embedded browser:
 // WebView2 when available, otherwise IE.
 class BrowserDocView {
@@ -20,9 +29,9 @@ class BrowserDocView {
     // show/hide without destroying the browser (tab switch). Creating a WebView2
     // is expensive, so markdown/CHM keep the view and only hide it when leaving
     // the tab; SetVisible(true) reattaches the canvas subclass and shows it.
-    void SetVisible(bool visible);
+    void SetVisible(bool show);
     bool IsVisible() const;
-    HWND GetParentHwnd() const { return hwndParent; }
+    void RefreshControllerSurface();
 
     void NavigateToDataUrl(Str url);
     void GoBack();
@@ -41,8 +50,10 @@ class BrowserDocView {
     void FindAllPages(const StrVec& pageUrls, Str term, bool matchCase, bool wholeWord, int gen);
     void FindGoto(int idx);
     void FindClear();
+    void Eval(Str js);
     void SelectAll();
     void CopySelection();
+    bool CapturePng(const Func1<Str>& done);
     LRESULT SendMsg(UINT msg, WPARAM wp, LPARAM lp);
 
   private:
@@ -70,6 +81,7 @@ class BrowserDocView {
     void SubclassParent();
     void UnsubclassParent();
     bool visible = false;
+    bool forwardingWheel = false;
     static LRESULT CALLBACK ParentWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR subclassId,
                                           DWORD_PTR data);
     static bool ResourceGet(void* ctx, Str path, WebViewResourceResult* res);

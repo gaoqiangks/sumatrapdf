@@ -3,7 +3,6 @@
 
 #include "base/Base.h"
 #include "gui/Dpi.h"
-#include "base/Win.h"
 
 #include "gui/UIModels.h"
 #include "gui/Layout.h"
@@ -11,8 +10,9 @@
 #include "gui/win/WinGui.h"
 
 #include "Theme.h"
-#include "DarkMode_win.h"
+#include "DarkMode.h"
 #include "SumatraConfig.h"
+#include "base/Win.h"
 
 struct TextViewWnd : WindowBase {
     Edit* edit = nullptr;
@@ -20,23 +20,18 @@ struct TextViewWnd : WindowBase {
     HWND* hwndPtr = nullptr;
 
     bool Create(Str title, Str text);
-    void UpdateTheme();
+    void UpdateTheme() override;
+    void ApplyDarkMode() override;
     static Str FormatTextForEdit(Str text);
 };
 
-void TextViewWnd::UpdateTheme() {
-    Color colBg = ThemeWindowControlBackgroundColor();
-    Color colTxt = ThemeWindowTextColor();
-    SetColors(colTxt, colBg);
-    if (edit) {
-        edit->SetColors(colTxt, colBg);
-    }
+void TextViewWnd::ApplyDarkMode() {
     DarkModeApplyToWindowAndEraseBg(hwnd);
-    // Re-apply monospaced font after darkmode child theming (may reset font).
-    if (edit && monoFont) {
-        edit->SetFont(monoFont);
-    }
-    RedrawWindow(hwnd, nullptr, nullptr, RDW_ERASE | RDW_INVALIDATE | RDW_ALLCHILDREN);
+}
+
+void TextViewWnd::UpdateTheme() {
+    WindowBase::UpdateTheme();
+    ReapplyEditFont(edit, monoFont);
 }
 
 // Returns a temp-arena string: ToStr() would be a view into the local Builder
@@ -76,7 +71,7 @@ bool TextViewWnd::Create(Str title, Str text) {
     SendMessageW(edit->hwnd, EM_SETLIMITTEXT, 0, 0);
 
     HDC hdc = GetDC(hwnd);
-    monoFont = HdcCreateSimpleFont(hdc, "Consolas", 14);
+    monoFont = HdcCreateSimpleFont(hdc, StrL("Consolas"), 14);
     ReleaseDC(hwnd, hdc);
     if (monoFont) {
         edit->SetFont(monoFont);

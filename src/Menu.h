@@ -4,27 +4,19 @@
 struct AppCommandCtx;
 using BuildMenuCtx = AppCommandCtx;
 
-struct MenuOwnerDrawInfo;
-
 struct MenuDef {
     Str title;
     UINT_PTR idOrSubmenu = 0;
 };
 
-constexpr const char* kMenuSeparator = "-----";
-
-void FreeAllMenuDrawInfos();
-void FreeMenuOwnerDrawInfo(MenuOwnerDrawInfo*);
-void MarkMenuOwnerDraw(HMENU, bool isMenuBar = false);
-void FreeMenuOwnerDrawInfoData(HMENU);
-void MenuCustomDrawMesureItem(HWND, MEASUREITEMSTRUCT*);
-void MenuCustomDrawItem(HWND, DRAWITEMSTRUCT*);
+#define kMenuSeparator "-----"
 
 HMENU BuildMenuFromDef(MenuDef* menuDefs, HMENU menu, BuildMenuCtx* ctx);
 void RemoveBadMenuSeparators(HMENU menu);
 HMENU BuildMenu(MainWindow* win);
 void OnWindowContextMenu(MainWindow* win, int x, int y);
 void OnAboutContextMenu(MainWindow* win, int x, int y);
+bool CommandUsesContextMenuPoint(int cmdId);
 void ForgetFileFromFrequentlyRead(MainWindow* win, Str filePath);
 int CmdIdFromVirtualZoom(float virtualZoom);
 void UpdateAppMenu(MainWindow* win, HMENU m);
@@ -40,3 +32,11 @@ bool IsShowingMenuBarRebar(MainWindow*);
 bool HandleMenuBarCommand(MainWindow*, int cmdId);
 bool ActivateMenuBarByAccel(MainWindow*, WCHAR accel);
 void UpdateCustomMenuBarMenuSelect(MainWindow*, WPARAM, LPARAM);
+
+struct MenuAccelText {
+    Str display;
+    int underlineOff = -1;
+    int underlineLen = 0;
+};
+
+MenuAccelText ParseMenuAccelTextTemp(Str s);

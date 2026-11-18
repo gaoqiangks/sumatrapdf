@@ -13,6 +13,13 @@ EXPORTS
 	fz_last_uncaught_error
 
 	fz_open_document
+	fz_register_ofd_handler
+	ofd_count_signatures
+	ofd_check_signatures
+	ofd_drop_signature_infos
+	ofd_cert_issued_by
+	ofd_load_attachments
+	ofd_load_attachment
 
 	fz_write_byte
 
@@ -27,6 +34,8 @@ EXPORTS
 	muconvert_main
 
 	mudraw_main
+
+	mubar_main
 
 	mutrace_main
 
@@ -122,6 +131,8 @@ EXPORTS
 
 	fz_count_chapters
 
+	fz_count_chapter_pages
+
 	fz_transform_page
 
 	fz_load_chapter_page
@@ -139,6 +150,8 @@ EXPORTS
 	pdf_has_unsaved_changes
 
 	pdf_can_be_saved_incrementally
+
+	pdf_has_unsaved_sigs
 
 	pdf_annot_page
 
@@ -169,6 +182,9 @@ EXPORTS
 	fz_new_image_from_compressed_buffer
 
 	pdf_save_document
+	pdf_set_page_box
+
+	pdf_redact_page
 
 	fz_warn
 
@@ -181,6 +197,7 @@ EXPORTS
 	fz_get_pixmap_from_image
 
 	fz_new_device_of_size
+	fz_new_passthrough_device_of_size
 
 	fz_load_outline
 	fz_new_outline_iterator
@@ -189,6 +206,9 @@ EXPORTS
 	fz_outline_iterator_next
 	fz_outline_iterator_down
 	fz_outline_iterator_up
+	fz_outline_iterator_prev
+	fz_outline_iterator_insert
+	fz_is_external_link
 
 	fz_load_page
 
@@ -200,9 +220,24 @@ EXPORTS
 
 	fz_new_pdf_writer_with_output
 
+	fz_new_pdf_writer
+
+	fz_close_document_writer
+
+	fz_drop_document_writer
+
 	pdf_obj_num_is_stream
 
 	pdf_dict_get_inheritable
+	pdf_dict_get_int
+	pdf_dict_put_int
+	pdf_dict_put_dict
+	pdf_dict_put_array
+	pdf_dict_put_rect
+	pdf_array_get_real
+	pdf_annot_push_local_xref
+	pdf_annot_pop_local_xref
+	pdf_signature_byte_range
 
 	pdf_new_utf8_from_pdf_string_obj
 
@@ -216,6 +251,12 @@ EXPORTS
 
 	install_load_windows_font_funcs
 
+	fz_set_builtin_font_loader
+
+	sumatra_lookup_font_url
+	sumatra_font_count
+	sumatra_font_at
+
 	pdf_page_transform
 
 	pdf_page_obj_transform
@@ -225,6 +266,13 @@ EXPORTS
 	fz_drop_page
 
 	fz_colorspace_is_rgb
+	fz_colorspace_type
+
+	fz_colorspace_is_cmyk
+
+	fz_new_buffer_from_pixmap_as_jpeg
+
+	fz_new_buffer_from_image_as_png
 
 	fz_new_stext_page
 
@@ -267,6 +315,7 @@ EXPORTS
 	fz_set_warning_callback
 
 	fz_set_error_callback
+	fz_set_stddbg
 
 	fz_new_buffer_from_shared_data
 
@@ -286,6 +335,12 @@ EXPORTS
 
 	pdf_drop_graft_map
 
+	pdf_graft_mapped_page
+
+	pdf_bake_document
+
+	pdf_rearrange_pages
+
 	pdf_graft_mapped_object
 
 	pdf_add_object
@@ -297,6 +352,7 @@ EXPORTS
 	pdf_is_embedded_file
 
 	fz_new_image_from_svg
+	fz_new_display_list_from_svg
 
 	destroy_system_font_list
 
@@ -373,6 +429,10 @@ EXPORTS
 	fz_fin_cached_color_converter
 
 	fz_compressed_buffer_size
+
+	fz_compressed_image_buffer
+
+	fz_unwrap_display_list_image
 
 	fz_open_compressed_buffer
 
@@ -788,6 +848,8 @@ EXPORTS
 
 
 
+	fz_new_output
+
 	fz_new_output_with_buffer
 
 	fz_close_output
@@ -1106,6 +1168,8 @@ EXPORTS
 
 	pdf_set_annot_stamp_image
 
+	pdf_annot_stamp_image_obj
+
 	pdf_annot_flags
 
 	pdf_set_annot_flags
@@ -1117,6 +1181,20 @@ EXPORTS
 	pdf_annot_line
 
 	pdf_set_annot_line
+
+	pdf_annot_vertex_count
+
+	pdf_annot_vertex
+
+	pdf_set_annot_vertices
+
+	pdf_annot_ink_list_count
+
+	pdf_annot_ink_list_stroke_count
+
+	pdf_annot_ink_list_stroke_vertex
+
+	pdf_set_annot_ink_list
 
 	pdf_annot_line_ending_styles
 
@@ -1139,6 +1217,10 @@ EXPORTS
 	pdf_annot_quadding
 
 	pdf_set_annot_quadding
+
+	pdf_annot_rich_defaults
+
+	pdf_set_annot_rich_defaults
 
 	pdf_clear_annot_quad_points
 
@@ -1257,6 +1339,10 @@ EXPORTS
 	pdf_delete_page_range
 
 	pdf_page_write
+	pdf_create_link
+	pdf_new_outline_iterator
+	pdf_new_uri_from_explicit_dest
+	pdf_parse_write_options
 
 
 
@@ -1468,6 +1554,20 @@ EXPORTS
 
 	pdf_write_document
 
+	pdf_count_layers
+
+	pdf_layer_name
+
+	pdf_layer_is_enabled
+
+	pdf_enable_layer
+
+	pdf_count_layer_config_ui
+
+	pdf_layer_config_ui_info
+
+	pdf_toggle_layer_config_ui
+
 	pdf_lookup_page_number
 
 	pdf_count_pages
@@ -1555,6 +1655,8 @@ EXPORTS
 	pdf_load_raw_stream
 
 	pdf_load_stream
+
+	pdf_load_stream_or_string_as_utf8
 
 	pdf_open_raw_stream
 
@@ -1797,6 +1899,9 @@ EXPORTS
 	WebPDecodeBGRAInto
 
 	WebPGetInfo
+	WebPDecodeRGBInto
+	WebPDecodeRGBAInto
+	WebPGetFeaturesInternal
 
 
 
@@ -1810,6 +1915,11 @@ EXPORTS
 	jxl_decode
 	jxl_decode_size
 	jxl_image_destroy
+	jxl_doc_open
+	jxl_doc_close
+	jxl_doc_info
+	jxl_frame_render_info
+	jxl_frame_render_into
 
 
 
@@ -1850,6 +1960,20 @@ EXPORTS
 
 
 	pdf_count_signatures
+
+	pdf_enable_journal
+
+	pdf_begin_operation
+
+	pdf_end_operation
+
+	pdf_abandon_operation
+
+	pdf_undoredo_state
+
+	pdf_undo
+
+	pdf_redo
 
 	pdf_first_widget
 
@@ -1893,6 +2017,14 @@ EXPORTS
 
 	pdf_check_widget_digest
 
+	pdf_check_certificate
+
+	pdf_check_digest
+
+	pdf_signature_contents
+
+	pdf_walk_tree
+
 	pdf_signature_get_widget_signatory
 
 	pdf_signature_drop_distinguished_name
@@ -1919,11 +2051,36 @@ EXPORTS
 	pkcs7_windows_check_certificate
 	pkcs7_windows_check_digest
 	pkcs7_windows_distinguished_name
+	pkcs7_windows_inspect
+	pkcs7_windows_check_chain
+	pkcs7_windows_verify_ts
+	pkcs7_windows_rev_new
+	pkcs7_windows_rev_free
+	pkcs7_windows_rev_add_crl
+	pkcs7_windows_rev_add_ocsp
+	pkcs7_windows_fetch_revocation
+	pdf_signature_hash_bytes
+	pdf_to_int64
+	pkcs7_windows_sig_info_clear
+	pkcs7_windows_sig_info_free
+
+; signing a pdf (PdfSign.cpp): reading the certificate + filling in a
+; signature field
+
+	pkcs7_windows_read_pfx
+	pkcs7_windows_read_store
+	pdf_drop_signer
+	pdf_sign_signature
+	pdf_create_signature_widget
+	pdf_widget_is_signed
+	pdf_load_field_name
+	pdf_keep_annot
 
 ; cmark-gfm exports (required for MarkdownToc; also used by mupdf md.c).
 ; Keep the cmark-gfm static-lib project; link it only into mupdf/libsumatrapdf.dll
 ; and re-export these so SumatraPDF.exe does not carry a second copy.
 
+	cmark_consolidate_text_nodes
 	cmark_find_syntax_extension
 	cmark_get_default_mem_allocator
 	cmark_gfm_core_extensions_ensure_registered
@@ -1931,14 +2088,18 @@ EXPORTS
 	cmark_iter_get_node
 	cmark_iter_new
 	cmark_iter_next
+	cmark_node_append_child
 	cmark_node_first_child
 	cmark_node_free
 	cmark_node_get_heading_level
+	cmark_node_get_literal
 	cmark_node_get_type
 	cmark_node_get_url
 	cmark_node_insert_before
 	cmark_node_new
 	cmark_node_next
+	cmark_node_parent
+	cmark_node_set_literal
 	cmark_node_set_on_enter
 	cmark_node_set_url
 	cmark_node_unlink
@@ -1995,3 +2156,15 @@ EXPORTS
 	chm_read_entry
 	chm_get_entries
 	LZX_test_pretree_make_decode_table
+
+; the raw LZX decompressor inside chmdec, used by LitDoc.cpp (.lit sections)
+
+	LZXinit
+	LZXteardown
+	LZXreset
+	LZXdecompress
+
+; msdes exports used by LitDoc.cpp to unseal .lit DRM1 content
+
+	deskey
+	des

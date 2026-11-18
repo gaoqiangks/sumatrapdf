@@ -5,6 +5,9 @@ struct VirtRoot;
 
 constexpr int kInstallerWinDy = 340;
 
+// DWORD 0|1 in the uninstall key: whether the install created a desktop shortcut
+#define kRegDesktopShortcut "DesktopShortcut"
+
 enum class PreviousInstallationType {
     None = 0,
     User = 1,
@@ -17,7 +20,13 @@ struct PreviousInstallationInfo {
     PreviousInstallationType typ = PreviousInstallationType::None;
     bool searchFilterInstalled = false;
     bool previewInstalled = false;
+    bool thumbnailsInstalled = false;
+    // other apps' handlers, a bit per extension (see PreviewHandlers)
+    u32 foreignPreview = 0;
+    u32 foreignThumbnails = 0;
     bool allUsers = false;
+    // installs before the DesktopShortcut registry value always created one
+    bool desktopShortcut = true;
 
     PreviousInstallationInfo() = default;
     ~PreviousInstallationInfo();
@@ -28,18 +37,18 @@ extern int gBottomPartDy;
 
 extern int gButtonDy;
 
-#define WM_APP_INSTALLATION_FINISHED (WM_APP + 1)
-#define WM_APP_START_INSTALLATION (WM_APP + 2)
+constexpr int kWmAppInstallationFinished = (WM_APP + 1);
+constexpr int kWmAppStartInstallation = (WM_APP + 2);
 
 extern Str gFirstError;
 extern Str gDefaultMsg;
 extern HWND gHwndFrame;
 extern Str gMsgError;
 
-extern Gdiplus::Color COLOR_MSG_WELCOME;
-extern Gdiplus::Color COLOR_MSG_OK;
-extern Gdiplus::Color COLOR_MSG_INSTALLATION;
-extern Gdiplus::Color COLOR_MSG_FAILED;
+extern Gdiplus::Color kColorMsgWelcome;
+extern Gdiplus::Color kColorMsgOk;
+extern Gdiplus::Color kColorMsgInstallation;
+extern Gdiplus::Color kColorMsgFailed;
 extern Gdiplus::Color gCol1;
 extern Gdiplus::Color gCol1Shadow;
 extern Gdiplus::Color gCol2;
@@ -76,13 +85,12 @@ bool InstallNeedsElevation(Str installDir, bool allUsers);
 
 TempStr GetInstallationFilePathTemp(Str installDir, Str name);
 
-void RegisterPreviewer(bool allUsers, Str installDir);
+struct PreviewHandlers;
+void RegisterPreviewer(bool allUsers, Str installDir, const PreviewHandlers& which);
 void UnRegisterPreviewer();
 
 void RegisterSearchFilter(bool allUsers, Str installDir);
 void UnRegisterSearchFilter();
-
-void UninstallBrowserPlugin();
 
 // Unregister shell extensions and kill processes holding install-dir files
 // so ExtractInstallerFiles can overwrite PdfFilter.dll / PdfPreview.dll / etc.
@@ -90,14 +98,16 @@ void UninstallBrowserPlugin();
 // filled for RestoreShellExtensions if install fails later.
 struct ShellExtInstallState {
     bool searchFilter = false;
-    bool preview = false;
+    // our preview pane / thumbnail handlers, a bit per extension
+    u32 ourPreview = 0;
+    u32 ourThumbnails = 0;
     bool allUsers = false;
     Str installDir;
 };
 void FreeInstallationFilesInUse(Str installDir, bool allUsers, ShellExtInstallState* removedOut = nullptr);
 void RestoreShellExtensions(const ShellExtInstallState& state);
 
-bool CheckInstallUninstallPossible(HWND hwnd, bool silent = false);
+bool CheckInstallUninstallPossible(bool silent = false);
 Str GetInstallerLogPath();
 
 bool IsDirInPath(Str path, Str dir);
@@ -114,5 +124,9 @@ void RemoveInstallRegistryKeys(HKEY hkey);
 int GetInstallerWinDx();
 
 void ReRegisterFileAssociations();
+void LogNonDefaultRegisteredExtensions();
 void CollectNonDefaultRegisteredExtensions(StrVec& out);
 void LaunchDefaultAppDialogForExtension(HWND hwnd, Str ext);
+bool InstallerWmCommand(WPARAM wp, void (*onExit)());
+int RunInstaller();
+int RunUninstaller();

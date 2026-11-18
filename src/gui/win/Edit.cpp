@@ -2,8 +2,7 @@
    License: Simplified BSD (see COPYING.BSD) */
 
 #include "base/Base.h"
-#include "base/BitManip.h"
-#include "base/ScopedWin.h"
+#include "base/AutoWin.h"
 #include "base/Win.h"
 #include "base/UITask.h"
 #include "gui/Dpi.h"
@@ -16,6 +15,63 @@
 #include "gui/win/WinGui.h"
 
 //--- Edit
+
+// the base/Win.h edit helpers, taking the control instead of its HWND
+static HWND HwndOf(Edit* e) {
+    return e ? e->hwnd : nullptr;
+}
+
+void EditSelectAll(Edit* e) {
+    EditSelectAll(HwndOf(e));
+}
+
+void EditSelectText(Edit* e, int start, int end) {
+    EditSelectText(HwndOf(e), start, end);
+}
+
+void EditGetSelection(Edit* e, int& start, int& end) {
+    EditGetSelection(HwndOf(e), start, end);
+}
+
+void EditSetCursorPos(Edit* e, int pos) {
+    EditSetCursorPos(HwndOf(e), pos);
+}
+
+void EditSetCursorPosAtEnd(Edit* e) {
+    EditSetCursorPosAtEnd(HwndOf(e));
+}
+
+int EditGetTextLen(Edit* e) {
+    return EditGetTextLen(HwndOf(e));
+}
+
+void EditSetModified(Edit* e, bool on) {
+    EditSetModified(HwndOf(e), on);
+}
+
+bool EditIsModified(Edit* e) {
+    return EditIsModified(HwndOf(e));
+}
+
+void EditSetCueText(Edit* e, Str s) {
+    EditSetCueText(HwndOf(e), s);
+}
+
+void EditSetMargins(Edit* e, int left, int right) {
+    EditSetMargins(HwndOf(e), left, right);
+}
+
+void EditSetNumbersOnly(Edit* e, bool on) {
+    EditSetNumbersOnly(HwndOf(e), on);
+}
+
+void EditSetPasswordVisible(Edit* e, bool show) {
+    EditSetPasswordVisible(HwndOf(e), show);
+}
+
+void EditSetFocus(Edit* e) {
+    HwndSetFocus(HwndOf(e));
+}
 
 // after the current mouse/focus message so the edit's default processing
 // does not undo the selection
@@ -30,43 +86,6 @@ void PostDelayedEditSelectAll(HWND hwnd) {
         return;
     }
     uitask::Post(MkFunc0(DelayedEditSelectAll, hwnd), "DelayedEditSelectAll");
-}
-
-// Delete the word behind the cursor after Ctrl+Backspace inserts its temporary glyph.
-static void EditImplementCtrlBack(HWND hwnd) {
-    // we calc selection in WCHAR space because it's easier
-    TempWStr text = HwndGetTextWTemp(hwnd);
-    int selStart = LOWORD(Edit_GetSel(hwnd)), selEnd = selStart;
-    // remove the rectangle produced by Ctrl+Backspace
-    if (selStart > 0 && text.s[selStart - 1] == '\x7F') {
-        memmove(text.s + selStart - 1, text.s + selStart, len(text.s + selStart - 1) * sizeof(WCHAR));
-        TempStr s = ToUtf8Temp(text);
-        HwndSetText(hwnd, s);
-        selStart = selEnd = selStart - 1;
-    }
-    // remove the previous word (and any spacing after it)
-    for (; selStart > 0 && wstr::IsWs(text.s[selStart - 1]); selStart--) {
-        ;
-    }
-    for (; selStart > 0 && !wstr::IsWs(text.s[selStart - 1]); selStart--) {
-        ;
-    }
-    Edit_SetSel(hwnd, selStart, selEnd);
-    SendMessageW(hwnd, WM_CLEAR, 0, 0); // delete selected text
-}
-
-// after WM_KEYDOWN so the edit does not insert the Ctrl+Backspace glyph first
-static void DelayedEditCtrlBack(HWND hwnd) {
-    if (hwnd && ::IsWindow(hwnd)) {
-        EditImplementCtrlBack(hwnd);
-    }
-}
-
-void PostDelayedEditCtrlBack(HWND hwnd) {
-    if (!hwnd) {
-        return;
-    }
-    uitask::Post(MkFunc0(DelayedEditCtrlBack, hwnd), "DelayedEditCtrlBack");
 }
 
 // https://docs.microsoft.com/en-us/windows/win32/controls/edit-controls
@@ -85,21 +104,7 @@ static constexpr int kEditBottomBorderDy = 1;
 
 // space between the text and the left / right edges of the client area, in
 // (already DPI-scaled) pixels
-void Edit::SetMargins(int left, int right) {
-    if (!hwnd) {
-        return;
-    }
-    SendMessageW(hwnd, EM_SETMARGINS, EC_LEFTMARGIN | EC_RIGHTMARGIN, MAKELPARAM(left, right));
-}
-
 // the placeholder text shown while the edit is empty
-void Edit::SetCue(Str s) {
-    if (!hwnd) {
-        return;
-    }
-    Edit_SetCueBannerText(hwnd, CWStrTemp(s));
-}
-
 static int EditWidthForChars(PlatformFont* font, int nChars) {
     if (nChars <= 0) {
         return 0;
@@ -115,59 +120,11 @@ Edit::~Edit() {
     // DeleteObject(bgBrush);
 }
 
-void Edit::SetSelection(int start, int end) {
-    if (!hwnd) {
-        return;
-    }
-    Edit_SetSel(hwnd, start, end);
-}
-
-void Edit::GetSelection(int& start, int& end) const {
-    start = 0;
-    end = 0;
-    if (!hwnd) {
-        return;
-    }
-    DWORD sel = (DWORD)Edit_GetSel(hwnd);
-    start = (int)LOWORD(sel);
-    end = (int)HIWORD(sel);
-}
-
-int Edit::GetTextLen() const {
-    return hwnd ? HwndGetTextLen(hwnd) : 0;
-}
-
-void Edit::SetModified(bool on) {
-    if (hwnd) {
-        Edit_SetModify(hwnd, on);
-    }
-}
-
-bool Edit::IsModified() const {
-    return hwnd && Edit_GetModify(hwnd);
-}
-
 // null restores the edit's own cursor (I-beam). Must not be done with
 // GCLP_HCURSOR: that is per window class (WC_EDIT), i.e. every edit in the
 // process, so one edit would change the cursor of all the others
 void Edit::SetCursorId(LPWSTR id) {
     cursorId = id;
-}
-
-void Edit::SelectAll() {
-    TempWStr s = HwndGetTextWTemp(hwnd);
-    int pos = len(s);
-    Edit_SetSel(hwnd, 0, pos);
-}
-
-void Edit::SetCursorPosition(int pos) {
-    SetSelection(pos, pos);
-}
-
-void Edit::SetCursorPositionAtEnd() {
-    TempWStr s = HwndGetTextWTemp(hwnd);
-    int pos = len(s);
-    SetCursorPosition(pos);
 }
 
 // preferred GetIdealSize width ≈ nChars average character widths (0 clears)
@@ -190,13 +147,13 @@ void Edit::SetMaxWidthChars(int nChars) {
 }
 
 void Edit::SetIdealWidthFromText(Str s, int extraPx) {
-    if (!hwnd || !s) {
+    if (!hwnd || len(s) == 0) {
         return;
     }
     HDC dc = GetDC(hwnd);
     Size sz;
     {
-        ScopedSelectFont selectFont(dc, GetHFont());
+        AutoRestoreFont selectFont(dc, GetHFont());
         // GetTextExtent, not HwndMeasureText: DT_EDITCONTROL underestimates digits
         sz = HdcGetTextExtentPoint32(dc, s);
     }
@@ -204,22 +161,7 @@ void Edit::SetIdealWidthFromText(Str s, int extraPx) {
     idealDx = sz.dx + extraPx;
 }
 
-void Edit::SetNumbersOnly(bool on) {
-    if (!hwnd) {
-        return;
-    }
-    HwndSetWindowStyle(hwnd, ES_NUMBER, on);
-}
-
 // 0 shows the real text; the bullet matches the old password dialog.
-void Edit::SetPasswordVisible(bool show) {
-    if (!hwnd) {
-        return;
-    }
-    SendMessageW(hwnd, EM_SETPASSWORDCHAR, show ? 0 : (WPARAM)L'\x25CF', 0);
-    HwndInvalidate(hwnd, true);
-}
-
 HWND Edit::Create(const CreateArgs& args) {
     // https://docs.microsoft.com/en-us/windows/win32/controls/edit-control-styles
     onWndProc = MkMethod1<Edit, ControlBase::WndProcEvent*, &Edit::WndProc>(this);
@@ -239,17 +181,26 @@ HWND Edit::Create(const CreateArgs& args) {
         cargs.style |= ES_PASSWORD;
     }
     if (args.withBorder) {
-        cargs.exStyle = WS_EX_CLIENTEDGE;
         createdWithBorder = true;
+        // no WS_EX_CLIENTEDGE: a themed edit draws a blue bottom accent (Win11)
+        createdWithFrame = true;
     }
-    createdWithBottomBorder = args.withBottomBorder && !args.withBorder && !args.withFrame;
-    createdWithFrame = args.withFrame && !args.withBorder;
+    if (args.withFrame) {
+        createdWithFrame = true;
+    }
+    createdWithBottomBorder = args.withBottomBorder && !createdWithFrame;
     centerTextVert = args.centerTextVert && !args.isMultiLine;
     selectAllOnFocus = args.selectAllOnFocus;
     if (args.isMultiLine) {
-        cargs.style |= ES_MULTILINE | WS_VSCROLL | ES_WANTRETURN;
+        cargs.style |= ES_MULTILINE | ES_WANTRETURN;
+        cargs.style |= args.noScrollBars ? ES_AUTOVSCROLL : WS_VSCROLL;
+        if (args.noWrap) {
+            cargs.style |= ES_AUTOHSCROLL;
+            if (!args.noScrollBars) {
+                cargs.style |= WS_HSCROLL;
+            }
+        }
     } else {
-        // ES_AUTOHSCROLL disable wrapping in multi-line setup
         cargs.style |= ES_AUTOHSCROLL;
     }
     idealSizeLines = args.idealSizeLines;
@@ -258,7 +209,8 @@ HWND Edit::Create(const CreateArgs& args) {
     if (!hwnd) {
         return nullptr;
     }
-    if (args.noTheme) {
+    if (args.noTheme || createdWithFrame) {
+        // strip the Win11 CFD/fluent style so it cannot draw a blue accent
         SetWindowTheme(hwnd, L"", L"");
     }
     // character-based ideal/max width (needs hwnd + font for measurement)
@@ -272,19 +224,19 @@ HWND Edit::Create(const CreateArgs& args) {
         textPadding = DpiScale(args.textPadding);
     }
     if (args.marginLeft || args.marginRight) {
-        SetMargins(args.marginLeft, args.marginRight);
+        EditSetMargins(hwnd, args.marginLeft, args.marginRight);
     }
     SizeToIdealSize(this);
     ApplyTextPadding();
 
-    if (createdWithBottomBorder || createdWithFrame) {
-        // apply the NC strip from WM_NCCALCSIZE
+    if (createdWithBottomBorder || createdWithFrame || centerTextVert) {
+        // apply the NC strip from WM_NCCALCSIZE (frame and/or vertical centering)
         SetWindowPos(hwnd, nullptr, 0, 0, 0, 0,
                      SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
     }
 
     if (args.cueText) {
-        SetCue(args.cueText);
+        EditSetCueText(hwnd, args.cueText);
     }
     if (args.text) {
         SetText(args.text);
@@ -308,6 +260,71 @@ void Edit::ApplyTextPadding() {
     SendMessageW(hwnd, EM_SETRECTNP, 0, (LPARAM)&rc);
 }
 
+// the brush the control's client is painted with: whatever the parent answers
+// to the control-color message (which our own OnMessageReflect answers when
+// the colors were set), or the system default if it doesn't answer
+HBRUSH Edit::CtlColorBrush(HDC hdc) {
+    HWND parent = GetParent(hwnd);
+    if (!parent || !hdc) {
+        return nullptr;
+    }
+    // a read-only edit is coloured with WM_CTLCOLORSTATIC (see OnMessageReflect)
+    bool readOnly = bit::IsMaskSet(GetWindowLong(hwnd, GWL_STYLE), (long)ES_READONLY);
+    UINT msg = readOnly ? WM_CTLCOLORSTATIC : WM_CTLCOLOREDIT;
+    auto br = (HBRUSH)SendMessageW(parent, msg, (WPARAM)hdc, (LPARAM)hwnd);
+    if (!br) {
+        br = (HBRUSH)DefWindowProcW(parent, msg, (WPARAM)hdc, (LPARAM)hwnd);
+    }
+    return br;
+}
+
+// Clipboard history and rdpclip open the clipboard the moment it changes, so
+// OpenClipboard right after a copy often fails. Same pause as OpenClipboardForUpdate.
+static bool OpenClipboardRetry(HWND hwnd) {
+    constexpr int kTries = 10;
+    constexpr int kPauseMs = 20;
+    for (int i = 0; i < kTries; i++) {
+        if (OpenClipboard(hwnd)) {
+            return true;
+        }
+        Sleep(kPauseMs);
+    }
+    return false;
+}
+
+static WStr GetClipboardTextTemp(HWND hwnd) {
+    if (!OpenClipboardRetry(hwnd)) {
+        return {};
+    }
+    WStr res;
+    HANDLE h = GetClipboardData(CF_UNICODETEXT);
+    WCHAR* s = h ? (WCHAR*)GlobalLock(h) : nullptr;
+    if (s) {
+        res = str::DupTemp(WStr(s));
+        GlobalUnlock(h);
+    }
+    CloseClipboard();
+    return res;
+}
+
+// A multi-line edit only breaks lines on CRLF. Browsers (e.g. GitHub's copy
+// button) put LF-only text on the clipboard, which would paste as one line.
+// Returns false to let the edit paste as usual.
+static bool PasteWithCRLF(HWND hwnd) {
+    DWORD style = GetWindowStyle(hwnd);
+    if (!(style & ES_MULTILINE) || (style & ES_READONLY)) {
+        return false;
+    }
+    TempStr text = ToUtf8Temp(GetClipboardTextTemp(hwnd));
+    TempStr crlf = str::LFToCRLFTemp(text);
+    if (len(crlf) == len(text)) {
+        // no bare LF
+        return false;
+    }
+    SendMessageW(hwnd, EM_REPLACESEL, TRUE, (LPARAM)ToWStrTemp(crlf).s);
+    return true;
+}
+
 void Edit::WndProc(ControlBase::WndProcEvent* ev) {
     HWND hwnd = ev->hwnd;
     UINT msg = ev->msg;
@@ -323,6 +340,11 @@ void Edit::WndProc(ControlBase::WndProcEvent* ev) {
         }
 
         case WM_CHAR: {
+            if (EditHandleCtrlBack(hwnd, wp)) {
+                ev->result = 0;
+                ev->didHandle = true;
+                return;
+            }
             if (onChar.IsValid()) {
                 CharEvent ce;
                 ce.c = (int)wp;
@@ -368,8 +390,10 @@ void Edit::WndProc(ControlBase::WndProcEvent* ev) {
 
         case WM_LBUTTONUP: {
             if (selectAllOnFocus && delaySelectAll) {
-                DWORD sel = Edit_GetSel(hwnd);
-                if (LOWORD(sel) == HIWORD(sel)) {
+                int selStart = 0;
+                int selEnd = 0;
+                EditGetSelection(hwnd, selStart, selEnd);
+                if (selStart == selEnd) {
                     PostDelayedEditSelectAll(hwnd);
                 }
                 delaySelectAll = false;
@@ -384,11 +408,9 @@ void Edit::WndProc(ControlBase::WndProcEvent* ev) {
             break;
         }
 
-        case WM_KEYDOWN: {
-            bool isCtrlBack = (VK_BACK == wp) && IsCtrlPressed() && !IsShiftPressed();
-            if (isCtrlBack) {
-                PostDelayedEditCtrlBack(hwnd);
-                ev->result = true;
+        case WM_PASTE: {
+            if (PasteWithCRLF(hwnd)) {
+                ev->result = 0;
                 ev->didHandle = true;
                 return;
             }
@@ -443,7 +465,18 @@ void Edit::WndProc(ControlBase::WndProcEvent* ev) {
                 int h = wr.bottom - wr.top;
                 // the strip WM_NCCALCSIZE took off the top is outside the client
                 // area, so the edit never paints it: fill it like the client
+                // SetColors() is optional, so BackgroundBrush() can be null - and
+                // then the strip kept whatever pixels happened to be on screen
+                // under the control. Nobody else ever paints them: they are
+                // outside the client area the edit paints and inside the child
+                // rect WS_CLIPCHILDREN keeps the parent out of. Restoring the
+                // maximized Save Image window moves the path box onto where the
+                // image was, so the image's checkered background stayed in the
+                // strip, a few pixels inside the box's top edge.
                 HBRUSH bgBr = BackgroundBrush();
+                if (!bgBr && ncCenterTop > 0) {
+                    bgBr = CtlColorBrush(hdc);
+                }
                 if (ncCenterTop > 0 && bgBr) {
                     int inset = createdWithFrame ? 1 : 0;
                     RECT tr{inset, inset, w - inset, inset + ncCenterTop};
@@ -474,18 +507,17 @@ void Edit::WndProc(ControlBase::WndProcEvent* ev) {
 
 // height of one line of text in the control's font
 int Edit::LineDy() {
-    return PlatformFontMeasureText(font, "Minimal").dy;
+    return PlatformFontMeasureText(font, StrL("Minimal")).dy;
 }
 
 bool Edit::HasBorder() {
-    // don't infer from window styles: with themes darkmodelib strips
-    // WS_EX_CLIENTEDGE / WS_BORDER and draws the border in a subclass, which
-    // made GetIdealSize() too small for the font
+    // CreateArgs.withBorder, not window styles: we draw a 1px frame instead
+    // of WS_EX_CLIENTEDGE (a themed client-edge is a blue bottom accent on Win11)
     return createdWithBorder;
 }
 
 Size Edit::GetIdealSize() {
-    Size s1 = PlatformFontMeasureText(font, "Minimal");
+    Size s1 = PlatformFontMeasureText(font, StrL("Minimal"));
     // logf("Edit::GetIdealSize: s1.dx=%d, s2.dy=%d\n", (int)s1.cx, (int)s1.cy);
     TempStr txt = HwndGetTextTemp(hwnd);
     Size s2 = PlatformFontMeasureText(font, txt);
@@ -518,15 +550,15 @@ Size Edit::GetIdealSize() {
     dx += lm + rm;
 
     if (HasBorder()) {
+        // room for the 1px frame plus a bit of padding, so a dialog edit is
+        // not just text-height + 1px (withFrame-only callers set their own size)
         dx += DpiScale(4);
         dy += DpiScale(8);
-    }
-    if (createdWithBottomBorder) {
-        dy += kEditBottomBorderDy;
-    }
-    if (createdWithFrame) {
+    } else if (createdWithFrame) {
         dx += 2;
         dy += 2;
+    } else if (createdWithBottomBorder) {
+        dy += kEditBottomBorderDy;
     }
     // the text is inset on all 4 sides, so the client area has to grow to still
     // show idealSizeLines lines

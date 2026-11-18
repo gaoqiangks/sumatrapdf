@@ -1,4 +1,4 @@
-// Copyright (C) 2004-2024 Artifex Software, Inc.
+// Copyright (C) 2004-2026 Artifex Software, Inc.
 //
 // This file is part of MuPDF.
 //
@@ -103,6 +103,8 @@ static fz_link *load_link_flow(fz_context *ctx, fz_html_flow *flow, fz_link *hea
 				}
 
 				link = fz_new_derived_link(ctx, fz_link, bbox, dest);
+				if (flow->box->is_noteref)
+					link->flags |= FZ_LINK_FLAG_NOTEREF;
 				link->next = head;
 				head = link;
 			}
@@ -114,8 +116,20 @@ static fz_link *load_link_flow(fz_context *ctx, fz_html_flow *flow, fz_link *hea
 
 static fz_link *load_link_box(fz_context *ctx, fz_html_box *box, fz_link *head, int page, float page_h, const char *dir, const char *file)
 {
+	float page_y0 = page * page_h;
+	float page_y1 = (page + 1) * page_h;
+
 	while (box)
 	{
+		/* SumatraPDF: a laid out block or flow box encloses its lines, so one
+		 * entirely above or below the page has no link on it. Without this
+		 * every page walked the whole document. */
+		if ((box->type == BOX_FLOW || fz_html_box_has_boxes(box)) &&
+			(box->s.layout.b < page_y0 || box->s.layout.y > page_y1))
+		{
+			box = box->next;
+			continue;
+		}
 		if (box->type == BOX_FLOW)
 			head = load_link_flow(ctx, box->u.flow.head, head, page, page_h, dir, file);
 		if (box->down)
@@ -159,12 +173,25 @@ find_first_content(fz_html_box *box)
 }
 
 static float
+find_flow_top(fz_html_flow *node)
+{
+	// try to find next "real" element
+	while (node->type == FLOW_ANCHOR && node->next)
+		node = node->next;
+	// an image flow node's coordinates are the top left corner
+	if (node->type == FLOW_IMAGE)
+		return node->y;
+	// and everything else is the baseline
+	return node->y - node->h * 0.8f;
+}
+
+static float
 find_flow_target(fz_html_flow *flow, const char *id)
 {
 	while (flow)
 	{
 		if (flow->box->id && !strcmp(id, flow->box->id))
-			return flow->y;
+			return find_flow_top(flow);
 		flow = flow->next;
 	}
 	return -1;
@@ -180,7 +207,7 @@ find_box_target(fz_html_box *box, const char *id)
 		{
 			fz_html_flow *flow = find_first_content(box);
 			if (flow)
-				return flow->y;
+				return find_flow_top(flow);
 			return box->s.layout.y;
 		}
 		if (box->type == BOX_FLOW)
@@ -377,6 +404,8 @@ add_html_outline(fz_context *ctx, struct outline_parser *x, fz_html_box *box)
 	}
 	fz_catch(ctx)
 	{
+		fz_free(ctx, node->uri);
+		fz_free(ctx, node->title);
 		fz_free(ctx, node);
 		fz_rethrow(ctx);
 	}

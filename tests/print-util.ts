@@ -2,6 +2,7 @@
 import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
+import { IS_WIN } from "./host.ts";
 import { EXE } from "./util.ts";
 
 export const PRINT_TO_PDF = "Microsoft Print to PDF";
@@ -92,6 +93,7 @@ export function runPrintToPdf(
   inputPath: string,
   outputPath: string,
   printSettings: string,
+  extraArgs: string[] = [],
 ): { ok: boolean; stdout: string; stderr: string; exitCode: number } {
   rmSync(outputPath, { force: true });
   const out = printOutputPath(outputPath);
@@ -105,6 +107,7 @@ export function runPrintToPdf(
       "-for-testing",
       "-silent",
       "-exit-when-done",
+      ...extraArgs,
       "-print-to",
       PRINT_TO_PDF,
       "-print-settings",
@@ -127,6 +130,10 @@ export function tempPrintOutput(name: string): string {
 }
 
 export function requirePrintToPdf(): void {
+  if (!IS_WIN) {
+    // ng writes -print-settings output=<path> itself.
+    return;
+  }
   const p = Bun.spawnSync({
     cmd: [
       "powershell",

@@ -4,10 +4,10 @@
 #include "base/Base.h"
 #include "base/WinDynCalls.h"
 #include "base/Win.h"
-#include "gui/Dpi.h"
-
 #include "base/Pixmap.h"
+#include "base/UITask.h"
 
+#include "gui/Dpi.h"
 #include "gui/UIModels.h"
 #include "gui/Layout.h"
 #include "gui/win/WinGui.h"
@@ -16,7 +16,6 @@
 #include "gui/VirtCtrl.h"
 
 #include "Settings.h"
-#include "GlobalPrefs.h"
 #include "AppSettings.h"
 #include "DocController.h"
 #include "EngineBase.h"
@@ -31,89 +30,48 @@
 #include "SvgIcons.h"
 #include "Toolbar.h"
 #include "SearchAndDDE.h"
-#include "FindBar.h"
 #include "FindWindow.h"
 #include "Translations.h"
 #include "Theme.h"
-#include "DarkMode_win.h"
+#include "DarkMode.h"
+#include "FindBar.h"
+#include "AppHelpersCommon.h"
+#include "FindWindowCommon.h"
 
-// command ids for the bar's toolbar buttons; must not collide with real commands
-constexpr int kFindBarCloseCmdId = (int)CmdLast + 50;
-constexpr int kFindBarPinCmdId = (int)CmdLast + 52;
+// the bar's buttons, in order; btns[], the icons and these must line up
+constexpr int kFindBarBtnCmds[] = {
+    CmdFindPrev,      CmdFindNext,       CmdFindToggleMatchCase, CmdFindToggleMatchWholeWord,
+    kFindBarPinCmdId, kFindBarCloseCmdId};
+constexpr int kFindBarBtnCount = dimof(kFindBarBtnCmds);
 
-namespace {
-
-// min-width box: at least `dx`, wider if the child needs more
-struct FindMinDx : ILayout {
-    ILayout* child = nullptr;
-    int dx = 0;
-
-    FindMinDx(ILayout* c, int dxIn);
-    ~FindMinDx() override;
-
-    Size Layout(Constraints bc) override;
-    int MinIntrinsicHeight(int width) override;
-    int MinIntrinsicWidth(int height) override;
-    void SetBounds(Rect) override;
-    int LayoutChildCount() override;
-    ILayout* LayoutChildAt(int) override;
-};
-
-FindMinDx::FindMinDx(ILayout* c, int dxIn) {
-    child = c;
-    dx = dxIn;
-}
-
-FindMinDx::~FindMinDx() {
-    delete child;
-}
-
-int FindMinDx::LayoutChildCount() {
-    return child ? 1 : 0;
-}
-
-ILayout* FindMinDx::LayoutChildAt(int) {
-    return child;
-}
-
-int FindMinDx::MinIntrinsicWidth(int height) {
-    int childDx = child ? child->MinIntrinsicWidth(height) : 0;
-    return std::max(dx, childDx);
-}
-
-int FindMinDx::MinIntrinsicHeight(int width) {
-    return child ? child->MinIntrinsicHeight(width) : 0;
-}
-
-Size FindMinDx::Layout(const Constraints bc) {
-    int w = MinIntrinsicWidth(0);
-    if (bc.min.dx > w) {
-        w = bc.min.dx;
+// width of the "n / m" status slot, wide enough for the largest count it will
+// show. Shared with the floating find window so both size it the same way.
+int FindStatusDx(PlatformFont* font, int totalHits, bool capped) {
+    int digits = DecimalDigits(std::max(totalHits, 0));
+    int nChars = (2 * digits) + 3; // N, " / ", M
+    if (capped) {
+        nChars++; // the trailing '+' in e.g. "999 / 999+"
     }
-    if (bc.HasBoundedWidth() && bc.max.dx < w) {
-        w = bc.max.dx;
-    }
-    Size s = child ? child->Layout(bc.TightenWidth(w)) : Size{};
-    return {w, s.dy};
+    return nChars * font->averageCharWidth;
 }
-
-void FindMinDx::SetBounds(Rect r) {
-    lastBounds = r;
-    if (child) {
-        child->SetBounds(r);
-    }
-}
-
-} // namespace
 
 struct FindBarWnd : WindowBase {
     MainWindow* win = nullptr;
     // the status text and the buttons are virtual controls; the search field is
     // the only HWND child. Owned by `layout` once BuildLayout() runs
-    Edit* edit = nullptr;
+    DropDown* edit = nullptr;
     VirtText* status = nullptr;
+    MinDxBox* statusBox = nullptr;
+    // what statusBox->dx was sized for; the slot is fixed so the search field
+    // next to it doesn't resize every time the count changes
+    int statusTotalHits = 0;
+    bool statusCapped = false;
+    Spacer* gapAfterEdit = nullptr;
+    Spacer* gapAfterStatus = nullptr;
+    Padding* padLayout = nullptr;
+    int layoutDpi = 96;
     // prev / next / match-case / match-whole-word / pop-out / close
-    VirtIconButton* btns[6]{};
+    VirtIconButton* btns[kFindBarBtnCount]{};
 
     int barDx = 0;
     int barDy = 0;
@@ -123,69 +81,73 @@ struct FindBarWnd : WindowBase {
     // set while Layout() runs so the WM_SIZE its own SetWindowPos generates
     // doesn't re-enter Layout()
     bool inLayout = false;
+    Func1List<MainWindow*> onWindowMoved;
 
     FindBarWnd() = default;
     ~FindBarWnd() override;
 
     bool Create(MainWindow* win);
     void CreateButtons();
-    void UpdateButtonIcons();
+    void UpdateButtonIcons(int dpi = 0);
     void BuildLayout();
+    void UpdateDpi(int dpi);
     // forceBarDx > 0: fit the bar into exactly that window width, giving the
     // slack to the edit box. 0: the default edit width.
     void Layout(int forceBarDx = 0);
     int MinBarDx() const;
 
     void OnTextChanged();
+    void OnHistoryCommitted();
 
     void OnSize(WindowBase::SizeEvent* ev);
     void OnGetMinMaxInfo(WindowBase::GetMinMaxInfoEvent* ev);
     void OnNcHitTest(WindowBase::NcHitTestEvent* ev);
+    void OnDpiChanged(WindowBase::DpiChangedEvent* ev);
     void OnKeyDown(KeyEvent* ev);
     void OnCommand(WindowBase::CommandEvent* ev);
+
+    bool UpdateStatusWidth(int totalHits, bool capped);
 };
 
 // tooltip text for the bar's toolbar buttons
-// append a command's keyboard shortcut to its tooltip, e.g. "Find Next (F3)"
-static TempStr AppendCmdAccel(Str base, int cmd) {
-    TempStr accel = AppendAccelKeyToMenuStringTemp(nullptr, cmd);
-    if (!accel) {
-        return base;
-    }
-    return str::JoinTemp(base, fmt(" (%s)", Str(accel.s + 1, accel.len - 1))); // +1 skips the leading \t
-}
-
 static TempStr FindBarButtonTooltip(int cmd) {
     switch (cmd) {
         case CmdFindPrev:
-            return AppendCmdAccel(_TRA("Find Previous"), cmd);
+            return AppendCmdAccel(Tr("Find Previous"), cmd);
         case CmdFindNext:
-            return AppendCmdAccel(_TRA("Find Next"), cmd);
+            return AppendCmdAccel(Tr("Find Next"), cmd);
         case CmdFindToggleMatchCase:
-            return AppendCmdAccel(_TRA("Match Case"), cmd);
+            return AppendCmdAccel(Tr("Match Case"), cmd);
         case CmdFindToggleMatchWholeWord:
-            return AppendCmdAccel(_TRA("Match Whole Word"), cmd);
+            return AppendCmdAccel(Tr("Match Whole Word"), cmd);
         case kFindBarPinCmdId:
-            return _TRA("Open in a window");
+            return Tr("Open in a window");
         case kFindBarCloseCmdId:
-            return _TRA("Close");
+            return Tr("Close");
     }
     return {};
 }
 
 FindBarWnd::~FindBarWnd() {
+    if (win) {
+        win->UnregisterOnWindowMoved(&onWindowMoved);
+    }
     // edit, status and buttons are owned by `layout` (deleted in ~WindowBase)
 }
 
 // the icons come from the shared cache, which renders them for the current
 // theme and size
-void FindBarWnd::UpdateButtonIcons() {
-    static const char* icons[6] = {gIconChevronUp,      gIconChevronDown,    gIconMatchCase,
-                                   gIconMatchWholeWord, gIconArrowsDiagonal, gIconClose};
-    int isz = RoundUp(DpiScale(16), 4);
-    for (int i = 0; i < 6; i++) {
+void FindBarWnd::UpdateButtonIcons(int dpi) {
+    static const char* icons[] = {gIconChevronUp,      gIconChevronDown,    gIconMatchCase,
+                                  gIconMatchWholeWord, gIconArrowsDiagonal, gIconClose};
+    if (dpi <= 0) {
+        dpi = GetDpi();
+    }
+    int isz = RoundUp(DpiScaleByDpi(dpi, 16), 4);
+    static_assert(dimof(icons) == kFindBarBtnCount);
+    for (int i = 0; i < kFindBarBtnCount; i++) {
         if (btns[i]) {
-            btns[i]->pixmap = GetCachedPixmapForSvg(icons[i], isz, isz);
+            btns[i]->pixmap = GetCachedPixmapForSvg(Str(icons[i]), isz, isz);
         }
     }
 }
@@ -199,11 +161,9 @@ static void FindBarButtonClicked(FindBarWnd* bar, VirtMouseEvent* ev) {
 }
 
 void FindBarWnd::CreateButtons() {
-    static const int cmds[6] = {
-        CmdFindPrev,      CmdFindNext,       CmdFindToggleMatchCase, CmdFindToggleMatchWholeWord,
-        kFindBarPinCmdId, kFindBarCloseCmdId};
+    const int* cmds = kFindBarBtnCmds;
     int pad = DpiScale(4);
-    for (int i = 0; i < 6; i++) {
+    for (int i = 0; i < kFindBarBtnCount; i++) {
         auto* b = new VirtIconButton();
         b->id = cmds[i];
         b->padding = Insets{pad, pad, pad, pad};
@@ -243,17 +203,18 @@ bool FindBarWnd::Create(MainWindow* mainWin) {
     SetColors(colTxt, colBg);
 
     {
-        Edit::CreateArgs args;
+        DropDown::CreateArgs args;
         args.parent = hwnd;
         args.font = GetAppFont();
-        args.isMultiLine = false;
-        args.withBorder = true;
-        args.cueText = _TRA("Find");
         args.isRtl = IsUIRtl();
-        edit = new Edit();
+        args.isEditable = true;
+        edit = new DropDown();
         edit->SetColors(colTxt, colBg);
         edit->Create(args);
+        CbSetCueBanner(edit, Tr("Find"));
         edit->onTextChanged = MkMethod0<FindBarWnd, &FindBarWnd::OnTextChanged>(this);
+        edit->onCloseUp = MkMethod0<FindBarWnd, &FindBarWnd::OnHistoryCommitted>(this);
+        ApplyFindHistory(edit);
         if (!win->findEdit) {
             // don't steal it from the floating find window: this can run while
             // that one is up (RecreateFindBar on a theme change)
@@ -275,15 +236,11 @@ bool FindBarWnd::Create(MainWindow* mainWin) {
 
     DarkModeApplyToPopupWindow(hwnd);
     Layout();
+
+    onWindowMoved = MkFunc1Void(FindBarReposition);
+    win->RegisterOnWindowMoved(&onWindowMoved);
     return true;
 }
-
-constexpr int kFindBarPadding = 6;
-constexpr int kFindBarGap = 4;
-constexpr int kFindBarDefaultEditDx = 220;
-constexpr int kFindBarMinEditDx = 80;
-// how wide the drag zone along the left edge is
-constexpr int kFindBarResizeGripDx = 6;
 
 void FindBarWnd::BuildLayout() {
     int p = DpiScale(kFindBarPadding);
@@ -297,14 +254,18 @@ void FindBarWnd::BuildLayout() {
     auto* row = new HBox();
     row->alignCross = CrossAxisAlign::CrossCenter;
     row->AddChild(edit, 1);
-    row->AddChild(new Spacer(gap, 0));
-    int statusMinDx = PlatformFontMeasureText(status->font, StrL("1 / 999")).dx;
-    row->AddChild(new FindMinDx(status, statusMinDx));
-    row->AddChild(new Spacer(gap, 0));
+    gapAfterEdit = new Spacer(gap, 0);
+    row->AddChild(gapAfterEdit);
+    statusBox = new MinDxBox(status, FindStatusDx(status->font, statusTotalHits, statusCapped));
+    row->AddChild(statusBox);
+    gapAfterStatus = new Spacer(gap, 0);
+    row->AddChild(gapAfterStatus);
     for (VirtIconButton* b : btns) {
         row->AddChild(b);
     }
-    layout = new Padding(row, Insets{p, p, p, p});
+    padLayout = new Padding(row, Insets{p, p, p, p});
+    layout = padLayout;
+    layoutDpi = DpiGet();
 }
 
 int FindBarWnd::MinBarDx() const {
@@ -323,13 +284,20 @@ void FindBarWnd::Layout(int forceBarDx) {
         return;
     }
     if (forceBarDx > 0) {
+        Rect wr = HwndWindowRect(hwnd);
+        Rect cr = HwndClientRect(hwnd);
+        int nonClientDx = wr.dx - cr.dx;
+        int clientDx = std::max(forceBarDx - nonClientDx, layout->MinIntrinsicWidth(0));
+        inLayout = true;
+        LayoutAndSizeToContent(layout, clientDx, 0, hwnd);
         DoLayout();
+        inLayout = false;
     } else {
         int extra = DpiScale(kFindBarDefaultEditDx - kFindBarMinEditDx);
         int minDx = layout->MinIntrinsicWidth(0) + extra;
         inLayout = true;
         LayoutAndSizeToContent(layout, minDx, 0, hwnd);
-        DoLayout(HwndClientRect(hwnd).Size());
+        DoLayout();
         inLayout = false;
     }
     Rect wr = HwndWindowRect(hwnd);
@@ -339,10 +307,69 @@ void FindBarWnd::Layout(int forceBarDx) {
 }
 
 void FindBarWnd::OnTextChanged() {
-    if (suppressTextChanged) {
+    FindTextChanged(win, suppressTextChanged);
+}
+
+void FindTextChanged(MainWindow* win, bool suppressed) {
+    if (suppressed) {
         return;
     }
     OnFindBarTextChanged(win);
+}
+
+namespace {
+struct PickedTermData {
+    MainWindow* win = nullptr;
+    Str term;
+    ~PickedTermData() { str::Free(term); }
+};
+} // namespace
+
+static void StartPickedFindTask(PickedTermData* d) {
+    AutoDelete del(d);
+    MainWindow* win = d->win;
+    if (!IsMainWindowValidAndNotClosing(win) || !win->findEdit) {
+        return;
+    }
+    if (!str::Eq(win->findEdit->GetTextTemp(), d->term)) {
+        win->findEdit->SetText(d->term);
+    }
+    CbEditSetModified(win->findEdit, false);
+    FindTextOnThread(win, TextSearch::Direction::Forward, d->term, true, false);
+}
+
+// Run the search after the combo box is done closing its list. Starting it here
+// would rebuild the history list from inside the combo's own notification, and
+// the combo then finishes the close-up against a selection we just deleted -
+// leaving the edit empty while the status still counted the old term.
+void StartPickedFindTerm(MainWindow* win, Str term) {
+    if (!win || len(term) == 0) {
+        return;
+    }
+    auto* d = new PickedTermData;
+    d->win = win;
+    d->term = str::Dup(term);
+    uitask::Post(MkFunc0<PickedTermData>(StartPickedFindTask, d), "TaskFindHistoryPick");
+}
+
+// picking an entry out of the open history list is a search request; walking
+// the list with the arrow keys only fills the box, and waits for Enter
+void FindHistoryCommitted(MainWindow* win, DropDown* edit, bool suppressed) {
+    if (suppressed || !edit) {
+        return;
+    }
+    int idx = CbGetCurrentSelection(edit);
+    if (idx < 0 || idx >= len(edit->items)) {
+        return;
+    }
+    // Take the term from the list item, not the edit: a combo box has not
+    // necessarily copied the picked item into its edit yet when it says the
+    // list closed.
+    StartPickedFindTerm(win, edit->items[idx]);
+}
+
+void FindBarWnd::OnHistoryCommitted() {
+    FindHistoryCommitted(win, edit, suppressTextChanged);
 }
 
 void FindBarWnd::OnSize(WindowBase::SizeEvent* ev) {
@@ -378,6 +405,69 @@ void FindBarWnd::OnNcHitTest(WindowBase::NcHitTestEvent* ev) {
         ev->result = HTLEFT;
         ev->didHandle = true;
     }
+}
+
+// Keep the HWND. RecreateFindBar on every WM_DPICHANGED double-freed the
+// layout tree when a nested DPI change arrived during DestroyWindow
+// (DameWare / RDP oscillating 96 vs 120).
+void FindBarWnd::UpdateDpi(int dpi) {
+    if (dpi <= 0) {
+        dpi = GetDpi();
+    }
+    if (!layout || !edit) {
+        return;
+    }
+    int prevDpi = layoutDpi > 0 ? layoutDpi : 96;
+    PlatformFont* appFont = GetAppFontForDpi(dpi);
+    edit->SetFont(appFont);
+    if (status) {
+        status->font = appFont;
+    }
+    int p = DpiScaleByDpi(dpi, kFindBarPadding);
+    int gap = DpiScaleByDpi(dpi, kFindBarGap);
+    int minEditDx = DpiScaleByDpi(dpi, kFindBarMinEditDx);
+    edit->idealDx = minEditDx;
+    edit->maxDx = minEditDx;
+    if (gapAfterEdit) {
+        gapAfterEdit->dx = gap;
+    }
+    if (gapAfterStatus) {
+        gapAfterStatus->dx = gap;
+    }
+    if (padLayout) {
+        padLayout->insets = Insets{p, p, p, p};
+    }
+    if (statusBox && status) {
+        statusBox->dx = FindStatusDx(status->font, statusTotalHits, statusCapped);
+    }
+    int buttonPad = DpiScaleByDpi(dpi, 4);
+    for (VirtIconButton* b : btns) {
+        if (b) {
+            b->padding = Insets{buttonPad, buttonPad, buttonPad, buttonPad};
+        }
+    }
+    int newBarDx = barDx > 0 ? MulDiv(barDx, dpi, prevDpi) : 0;
+    layoutDpi = dpi;
+    UpdateButtonIcons(dpi);
+    if (newBarDx > 0) {
+        Layout(newBarDx);
+    } else {
+        Layout();
+    }
+}
+
+void FindBarWnd::OnDpiChanged(WindowBase::DpiChangedEvent* ev) {
+    // Don't apply the suggested rect: we pin ourselves to the frame. A hidden
+    // popup is parked on the primary and WM_DPICHANGED would move it (#5998).
+    if (!layout) {
+        ev->didHandle = true;
+        return;
+    }
+    UpdateDpi((int)ev->dpiX);
+    if (win) {
+        FindBarReposition(win);
+    }
+    ev->didHandle = true;
 }
 
 void FindBarWnd::OnKeyDown(KeyEvent* ev) {
@@ -450,6 +540,7 @@ FindBarWnd* CreateFindBar(MainWindow* win) {
     bar->onSize = MkMethod1<FindBarWnd, WindowBase::SizeEvent*, &FindBarWnd::OnSize>(bar);
     bar->onGetMinMaxInfo = MkMethod1<FindBarWnd, WindowBase::GetMinMaxInfoEvent*, &FindBarWnd::OnGetMinMaxInfo>(bar);
     bar->onNcHitTest = MkMethod1<FindBarWnd, WindowBase::NcHitTestEvent*, &FindBarWnd::OnNcHitTest>(bar);
+    bar->onDpiChanged = MkMethod1<FindBarWnd, WindowBase::DpiChangedEvent*, &FindBarWnd::OnDpiChanged>(bar);
     bar->onKeyDown = MkMethod1<FindBarWnd, KeyEvent*, &FindBarWnd::OnKeyDown>(bar);
     if (!bar->Create(win)) {
         delete bar;
@@ -459,16 +550,46 @@ FindBarWnd* CreateFindBar(MainWindow* win) {
 }
 
 void DeleteFindBar(MainWindow* win) {
-    if (!win->findBar) {
+    FindBarWnd* bar = win->findBar;
+    if (!bar) {
         return;
     }
+    // Null first: DestroyWindow can re-enter RecreateFindBar / DeleteFindBar
+    // (nested WM_DPICHANGED) and would otherwise double-free the bar.
+    win->findBar = nullptr;
     // only if this bar is the active find UI; the floating find window's edit
     // must survive us (see ShowFindWindow)
-    if (win->findEdit == win->findBar->edit) {
+    if (win->findEdit == bar->edit) {
         win->findEdit = nullptr;
     }
-    delete win->findBar;
-    win->findBar = nullptr;
+    if (bar->hwnd) {
+        ShowWindow(bar->hwnd, SW_HIDE);
+    }
+    delete bar;
+}
+
+void FindBarUpdateDpi(MainWindow* win) {
+    if (!win || !win->findBar) {
+        return;
+    }
+    int dpi = win->frameDpi > 0 ? win->frameDpi : DpiGet();
+    win->findBar->UpdateDpi(dpi);
+    FindBarReposition(win);
+}
+
+int FindBarFontHeight(MainWindow* win) {
+    if (!win || !win->findBar || !win->findBar->edit) {
+        return 0;
+    }
+    return PlatformFontLineHeight(win->findBar->edit->GetFont());
+}
+
+// Physical height of the compact bar, used by the focused DPI regression test.
+int FindBarWindowHeight(MainWindow* win) {
+    if (!win || !win->findBar || !win->findBar->hwnd) {
+        return 0;
+    }
+    return HwndWindowRect(win->findBar->hwnd).dy;
 }
 
 // rebuild the bar so it picks up new theme colors / icons (called on theme change)
@@ -478,19 +599,24 @@ void RecreateFindBar(MainWindow* win) {
     }
     // stop any in-flight find/count that captured the old bar's state
     AbortFinding(win, true);
-    bool wasVisible = HwndIsVisible(win->findBar->hwnd);
-    TempStr text = wasVisible && win->findEdit ? str::DupTemp(win->findEdit->GetTextTemp()) : nullptr;
+    FindBarWnd* oldBar = win->findBar;
+    bool wasVisible = HwndIsVisible(oldBar->hwnd);
+    bool wasActive = win->findEdit == oldBar->edit;
+    TempStr text = wasActive ? str::DupTemp(oldBar->edit->GetTextTemp()) : TempStr();
     DeleteFindBar(win);
     win->findBar = CreateFindBar(win);
-    if (win->findBar && wasVisible) {
+    if (!win->findBar) {
+        return;
+    }
+    if (wasActive && win->findEdit == win->findBar->edit) {
+        // Preserve the compact term even while the bar is hidden. F3 uses that
+        // edit after a theme change, so dropping it silently changes searches.
+        win->findBar->suppressTextChanged = true;
+        win->findEdit->SetText(text);
+        win->findBar->suppressTextChanged = false;
+    }
+    if (wasVisible) {
         ShowFindBar(win);
-        if (len(text) > 0 && win->findEdit) {
-            // restore the text without re-running the search (the existing
-            // document highlight is preserved across the recreate)
-            win->findBar->suppressTextChanged = true;
-            win->findEdit->SetText(text);
-            win->findBar->suppressTextChanged = false;
-        }
     }
 }
 
@@ -518,7 +644,12 @@ static void PositionFindBar(FindBarWnd* bar) {
     SetWindowPos(bar->hwnd, HWND_TOP, r.x, r.y, r.dx, r.dy, SWP_NOACTIVATE);
 }
 
-static void ShowCompactBar(MainWindow* win) {
+void ShowCompactBar(MainWindow* win) {
+    // one find UI at a time: SearchUIFloating can change while the window is up
+    if (IsFindWindowVisible(win)) {
+        HideFindWindow(win);
+    }
+    TempStr term = CurrentFindTermTemp(win);
     if (!win->findBar) {
         win->findBar = CreateFindBar(win);
     }
@@ -528,26 +659,24 @@ static void ShowCompactBar(MainWindow* win) {
     FindBarWnd* bar = win->findBar;
     win->findEdit = bar->edit;    // make this the active find edit
     win->findPagesEdit = nullptr; // page range is only on the floating window
+    if (len(term) > 0 && CbGetTextLen(win->findEdit) == 0) {
+        bar->suppressTextChanged = true;
+        win->findEdit->SetText(term);
+        bar->suppressTextChanged = false;
+    }
     // reflect the current match-case / whole-word state on the toggle buttons
     FindBarSetMatchCaseChecked(win, win->findMatchCase);
     FindBarSetMatchWholeWordChecked(win, win->findMatchWholeWord);
     PositionFindBar(bar);
     ShowWindow(bar->hwnd, SW_SHOW);
     win->findEdit->SetFocus();
-    win->findEdit->SelectAll();
-}
-
-// "ShowFindBar" is the entry point used by FindFirst/Ctrl+F; it shows whichever
-// find UI the user has chosen (compact overlay or floating window)
-void ShowFindBar(MainWindow* win) {
-    if (gGlobalPrefs->searchUIFloating) {
-        ShowFindWindow(win);
-        return;
-    }
-    ShowCompactBar(win);
+    CbEditSelectAll(win->findEdit);
+    // the restored term is only a starting point, not a search request: hitting
+    // Ctrl+F must not re-run the last search behind the user's back
 }
 
 void HideFindBar(MainWindow* win) {
+    win->searchStartMarked = false;
     // drop the cached results: they belong to this search/document and must not
     // be shown or navigated into after the find UI is reopened (e.g. on another
     // tab, which would carry the previous document's page/glyph coordinates)
@@ -583,50 +712,127 @@ bool IsFindBarVisible(MainWindow* win) {
     return win->findBar && HwndIsVisible(win->findBar->hwnd);
 }
 
-// true if either the compact bar or the floating find window is visible
-bool IsFindUIVisible(MainWindow* win) {
-    return IsFindBarVisible(win) || IsFindWindowVisible(win);
+// focus the find edit and select all text (Ctrl+F when find UI is already open)
+// The find box under the names ng uses for its text field (FindBar.h).
+TempStr FindEditTextTemp(MainWindow* win) {
+    if (!win || !win->findEdit) {
+        return {};
+    }
+    return win->findEdit->GetTextTemp();
 }
 
-// focus the find edit and select all text (Ctrl+F when find UI is already open)
+int FindEditTextLen(MainWindow* win) {
+    if (!win || !win->findEdit) {
+        return 0;
+    }
+    return CbGetTextLen(win->findEdit);
+}
+
+void FindEditSetText(MainWindow* win, Str s) {
+    if (win && win->findEdit) {
+        win->findEdit->SetText(s);
+    }
+}
+
+bool FindEditIsModified(MainWindow* win) {
+    return win && win->findEdit && CbEditIsModified(win->findEdit);
+}
+
+void FindEditSetModified(MainWindow* win, bool modified) {
+    if (win && win->findEdit) {
+        CbEditSetModified(win->findEdit, modified);
+    }
+}
+
 void FocusFindEditSelectAll(MainWindow* win) {
     if (!win->findEdit) {
         return;
     }
     win->findEdit->SetFocus();
-    win->findEdit->SelectAll();
+    CbEditSelectAll(win->findEdit);
+}
+
+// drops the search field's history list; an empty one has nothing to show
+void FindEditShowHistory(MainWindow* win) {
+    if (win->findEdit && SendMessageW(win->findEdit->hwnd, CB_GETCOUNT, 0, 0) > 0) {
+        SendMessageW(win->findEdit->hwnd, CB_SHOWDROPDOWN, TRUE, 0);
+    }
+}
+
+bool IsFindHistoryOpen(MainWindow* win) {
+    return win->findEdit && CbIsDropped(win->findEdit);
+}
+
+void FindBarSyncHistory(MainWindow* win) {
+    if (win && win->findBar && win->findBar->edit) {
+        ApplyFindHistory(win->findBar->edit);
+    }
 }
 
 // switch the find UI between the compact toolbar overlay and the floating
-// window (persists the choice in gGlobalPrefs->searchUIFloating)
+// window (persists the choice in gSettings->searchUIFloating)
 void ToggleFloatingFindUI(MainWindow* win) {
-    TempStr text = win->findEdit ? str::DupTemp(win->findEdit->GetTextTemp()) : nullptr;
-    TempStr pages = win->findPagesEdit ? str::DupTemp(win->findPagesEdit->GetTextTemp()) : nullptr;
-    int selStart = 0, selEnd = 0;
-    if (win->findEdit) {
-        win->findEdit->GetSelection(selStart, selEnd);
+    struct FindUiSwitchState {
+        MainWindow* win = nullptr;
+        Str text;
+        Str pages;
+        int selStart = 0;
+        int selEnd = 0;
+        bool hasText = false;
+    };
+    Vec<FindUiSwitchState> states;
+    for (MainWindow* w : gWindows) {
+        if (!IsFindUIVisible(w)) {
+            continue;
+        }
+        FindUiSwitchState state;
+        state.win = w;
+        if (w->findEdit) {
+            state.hasText = true;
+            state.text = str::Dup(w->findEdit->GetTextTemp());
+            CbEditGetSelection(w->findEdit, state.selStart, state.selEnd);
+        }
+        if (w->findPagesEdit) {
+            state.pages = str::Dup(w->findPagesEdit->GetTextTemp());
+        }
+        VecAppend(states, state);
     }
-    bool wasShowing = IsFindBarVisible(win) || IsFindWindowVisible(win);
 
-    HideFindBar(win); // dispatches: hides whichever find UI is currently visible
+    for (FindUiSwitchState& state : states) {
+        HideFindBar(state.win); // dispatches: hides whichever find UI is currently visible
+    }
 
-    gGlobalPrefs->searchUIFloating = !gGlobalPrefs->searchUIFloating;
-    SaveSettings();
+    gSettings->searchUIFloating = !gSettings->searchUIFloating;
+    ScheduleSaveSettings();
 
-    if (!wasShowing) {
-        return; // just persist the preference; nothing was open
+    auto restore = [](FindUiSwitchState& state) {
+        MainWindow* w = state.win;
+        ShowFindBar(w); // shows the now-active UI and repoints win->findEdit
+        if (state.hasText && w->findEdit) {
+            w->findEdit->SetText(state.text); // restore text (re-runs the search)
+        }
+        if (len(state.pages) > 0 && w->findPagesEdit) {
+            w->findPagesEdit->SetText(state.pages);
+        }
+        if (w->findEdit) {
+            w->findEdit->SetFocus();
+            // restore the caret/selection last, after Show/SetText reset it
+            CbEditSelectText(w->findEdit, state.selStart, state.selEnd);
+        }
+    };
+    // Restore the initiating window last so switching another window does not
+    // steal focus from it.
+    for (FindUiSwitchState& state : states) {
+        if (state.win != win) {
+            restore(state);
+        }
     }
-    ShowFindBar(win); // shows the now-active UI and repoints win->findEdit
-    if (len(text) > 0 && win->findEdit) {
-        win->findEdit->SetText(text); // restore text (re-runs the search)
-    }
-    if (len(pages) > 0 && win->findPagesEdit) {
-        win->findPagesEdit->SetText(pages);
-    }
-    if (win->findEdit) {
-        win->findEdit->SetFocus();
-        // restore the caret/selection last, after Show/SetText reset it
-        win->findEdit->SetSelection(selStart, selEnd);
+    for (FindUiSwitchState& state : states) {
+        if (state.win == win) {
+            restore(state);
+        }
+        str::Free(state.text);
+        str::Free(state.pages);
     }
 }
 
@@ -644,27 +850,53 @@ void FindBarReposition(MainWindow* win) {
     PositionFindBar(win->findBar);
 }
 
+// Widen the status slot only when a bigger count needs it. Relaying out on
+// every status change resized the search field, and a combo box re-sets its
+// edit's text on WM_SIZE - selecting all of it under the typing user (#6068).
+bool FindBarWnd::UpdateStatusWidth(int totalHits, bool capped) {
+    if (!statusBox || totalHits < 0) {
+        return false;
+    }
+    int dx = FindStatusDx(status->font, totalHits, capped);
+    if (statusBox->dx == dx) {
+        return false;
+    }
+    statusBox->dx = dx;
+    statusTotalHits = totalHits;
+    statusCapped = capped;
+    return true;
+}
+
 // show n/m or "No matches" style status in the bar
-void FindBarSetStatus(MainWindow* win, Str s) {
-    if (gGlobalPrefs->searchUIFloating) {
-        FindWindowSetStatus(win, s);
+void FindBarSetStatus(MainWindow* win, Str s, int totalHits) {
+    if (gSettings->searchUIFloating) {
+        FindWindowSetStatus(win, s, totalHits);
         return;
     }
-    if (win->findBar && win->findBar->status) {
-        win->findBar->status->SetText(s ? s : StrL(""));
-        // relayout so the status is the text width (a fixed slot left a large
-        // empty gap after short counts like "1 / 999+")
-        if (win->findBar->barDx > 0) {
-            win->findBar->Layout(win->findBar->barDx);
-        } else {
-            win->findBar->Layout();
-        }
+    FindBarWnd* bar = win->findBar;
+    if (!bar || !bar->status) {
+        return;
+    }
+    Str text = s ? s : StrL("");
+    bool capped = str::EndsWith(text, StrL("+"));
+    bool widthChanged = bar->UpdateStatusWidth(totalHits, capped);
+    bar->status->SetText(text);
+    if (!widthChanged) {
+        bar->status->Invalidate();
+        return;
+    }
+    if (bar->barDx > 0) {
+        bar->Layout(bar->barDx);
+    } else {
+        bar->Layout();
     }
 }
 
 // idx into FindBarWnd::btns
 constexpr int kBtnMatchCase = 2;
 constexpr int kBtnMatchWholeWord = 3;
+static_assert(kFindBarBtnCmds[kBtnMatchCase] == CmdFindToggleMatchCase);
+static_assert(kFindBarBtnCmds[kBtnMatchWholeWord] == CmdFindToggleMatchWholeWord);
 
 static void FindBarSetBtnChecked(MainWindow* win, int idx, bool checked) {
     if (!win->findBar) {
@@ -680,7 +912,7 @@ static void FindBarSetBtnChecked(MainWindow* win, int idx, bool checked) {
 
 // reflect match-case toggle state on the bar's button
 void FindBarSetMatchCaseChecked(MainWindow* win, bool checked) {
-    if (gGlobalPrefs->searchUIFloating) {
+    if (gSettings->searchUIFloating) {
         FindWindowSetMatchCaseChecked(win, checked);
         return;
     }
@@ -689,7 +921,7 @@ void FindBarSetMatchCaseChecked(MainWindow* win, bool checked) {
 
 // reflect match-whole-word toggle state on the bar's button
 void FindBarSetMatchWholeWordChecked(MainWindow* win, bool checked) {
-    if (gGlobalPrefs->searchUIFloating) {
+    if (gSettings->searchUIFloating) {
         FindWindowSetMatchWholeWordChecked(win, checked);
         return;
     }

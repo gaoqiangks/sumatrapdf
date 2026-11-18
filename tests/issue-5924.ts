@@ -14,11 +14,14 @@
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { ControlCommand, withControlledSumatra } from "./control";
-import { EXE, makeMinimalPdf, runStandalone, tmpPath } from "./util";
-import { FRAME_CLASS } from "./win-automation";
+import { cmdId, EXE, makeMinimalPdf, runStandalone, tmpPath } from "./util";
+import { FRAME_CLASS, sendCommandSync } from "./win-automation";
 import { sleep, waitForTopWindow } from "./winapi";
 
 const HOST = "https://sumatrapdf.markdown/";
+// polls end as soon as the state is there; the limit is for a loaded machine
+// (pre-release runs tests next to a build, on an ASan exe)
+const SETTLE_MS = 10000;
 
 // 1x1 transparent png
 const PNG = Buffer.from(
@@ -51,6 +54,11 @@ function makeFolder(): string {
 }
 
 type Tab = { win: number; current: boolean; pageNo: number; file: string };
+
+function endsWithFile(file: string, suffix: string): boolean {
+  const norm = (s: string) => s.replaceAll("\\", "/").toLowerCase();
+  return norm(file).endsWith(norm(suffix));
+}
 // `tabs` are the tabs holding a document; the app also has an empty start tab
 type Result = { navigate: boolean; tabs: Tab[]; dump: string };
 
@@ -87,7 +95,7 @@ export async function testit(): Promise<void> {
       const follow = async (href: string): Promise<Result> => {
         const res = await client.request(ControlCommand.TestMarkdownFollowLink, [href, 1]);
         const clicked = parse(String(res[1] ?? ""));
-        const deadline = Date.now() + 4000;
+        const deadline = Date.now() + SETTLE_MS;
         let settled = clicked;
         while (Date.now() < deadline) {
           const res2 = await client.request(ControlCommand.TestMarkdownFollowLink, ["", 0]);
@@ -124,41 +132,54 @@ export async function testit(): Promise<void> {
 
       // the actual report: the linked PDF opens in SumatraPDF
       r = await follow("sub/deep.pdf");
-      const deep = r.tabs.find((t) => t.file.toLowerCase().endsWith("\\sub\\deep.pdf"));
+      const deep = r.tabs.find((t) => endsWithFile(t.file, "/sub/deep.pdf"));
       if (r.navigate || !deep || !deep.current) {
         fail("a link to sub/deep.pdf must open it as the current tab", r);
       }
       if (r.tabs.length !== 2) {
         fail(`opening sub/deep.pdf should have left 2 tabs, there are ${r.tabs.length}`, r);
       }
-    },
-    [join(dir, "index.md")],
-  );
 
-  // deep.pdf became the current tab, so a second run for the other url form: a
-  // full virtual url, as a TOC destination or a new-window request has it
-  await withControlledSumatra(
-    EXE,
-    async (client, proc) => {
-      const frame = await waitForTopWindow(proc.pid!, FRAME_CLASS);
-      if (!frame) {
-        throw new Error("issue-5924: no frame window");
+      // let deep.pdf finish loading (a loading tab has no page yet), so the
+      // close below doesn't race the load
+      const tabsNow = async () =>
+        parse(String((await client.request(ControlCommand.TestMarkdownFollowLink, ["", 0]))[1] ?? ""));
+      const loadDeadline = Date.now() + SETTLE_MS;
+      r = await tabsNow();
+      while (Date.now() < loadDeadline && !r.tabs.some((t) => endsWithFile(t.file, "/sub/deep.pdf") && t.pageNo > 0)) {
+        await sleep(30);
+        r = await tabsNow();
       }
-      await client.waitForRenderIdle();
+
+      // Return to the markdown tab and reuse the process for the full virtual
+      // URL form used by TOC destinations and new-window requests.
+      sendCommandSync(frame, cmdId("CmdClose"));
+      const closeDeadline = Date.now() + SETTLE_MS;
+      let closed = await tabsNow();
+      while (Date.now() < closeDeadline) {
+        if (closed.tabs.length === 1 && endsWithFile(closed.tabs[0]!.file, "/index.md")) {
+          break;
+        }
+        await sleep(30);
+        closed = await tabsNow();
+      }
+      if (closed.tabs.length !== 1 || !endsWithFile(closed.tabs[0]!.file, "/index.md")) {
+        fail("closing deep.pdf did not return to index.md", closed);
+      }
 
       const res = await client.request(ControlCommand.TestMarkdownFollowLink, [`${HOST}doc.pdf`, 1]);
       const clicked = parse(String(res[1] ?? ""));
-      const deadline = Date.now() + 4000;
+      const deadline = Date.now() + SETTLE_MS;
       let settled = clicked;
       while (Date.now() < deadline) {
         const res2 = await client.request(ControlCommand.TestMarkdownFollowLink, ["", 0]);
         settled = parse(String(res2[1] ?? ""));
-        if (settled.tabs.some((t) => t.file.toLowerCase().endsWith("\\doc.pdf"))) {
+        if (settled.tabs.some((t) => endsWithFile(t.file, "/doc.pdf"))) {
           break;
         }
         await sleep(30);
       }
-      const doc = settled.tabs.find((t) => t.file.toLowerCase().endsWith("\\doc.pdf"));
+      const doc = settled.tabs.find((t) => endsWithFile(t.file, "/doc.pdf"));
       if (clicked.navigate || !doc || !doc.current || settled.tabs.length !== 2) {
         throw new Error(
           `issue-5924: a link to ./doc.pdf must open it as the current tab\noutput:\n${clicked.dump}${settled.dump}`,

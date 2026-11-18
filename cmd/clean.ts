@@ -1,4 +1,4 @@
-import { readdirSync, rmSync, unlinkSync, existsSync } from "node:fs";
+import { readdirSync, rmSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 
 let nSkipped = 0;
@@ -15,6 +15,10 @@ export function clearDirPreserveSettings(dir: string, verbose = false): void {
   for (const entry of entries) {
     const name = entry.name;
     const fullPath = join(dir, name);
+    if (name === "texstudio37" && entry.isDirectory()) {
+      clearDirPreserveSettings(fullPath, verbose);
+      continue;
+    }
     const excluded = name === "sumatrapdfcache" || name === "SumatraPDF-settings.txt" || name.includes("asan");
     if (excluded) {
       nSkipped++;

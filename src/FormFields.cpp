@@ -8,8 +8,10 @@
 #include <mupdf/pdf.h>
 
 #include "gui/UIModels.h"
+#include "gui/Gfx.h"
 
 #include "Settings.h"
+#include "AppSettings.h"
 #include "DocController.h"
 #include "EngineBase.h"
 #include "base/GuessFileType.h"
@@ -18,8 +20,11 @@
 #include "MainWindow.h"
 #include "Annotation.h"
 #include "SumatraPDF.h"
+#include "Commands.h"
 #include "Toolbar.h"
+#include "SumatraDialogs.h"
 #include "FormFields.h"
+#include "AppHelpersCommon.h"
 
 // One field is edited at a time: either a text edit box or a choice list box
 // floats over the page.
@@ -39,6 +44,43 @@ static bool gCommitting = false;
 // True while a form field is being edited in place.
 bool IsFormFieldEditActive() {
     return gEdit.hwnd != nullptr;
+}
+
+// Tint empty fillable fields so they are visible without hovering (issue #5966).
+void PaintFormFieldHighlights(MainWindow* win, Gfx* gfx) {
+    if (!gSettings || !gSettings->highlightFormFields || !gfx) {
+        return;
+    }
+    if (!win || !win->IsDocLoaded()) {
+        return;
+    }
+    DisplayModel* dm = win->AsFixed();
+    if (!dm) {
+        return;
+    }
+    EngineBase* engine = dm->GetEngine();
+    if (!EngineMupdfIsPdf(engine)) {
+        return;
+    }
+    Vec<Rect> screenRects;
+    int pageCount = dm->PageCount();
+    for (int pageNo = 1; pageNo <= pageCount; pageNo++) {
+        PageInfo* pi = dm->GetPageInfo(pageNo);
+        if (!pi || !pi->isShown || pi->visibleRatio == 0) {
+            continue;
+        }
+        Vec<RectF> pageRects;
+        EngineMupdfGetFormFieldHighlightRects(engine, pageNo, gEdit.widget, pageRects);
+        for (RectF& pr : pageRects) {
+            Rect rc = dm->CvtToScreen(pageNo, pr);
+            if (!rc.IsEmpty()) {
+                VecAppend(screenRects, rc);
+            }
+        }
+    }
+    if (len(screenRects) > 0) {
+        gfx->FillRects(screenRects.els, len(screenRects), kFormFieldHighlightCol, kFormFieldHighlightAlpha);
+    }
 }
 
 // Cancel the active form edit if it is for this widget (no save). Safe no-op
@@ -134,6 +176,11 @@ static LRESULT CALLBACK WndProcFormCtrl(HWND hwnd, UINT msg, WPARAM wp, LPARAM l
                 return 0;
             }
             break;
+        case WM_CHAR:
+            if (!isChoice && EditHandleCtrlBack(hwnd, wp)) {
+                return 0;
+            }
+            break;
         case WM_LBUTTONUP:
             if (isChoice) {
                 // let the listbox finalize the clicked selection, then commit it
@@ -155,19 +202,6 @@ static HFONT MakeFieldFont(int fontPx) {
     // negative height => character height in pixels
     return CreateFontW(-fontPx, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
                        CLIP_DEFAULT_PRECIS, DEFAULT_QUALITY, DEFAULT_PITCH, L"Arial");
-}
-
-// the field's on-screen font height in pixels: the /DA font size (PDF points)
-// scaled to the page's current zoom, or a height-derived fallback for
-// auto-sized (/DA size 0) fields.
-static int FieldFontPx(Annotation* widget, Rect rc) {
-    float daSize = GetWidgetFontSize(widget);
-    float pageDy = widget->bounds.dy; // field height in page (PDF) units
-    if (daSize > 0 && pageDy > 0) {
-        float scale = (float)rc.dy / pageDy; // screen px per PDF unit
-        return std::max(8, (int)(daSize * scale));
-    }
-    return std::max(8, (int)((float)rc.dy * 0.7f));
 }
 
 static bool StartTextEdit(MainWindow* win, Annotation* widget, Rect rc, int flags) {
@@ -207,7 +241,7 @@ static bool StartTextEdit(MainWindow* win, Annotation* widget, Rect rc, int flag
     gEdit.isChoice = false;
 
     HwndSetFocus(hEdit);
-    Edit_SetSel(hEdit, 0, -1);
+    EditSelectAll(hEdit);
     return true;
 }
 
@@ -266,8 +300,6 @@ static bool StartChoiceEdit(MainWindow* win, Annotation* widget, Rect rc) {
     return true;
 }
 
-// Start editing a text form field in place (floats an edit box over the field).
-// Returns false if `widget` isn't an editable (non-read-only) text widget.
 bool StartFormFieldEdit(MainWindow* win, Annotation* widget) {
     if (!win || !AnnotationIsLive(widget)) {
         return false;

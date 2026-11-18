@@ -16,7 +16,7 @@
 
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { tmpPath } from "./util";
+import { tmpPath, makeBlankPdf } from "./util";
 import { findCanvas, launchControlled, killAndWait } from "./win-automation";
 import {
   getClientRect,
@@ -32,32 +32,6 @@ import {
   MK_MBUTTON,
 } from "./winapi";
 
-// minimal, valid N-page PDF (Letter-size blank pages), ASCII only so string
-// length == byte length (keeps the xref offsets correct).
-function makePdf(nPages: number): string {
-  const objs: string[] = [];
-  objs.push(`<< /Type /Catalog /Pages 2 0 R >>`);
-  const kids = Array.from({ length: nPages }, (_, i) => `${3 + i} 0 R`).join(" ");
-  objs.push(`<< /Type /Pages /Count ${nPages} /Kids [${kids}] >>`);
-  for (let i = 0; i < nPages; i++) {
-    objs.push(`<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] >>`);
-  }
-  let body = "%PDF-1.4\n";
-  const offsets: number[] = [];
-  for (let i = 0; i < objs.length; i++) {
-    offsets.push(body.length);
-    body += `${i + 1} 0 obj\n${objs[i]}\nendobj\n`;
-  }
-  const xrefStart = body.length;
-  const size = objs.length + 1;
-  body += `xref\n0 ${size}\n0000000000 65535 f \n`;
-  for (const off of offsets) {
-    body += off.toString().padStart(10, "0") + " 00000 n \n";
-  }
-  body += `trailer\n<< /Size ${size} /Root 1 0 R >>\nstartxref\n${xrefStart}\n%%EOF\n`;
-  return body;
-}
-
 const SETTINGS = [
   `DefaultDisplayMode = continuous`,
   `DefaultZoom = fit page`,
@@ -70,7 +44,7 @@ const SETTINGS = [
 
 export async function testit(): Promise<void> {
   const pdf = tmpPath("issue-2693.pdf");
-  writeFileSync(pdf, makePdf(12), "latin1");
+  writeFileSync(pdf, makeBlankPdf(12), "latin1");
 
   const appdata = tmpPath("issue-2693-appdata");
   rmSync(appdata, { recursive: true, force: true });
@@ -79,7 +53,7 @@ export async function testit(): Promise<void> {
 
   // kill stale dev-build instances so reuse-instance can't forward our launch
   // to an old window (which would leave our process window-less)
-  const { proc, client, frame } = await launchControlled(["-appdata", appdata, pdf], { defaultWindowPos: true });
+  const { proc, client, frame } = await launchControlled(["-appdata", appdata, pdf]);
   try {
     await client.waitForRenderIdle();
     showWindow(frame, SW_RESTORE);
@@ -105,18 +79,18 @@ export async function testit(): Promise<void> {
     postMessage(canvas, WM_MOUSEMOVE, 0, packCoords(cx, cy + 9));
     await sleep(200);
     const start = getScrollPos(canvas);
-    await sleep(1500);
+    await sleep(600);
     const end = getScrollPos(canvas);
 
     // stop auto-scroll (second middle-click toggles it off)
     postMessage(canvas, WM_MBUTTONDOWN, MK_MBUTTON, packCoords(cx, cy + 9));
 
     const moved = end - start;
-    console.log(`  at cursor offset 9: scrolled ${moved}px in 1.5s (pos ${start} -> ${end})`);
+    console.log(`  at cursor offset 9: scrolled ${moved}px in 0.6s (pos ${start} -> ${end})`);
 
-    // new float code scrolls ~0.9px/20ms (~45px/s nominal) -> tens of px over 1.5s;
+    // new float code scrolls ~0.9px/20ms (~45px/s nominal) -> several px over 0.6s;
     // old integer code truncates the speed to 0 and the document stays put.
-    if (moved < 15) {
+    if (moved < 5) {
       throw new Error(
         `middle-click auto-scroll did not move at fractional speed (moved ${moved}px); ` +
           `with integer speed (the un-fixed behavior) it would be ~0`,

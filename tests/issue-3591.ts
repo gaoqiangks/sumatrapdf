@@ -16,7 +16,7 @@
 
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { cmdId, tmpPath } from "./util";
+import { cmdId, tmpPath, makeBlankPdf } from "./util";
 import { findCanvas, launchControlled, sendCommandSync, killAndWait } from "./win-automation";
 import {
   getScrollInfo,
@@ -32,32 +32,6 @@ import {
 const WM_HSCROLL = 0x0114;
 const SB_PAGERIGHT = 3;
 
-// minimal, valid N-page PDF (Letter-size blank pages), ASCII only so string
-// length == byte length (keeps the xref offsets correct).
-function makePdf(nPages: number): string {
-  const objs: string[] = [];
-  objs.push(`<< /Type /Catalog /Pages 2 0 R >>`);
-  const kids = Array.from({ length: nPages }, (_, i) => `${3 + i} 0 R`).join(" ");
-  objs.push(`<< /Type /Pages /Count ${nPages} /Kids [${kids}] >>`);
-  for (let i = 0; i < nPages; i++) {
-    objs.push(`<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] >>`);
-  }
-  let body = "%PDF-1.4\n";
-  const offsets: number[] = [];
-  for (let i = 0; i < objs.length; i++) {
-    offsets.push(body.length);
-    body += `${i + 1} 0 obj\n${objs[i]}\nendobj\n`;
-  }
-  const xrefStart = body.length;
-  const size = objs.length + 1;
-  body += `xref\n0 ${size}\n0000000000 65535 f \n`;
-  for (const off of offsets) {
-    body += off.toString().padStart(10, "0") + " 00000 n \n";
-  }
-  body += `trailer\n<< /Size ${size} /Root 1 0 R >>\nstartxref\n${xrefStart}\n%%EOF\n`;
-  return body;
-}
-
 const SETTINGS = [
   `DefaultDisplayMode = book view`,
   `DefaultZoom = 400`,
@@ -70,7 +44,7 @@ const SETTINGS = [
 
 export async function testit(): Promise<void> {
   const pdf = tmpPath("issue-3591.pdf");
-  writeFileSync(pdf, makePdf(6), "latin1");
+  writeFileSync(pdf, makeBlankPdf(6), "latin1");
 
   const appdata = tmpPath("issue-3591-appdata");
   rmSync(appdata, { recursive: true, force: true });
@@ -79,7 +53,7 @@ export async function testit(): Promise<void> {
 
   // kill stale dev-build instances so reuse-instance can't forward our launch
   // to an old window (which would leave our process window-less)
-  const { proc, client, frame } = await launchControlled(["-appdata", appdata, pdf], { defaultWindowPos: true });
+  const { proc, client, frame } = await launchControlled(["-appdata", appdata, pdf]);
   try {
     await client.waitForRenderIdle();
     if (isZoomed(frame)) {

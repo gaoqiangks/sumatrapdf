@@ -8,7 +8,7 @@
 // It exists so the code that builds the tree doesn't name an OS windowing API.
 // Instead of an HWND and SetWindowPos / InvalidateRect / SetTimer / GetFocus,
 // that code asks the host to move itself, repaint, run a timer, or say where it
-// is on the screen. The window is created per platform (VirtHost_win.cpp).
+// is on the screen. The window is created per platform (VirtHost.cpp).
 //
 // Whatever the host doesn't model - the colors of a native child control,
 // dragging the window by its background - goes through onNativeMsg, which only
@@ -19,13 +19,10 @@ struct VirtRoot;
 struct Gfx;
 struct PlatformFont;
 struct VirtHost;
+struct GfxDoubleBuffer;
 
 // the platform's window handle; only the platform-specific files touch it
-#if OS_WIN
 using NativeWnd = HWND;
-#else
-using NativeWnd = void*;
-#endif
 
 struct VirtHostPaintEvent {
     VirtHost* host = nullptr;
@@ -33,7 +30,6 @@ struct VirtHostPaintEvent {
     Rect clientRect;
 };
 
-#if OS_WIN
 struct VirtHostNativeMsg {
     VirtHost* host = nullptr;
     UINT msg = 0;
@@ -43,7 +39,6 @@ struct VirtHostNativeMsg {
     LRESULT res = 0;
     bool didHandle = false;
 };
-#endif
 
 struct VirtHost {
     struct CreateArgs {
@@ -68,6 +63,7 @@ struct VirtHost {
     };
 
     NativeWnd native = nullptr;
+    GfxDoubleBuffer* gfxBuf = nullptr;
     // the tree of controls the host shows; owned
     ILayout* layout = nullptr;
     // the virtual controls of the tree, created on demand by Relayout(); owned
@@ -81,14 +77,12 @@ struct VirtHost {
     Func1<VirtHostPaintEvent*> onPaintBackground;
     // draws on top of the tree
     Func1<VirtHostPaintEvent*> onPaint;
-    // the mouse moved over the host, or left it
-    Func0 onMouseMove;
+    // the mouse moved over the host (client coords, RTL-unmirrored) or left it
+    Func1<Point> onMouseMove;
     Func0 onMouseLeave;
     // a timer started with SetTimer() fired; the argument is the timer's id
     Func1<int> onTimer;
-#if OS_WIN
     Func1<VirtHostNativeMsg*> onNativeMsg;
-#endif
 
     VirtHost() = default;
     VirtHost(const VirtHost&) = delete;
@@ -141,6 +135,8 @@ struct VirtHost {
 
 // where the mouse cursor is, in screen coordinates
 Point UiCursorScreenPos();
+// how long the mouse has to rest on something before its tooltip appears
+int UiTooltipDelayMs();
 // height of a horizontal scrollbar the OS draws
 int UiHScrollbarDy();
 // width of the 3d border the OS draws around a sunken control

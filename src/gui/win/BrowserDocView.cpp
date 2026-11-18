@@ -11,218 +11,49 @@
 #include "gui/win/WinGui.h"
 #include "gui/win/HtmlWindow.h"
 #include "gui/win/WebView.h"
-#include "gui/win/BrowserDocView.h"
 
 #include "AppTools.h"
 #include "Accelerators.h"
+#include "gui/BrowserView.h"
+#include "gui/win/BrowserDocView.h"
+#include "BrowserViewCommon.h"
 
 constexpr const char* kChmVirtualHost = "https://sumatrapdf.chm/";
 constexpr const WCHAR* kChmVirtualHostW = L"https://sumatrapdf.chm/";
 
-// Injected on every WebView2 navigation. Reports the document scroll position
-// back to the host on each scroll so BrowserDocView can answer GetScrollPos()
-// synchronously (WebView2 script eval is async and can't return a value here).
-// notify() rather than call(): scrolling fires constantly and there's nothing to
-// reply with, so this must not allocate a promise per event
-constexpr const char* kReportScrollJs =
-    "(function(){var post=function(){try{var x=Math.round(window.scrollX||window.pageXOffset||0);"
-    "var y=Math.round(window.scrollY||window.pageYOffset||0);"
-    "window.__sumatra__.notify('scroll',x,y);}catch(e){}};"
-    "window.addEventListener('scroll',post,true);})();";
-
-// Injected on every WebView2 navigation. In-page find driven by the host's
-// own find UI: searches the *rendered* DOM text (so what we find is exactly
-// what's shown) and highlights matches with the CSS Custom Highlight API,
-// which doesn't mutate the DOM. Matches can span text-node boundaries: the
-// text nodes are concatenated into one string, the search runs over that, and
-// global offsets are mapped back to (node, offset) pairs for the Ranges.
-//
-// searchAll() additionally sweeps every page of a multi-page document: it
-// fetches each page's HTML from the virtual host and parses it with
-// DOMParser, so all pages go through the *same* text extraction and matching
-// code as the visible page and match counts/indices stay aligned with what
-// start() highlights when that page is shown.
-//
-// Notifications sent back to the host through the JS bridge (gen is an echo of
-// the generation the host passed in, so it can drop results of a superseded
-// search):
-//   findResult(gen, current, total)   current 1-based match on this page
-//   findAllResult(gen, total, recs)   recs: page US idx US snippet, RS-joined
-constexpr const char* kFindInPageJs = R"JS((function(){
-if (window.__sumatraFind) { return; }
-var matches = [];
-var cur = -1;
-var curHl = null;
-var gen = 0;
-var styleDone = false;
-var kMaxMatches = 5000;
-function ensureStyle() {
-  if (styleDone) { return; }
-  styleDone = true;
-  try {
-    var ss = new CSSStyleSheet();
-    ss.replaceSync("::highlight(sumatra-find){background-color:#ffee70;color:#000;} ::highlight(sumatra-find-cur){background-color:#ff9632;color:#000;}");
-    document.adoptedStyleSheets = document.adoptedStyleSheets.concat([ss]);
-  } catch (e) {}
-}
-function post() {
-  try { window.__sumatra__.notify("findResult", gen, cur + 1, matches.length); } catch (e) {}
-}
-function isWordChar(c) {
-  try { return /[\p{L}\p{N}_]/u.test(c); } catch (e) { return /\w/.test(c); }
-}
-// concatenated text of all visible-ish text nodes under body, with per-node
-// start offsets (also used for documents parsed by DOMParser, which have no
-// layout, so no computed-style checks here to keep both paths identical)
-function textFromBody(body) {
-  var nodes = [];
-  var starts = [];
-  var text = "";
-  var walker = body.ownerDocument.createTreeWalker(body, NodeFilter.SHOW_TEXT, {
-    acceptNode: function(n) {
-      var p = n.parentElement;
-      if (!p) { return NodeFilter.FILTER_REJECT; }
-      var tag = p.tagName;
-      if (tag === "SCRIPT" || tag === "STYLE" || tag === "NOSCRIPT" || tag === "TEXTAREA") { return NodeFilter.FILTER_REJECT; }
-      return NodeFilter.FILTER_ACCEPT;
-    }
-  });
-  var n;
-  while ((n = walker.nextNode())) { nodes.push(n); starts.push(text.length); text += n.data; }
-  return { nodes: nodes, starts: starts, text: text };
-}
-// [start, end) offsets of every match of term in text. Literal search: regex
-// metacharacters are escaped; a regex is used only for its case-insensitive
-// mode (which unlike toLowerCase() can't shift offsets)
-function findInText(text, term, matchCase, wholeWord) {
-  var out = [];
-  var esc = term.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  var re;
-  try { re = new RegExp(esc, matchCase ? "g" : "gi"); } catch (e) { return out; }
-  var m;
-  while ((m = re.exec(text)) !== null) {
-    if (m.index === re.lastIndex) { re.lastIndex++; continue; }
-    if (wholeWord) {
-      var b = m.index > 0 ? text[m.index - 1] : " ";
-      var a = re.lastIndex < text.length ? text[re.lastIndex] : " ";
-      if (isWordChar(b) || isWordChar(a)) { continue; }
-    }
-    out.push([m.index, m.index + m[0].length]);
-    if (out.length >= kMaxMatches) { break; }
-  }
-  return out;
-}
-function makeSnippet(text, s, e) {
-  var from = Math.max(0, s - 40);
-  var to = Math.min(text.length, e + 40);
-  var sn = text.slice(from, to).replace(/[\x00-\x1f]+/g, " ").replace(/\s+/g, " ").trim();
-  if (from > 0) { sn = "..." + sn; }
-  if (to < text.length) { sn = sn + "..."; }
-  return sn;
-}
-function clearHighlights() {
-  if (window.CSS && CSS.highlights) {
-    CSS.highlights.delete("sumatra-find");
-    CSS.highlights.delete("sumatra-find-cur");
-  }
-  matches = [];
-  cur = -1;
-  curHl = null;
-}
-function setCur(i, scroll) {
-  if (matches.length === 0) { cur = -1; return; }
-  cur = ((i % matches.length) + matches.length) % matches.length;
-  if (curHl) {
-    curHl.clear();
-    curHl.add(matches[cur]);
-  }
-  if (scroll) {
-    var r = matches[cur].getBoundingClientRect();
-    if (r.top < 0 || r.bottom > window.innerHeight) {
-      window.scrollBy(0, r.top - window.innerHeight / 3);
-    }
-  }
-}
-// initIdx >= 0: make that match current (used when jumping to a match on a
-// freshly loaded page); otherwise the first match at/below the viewport top
-function start(term, matchCase, wholeWord, g, initIdx) {
-  gen = g;
-  clearHighlights();
-  ensureStyle();
-  if (!term || !window.CSS || !CSS.highlights || !window.Highlight) { post(); return; }
-  var t = textFromBody(document.body);
-  var found = findInText(t.text, term, matchCase, wholeWord);
-  // node for a global offset: last node whose start is <= off; for a match
-  // end, < off so an end exactly on a node boundary stays in the prior node
-  function locate(off, isEnd) {
-    var lo = 0, hi = t.nodes.length - 1, res = 0;
-    while (lo <= hi) {
-      var mid = (lo + hi) >> 1;
-      var ok = isEnd ? (t.starts[mid] < off) : (t.starts[mid] <= off);
-      if (ok) { res = mid; lo = mid + 1; } else { hi = mid - 1; }
-    }
-    return [t.nodes[res], off - t.starts[res]];
-  }
-  var all = new Highlight();
-  for (var j = 0; j < found.length; j++) {
-    var r = document.createRange();
-    var st = locate(found[j][0], false);
-    var en = locate(found[j][1], true);
+// Reports the document scroll position back to the host so GetScrollPos() can
+// answer synchronously (WebView2 script eval is async and can't return a value).
+// Posted through chrome.webview, not __sumatra__.notify: AddScriptToExecuteOnDocumentCreated
+// is async and often loses the race with the first Navigate, so the bridge
+// script may be missing on this document. Hash navigation often never fires a
+// 'scroll' event either, which left GetScrollPos() at (-1,-1). So we post
+// immediately, on scroll/hashchange/load/resize, and again shortly after.
+constexpr const char* kReportScrollJs = R"JS((function(){
+  var post = function() {
     try {
-      r.setStart(st[0], st[1]);
-      r.setEnd(en[0], en[1]);
-      matches.push(r);
-      all.add(r);
+      var wv = window.chrome && window.chrome.webview;
+      if (!wv) { return; }
+      var x = Math.round(window.scrollX || window.pageXOffset || 0);
+      var y = Math.round(window.scrollY || window.pageYOffset || 0);
+      wv.postMessage(JSON.stringify({__sumatraNotify:1,method:"scroll",params:JSON.stringify([x,y])}));
     } catch (e) {}
-  }
-  CSS.highlights.set("sumatra-find", all);
-  curHl = new Highlight();
-  CSS.highlights.set("sumatra-find-cur", curHl);
-  if (matches.length > 0) {
-    var first = 0;
-    if (initIdx >= 0) {
-      first = Math.min(initIdx, matches.length - 1);
-    } else {
-      for (var k = 0; k < matches.length; k++) {
-        var rc = matches[k].getBoundingClientRect();
-        if (rc.bottom >= 0) { first = k; break; }
-      }
-    }
-    setCur(first, true);
+  };
+  if (!window.__sumatraScrollHooked) {
+    window.__sumatraScrollHooked = true;
+    window.addEventListener("scroll", post, true);
+    window.addEventListener("hashchange", post);
+    window.addEventListener("load", post);
+    window.addEventListener("resize", post);
   }
   post();
-}
-function gotoMatch(i) {
-  if (matches.length === 0) { post(); return; }
-  setCur(i, true);
-  post();
-}
-// search every page of the document (urls in page order); pages are fetched
-// sequentially so the match records stay in page order
-function searchAll(urls, term, matchCase, wholeWord, g) {
-  var recs = [];
-  var parser = new DOMParser();
-  var chain = Promise.resolve();
-  urls.forEach(function(url, pi) {
-    chain = chain.then(function() {
-      if (recs.length >= kMaxMatches) { return; }
-      return fetch(url).then(function(r) { return r.text(); }).then(function(html) {
-        var doc = parser.parseFromString(html, "text/html");
-        if (!doc.body) { return; }
-        var t = textFromBody(doc.body);
-        var found = findInText(t.text, term, matchCase, wholeWord);
-        for (var i = 0; i < found.length && recs.length < kMaxMatches; i++) {
-          recs.push((pi + 1) + "\x1f" + i + "\x1f" + makeSnippet(t.text, found[i][0], found[i][1]));
-        }
-      }).catch(function() {});
-    });
-  });
-  chain.then(function() {
-    try { window.__sumatra__.notify("findAllResult", g, recs.length, recs.join("\x1e")); } catch (e) {}
-  });
-}
-window.__sumatraFind = { start: start, gotoMatch: gotoMatch, searchAll: searchAll, clear: clearHighlights };
+  setTimeout(post, 0);
+  setTimeout(post, 50);
 })();)JS";
+
+// How kFindInPageJs reports to the host: through the JS bridge.
+constexpr const char* kFindNotifyJs = R"JS(window.__sumatraFindNotify = function() {
+  window.__sumatra__.notify.apply(window.__sumatra__, arguments);
+};)JS";
 
 // WebView2 host for the scroll-position and find-result notifications sent by
 // kReportScrollJs / kFindInPageJs through the JS bridge.
@@ -250,19 +81,13 @@ struct NotifyArgsState {
         return v;
     }
     Str Text(int idx) const {
-        if (idx < 0 || idx >= kMaxArgs || !args[idx]) {
+        if (idx < 0 || idx >= kMaxArgs || len(args[idx]) == 0) {
             return {};
         }
         return args[idx];
     }
 };
 
-static void NotifyArgsOnValue(NotifyArgsState* st, json::Value* v) {
-    int idx = json::PathSegIndex(v->path);
-    if (idx >= 0 && idx < NotifyArgsState::kMaxArgs && v->path && !v->path->next) {
-        st->args[idx] = v->value;
-    }
-}
 } // namespace
 
 void BrowserWebviewWnd::OnJsNotifyCb(void* ctx, Str method, Str paramsJson) {
@@ -271,11 +96,19 @@ void BrowserWebviewWnd::OnJsNotifyCb(void* ctx, Str method, Str paramsJson) {
         return;
     }
     NotifyArgsState st;
-    if (!json::Parse(paramsJson, MkFunc1(NotifyArgsOnValue, &st))) {
+    json::Reader params(paramsJson);
+    for (json::Value& v : params) {
+        // the top-level array's elements, by index
+        int idx = json::PathSegIndex(v.path);
+        if (idx >= 0 && idx < NotifyArgsState::kMaxArgs && v.path && !v.path->next) {
+            st.args[idx] = v.value;
+        }
+    }
+    if (!params.Ok()) {
         logf("BrowserOnJsNotify: bad params for '%s': %s\n", method, paramsJson);
         return;
     }
-    if (str::Eq(method, "scroll")) {
+    if (str::Eq(method, StrL("scroll"))) {
         int x = std::max(0, st.Int(0));
         int y = std::max(0, st.Int(1));
         self->webviewScrollPos = Point(x, y);
@@ -284,33 +117,17 @@ void BrowserWebviewWnd::OnJsNotifyCb(void* ctx, Str method, Str paramsJson) {
     if (!self->cb) {
         return;
     }
-    if (str::Eq(method, "findResult")) {
+    if (str::Eq(method, StrL("findResult"))) {
         self->cb->OnFindResult(st.Int(0), st.Int(1), st.Int(2));
         return;
     }
-    if (str::Eq(method, "findAllResult")) {
+    if (str::Eq(method, StrL("findAllResult"))) {
         // downstream (BrowserFindAllResultReceived) still parses the flat
         // "<gen> <total> <recs>" form, so reassemble it here
         self->cb->OnFindAllResult(fmt("%d %d %s", st.Int(0), st.Int(1), st.Text(2)));
         return;
     }
     logf("BrowserOnJsNotify: unhandled '%s'\n", method);
-}
-
-static TempStr ChmMimeFromPathTemp(Str path, Str data) {
-    Str ext = str::SliceFromCharLast(path, '.');
-    if (str::ContainsChar(ext, ';')) {
-        Str semi = str::SliceFromChar(ext, ';');
-        TempStr trimmed = str::DupTemp(Str(path.s, (int)(semi.s - path.s)));
-        return ChmMimeFromPathTemp(trimmed, data);
-    }
-
-    TempStr imgExt = GfxFileExtFromDataTemp(data);
-    TempStr mime = MimeTypeFromExtTemp(ext, imgExt);
-    if (!mime) {
-        mime = "text/html";
-    }
-    return mime;
 }
 
 bool BrowserDocView::ResourceGet(void* ctx, Str path, WebViewResourceResult* res) {
@@ -334,7 +151,13 @@ bool BrowserDocView::NavigationStarting(void* ctx, Str url, bool newWindow) {
     if (!view || !view->cb) {
         return false;
     }
-    return view->cb->OnBeforeNavigate(url, newWindow);
+    bool allow = view->cb->OnBeforeNavigate(url, newWindow);
+    // drop the previous page's position so GetScrollPos() does not keep a stale
+    // y while the new document (or hash) is still applying
+    if (allow && !newWindow) {
+        view->webviewScrollPos = Point(-1, -1);
+    }
+    return allow;
 }
 
 void BrowserDocView::NavigationCompleted(void* ctx, Str url, bool success) {
@@ -348,6 +171,11 @@ void BrowserDocView::NavigationCompleted(void* ctx, Str url, bool success) {
         view->wv->RegisterForwardingDropTarget();
     }
     view->cb->OnDocumentComplete(url);
+    // after zoom / restore have applied: init scripts may have missed this
+    // document, and hash navigation often never fires a 'scroll' event
+    if (view->wv) {
+        view->wv->Eval(Str(kReportScrollJs));
+    }
 }
 
 void BrowserDocView::HistoryChanged(void* ctx, bool canGoBack, bool canGoForward) {
@@ -400,6 +228,12 @@ bool BrowserDocView::IsVisible() const {
     return visible;
 }
 
+void BrowserDocView::RefreshControllerSurface() {
+    if (visible && backend == Backend::WebView2 && wv) {
+        wv->RefreshControllerSurface();
+    }
+}
+
 // show/hide without destroying WebView2 / IE. Creating a browser is slow, so
 // tab switches hide the view and show it again instead of recreate.
 void BrowserDocView::SetVisible(bool show) {
@@ -425,8 +259,9 @@ void BrowserDocView::SetVisible(bool show) {
             }
             wv->SetControllerVisible(true);
             wv->UpdateWebviewSize();
-        } else if (backend == Backend::IE && ie && ie->oleObjectHwnd) {
-            HwndSetVisible(ie->oleObjectHwnd, true);
+            wv->RefreshControllerSurface();
+        } else if (backend == Backend::IE && ie) {
+            ie->SetVisible(true);
         }
         return;
     }
@@ -435,8 +270,8 @@ void BrowserDocView::SetVisible(bool show) {
         if (wv->hwnd) {
             ::ShowWindow(wv->hwnd, SW_HIDE);
         }
-    } else if (backend == Backend::IE && ie && ie->oleObjectHwnd) {
-        HwndSetVisible(ie->oleObjectHwnd, false);
+    } else if (backend == Backend::IE && ie) {
+        ie->SetVisible(false);
     }
     UnsubclassParent();
 }
@@ -459,8 +294,16 @@ LRESULT BrowserDocView::ParentWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp,
 
         case WM_MOUSEWHEEL:
         case WM_MOUSEHWHEEL:
+            // WebView2 often delivers the wheel to this parent; swallowing it
+            // left markdown/CHM unscrollable when the browser wasn't focused (#6142).
             if (view->wv && view->wv->hwnd) {
-                return 0;
+                if (view->forwardingWheel) {
+                    return 0;
+                }
+                view->forwardingWheel = true;
+                LRESULT res = view->SendMsg(msg, wp, lp);
+                view->forwardingWheel = false;
+                return res;
             }
             break;
 
@@ -498,6 +341,7 @@ bool BrowserDocView::CreateWebView2() {
     wv->events.resolveAccelCmd = ChmResolveAccelCmd;
     wv->events.jsNotify = BrowserWebviewWnd::OnJsNotifyCb;
     wv->allowClipboardRead = false;
+    wv->defaultBackgroundColor = kColWhite;
     // forward app accelerators (Ctrl+W close tab, Ctrl+K command palette, etc.)
     // to the main window so they work while the WebView2 has keyboard focus
     wv->forwardAppAccelerators = true;
@@ -520,11 +364,19 @@ bool BrowserDocView::CreateWebView2() {
         return false;
     }
 
-    wv->Init(kReportScrollJs);
-    wv->Init(kFindInPageJs);
+    wv->Init(Str(kReportScrollJs));
+    wv->Init(Str(kFindInPageJs));
+    wv->Init(Str(kFindNotifyJs));
 
     backend = Backend::WebView2;
     return true;
+}
+
+static HtmlBackend gHtmlBackend = HtmlBackend::Auto;
+
+// -html-backend forces IE or WebView2 so tests can exercise both paths.
+void SetHtmlBackend(HtmlBackend backend) {
+    gHtmlBackend = backend;
 }
 
 BrowserDocView* BrowserDocView::Create(HWND hwndParent, HtmlWindowCallback* cb, Str virtualHostPrefix) {
@@ -539,12 +391,13 @@ BrowserDocView* BrowserDocView::Create(HWND hwndParent, HtmlWindowCallback* cb, 
         view->virtualHost = str::Dup(virtualHostPrefix);
         view->virtualHostW = wstr::Dup(ToWStrTemp(virtualHostPrefix));
     } else {
-        view->virtualHost = str::Dup(kChmVirtualHost);
+        view->virtualHost = str::Dup(Str(kChmVirtualHost));
         view->virtualHostW = wstr::Dup(kChmVirtualHostW);
     }
 
 #ifdef _MSC_VER
-    if (HasWebView() && view->CreateWebView2()) {
+    bool wantWebView = gHtmlBackend != HtmlBackend::IE && HasWebView();
+    if (wantWebView && view->CreateWebView2()) {
         // leave hidden; caller shows with SetVisible(true) when the tab is active
         return view;
     }
@@ -554,9 +407,7 @@ BrowserDocView* BrowserDocView::Create(HWND hwndParent, HtmlWindowCallback* cb, 
     if (view->ie) {
         view->backend = Backend::IE;
         // hide IE until the tab is shown
-        if (view->ie->oleObjectHwnd) {
-            HwndSetVisible(view->ie->oleObjectHwnd, false);
-        }
+        view->ie->SetVisible(false);
         return view;
     }
 
@@ -573,7 +424,7 @@ BrowserDocView::~BrowserDocView() {
 }
 
 void BrowserDocView::NavigateToDataUrl(Str url) {
-    if (!url) {
+    if (len(url) == 0) {
         return;
     }
     if (backend == Backend::WebView2 && wv) {
@@ -661,8 +512,9 @@ void BrowserDocView::SetScrollPos(Point pos) {
 
 void BrowserDocView::PrintCurrentPage(bool showUI) {
     if (backend == Backend::WebView2 && wv) {
-        // WebView2 has no silent-print API; window.print() always shows the dialog
-        wv->Eval("window.print()");
+        if (!wv->ShowPrintUI()) {
+            wv->Eval(StrL("window.print()"));
+        }
         return;
     }
     if (backend == Backend::IE && ie) {
@@ -683,35 +535,6 @@ void BrowserDocView::FindInCurrentPage() {
 
 bool BrowserDocView::CanFindInPage() const {
     return backend == Backend::WebView2 && wv != nullptr;
-}
-
-// escape s for use inside a single-quoted JS string literal
-static TempStr JsEscapeTemp(Str s) {
-    str::Builder buf;
-    for (int i = 0; i < s.len; i++) {
-        char c = s.s[i];
-        switch (c) {
-            case '\\':
-                buf.Append("\\\\");
-                break;
-            case '\'':
-                buf.Append("\\'");
-                break;
-            case '\n':
-                buf.Append("\\n");
-                break;
-            case '\r':
-                buf.Append("\\r");
-                break;
-            case '\t':
-                buf.Append("\\t");
-                break;
-            default:
-                buf.AppendChar(c);
-                break;
-        }
-    }
-    return ToStrTemp(buf);
 }
 
 // highlight matches of term on the current page; gotoIdx >= 0 makes that
@@ -741,7 +564,7 @@ void BrowserDocView::FindAllPages(const StrVec& pageUrls, Str term, bool matchCa
         return;
     }
     str::Builder js;
-    js.Append("window.__sumatraFind && __sumatraFind.searchAll([");
+    js.Append(StrL("window.__sumatraFind && __sumatraFind.searchAll(["));
     int n = len(pageUrls);
     for (int i = 0; i < n; i++) {
         if (i > 0) {
@@ -780,12 +603,18 @@ void BrowserDocView::FindClear() {
     if (!CanFindInPage()) {
         return;
     }
-    wv->Eval("window.__sumatraFind && __sumatraFind.clear();");
+    wv->Eval(StrL("window.__sumatraFind && __sumatraFind.clear();"));
+}
+
+void BrowserDocView::Eval(Str js) {
+    if (backend == Backend::WebView2 && wv) {
+        wv->Eval(js);
+    }
 }
 
 void BrowserDocView::SelectAll() {
     if (backend == Backend::WebView2 && wv) {
-        wv->Eval("document.execCommand('selectAll', false, null)");
+        wv->Eval(StrL("document.execCommand('selectAll', false, null)"));
         return;
     }
     if (backend == Backend::IE && ie) {
@@ -793,9 +622,14 @@ void BrowserDocView::SelectAll() {
     }
 }
 
+// WebView2 only; see WebviewWnd::CapturePreviewPng
+bool BrowserDocView::CapturePng(const Func1<Str>& done) {
+    return backend == Backend::WebView2 && wv && wv->CapturePreviewPng(done);
+}
+
 void BrowserDocView::CopySelection() {
     if (backend == Backend::WebView2 && wv) {
-        wv->Eval("document.execCommand('copy', false, null)");
+        wv->Eval(StrL("document.execCommand('copy', false, null)"));
         return;
     }
     if (backend == Backend::IE && ie) {
@@ -803,8 +637,54 @@ void BrowserDocView::CopySelection() {
     }
 }
 
+// script that scrolls the page like a browser does for a navigation key; empty
+// for other keys. Steps match Chromium's: 40px per arrow, 87.5% of the view
+// per page.
+static Str ScrollJsForKey(WPARAM key) {
+    switch (key) {
+        case VK_UP:
+            return StrL("window.scrollBy(0, -40)");
+        case VK_DOWN:
+            return StrL("window.scrollBy(0, 40)");
+        case VK_LEFT:
+            return StrL("window.scrollBy(-40, 0)");
+        case VK_RIGHT:
+            return StrL("window.scrollBy(40, 0)");
+        case VK_PRIOR:
+            return StrL("window.scrollBy(0, -window.innerHeight * 0.875)");
+        case VK_NEXT:
+            return StrL("window.scrollBy(0, window.innerHeight * 0.875)");
+        case VK_HOME:
+            return StrL("window.scrollTo(window.scrollX, 0)");
+        case VK_END:
+            return StrL("window.scrollTo(window.scrollX, document.documentElement.scrollHeight)");
+    }
+    return {};
+}
+
 LRESULT BrowserDocView::SendMsg(UINT msg, WPARAM wp, LPARAM lp) {
     if (backend == Backend::WebView2 && wv && wv->hwnd) {
+        if (msg == WM_KEYDOWN) {
+            // Chromium ignores keys sent to the host hwnd too; they come from
+            // the focused frame, e.g. after a tab switch (#6419)
+            Str js = ScrollJsForKey(wp);
+            if (len(js) > 0) {
+                wv->Eval(js);
+                return 0;
+            }
+        }
+        if (msg == WM_MOUSEWHEEL || msg == WM_MOUSEHWHEEL) {
+            // Chromium ignores WM_MOUSEWHEEL on the host hwnd. When the frame
+            // (focused) or canvas parent gets the wheel, scroll via JS (#6142).
+            if ((LOWORD(wp) & MK_CONTROL) || IsCtrlPressed()) {
+                return SendMessageW(wv->hwnd, msg, wp, lp);
+            }
+            short delta = GET_WHEEL_DELTA_WPARAM(wp);
+            bool horiz = (msg == WM_MOUSEHWHEEL) || (LOWORD(wp) & MK_SHIFT) || IsShiftPressed();
+            int d = -(int)delta;
+            wv->Eval(horiz ? fmt("window.scrollBy(%d, 0)", d) : fmt("window.scrollBy(0, %d)", d));
+            return 0;
+        }
         return SendMessageW(wv->hwnd, msg, wp, lp);
     }
     if (backend == Backend::IE && ie) {
@@ -812,3 +692,187 @@ LRESULT BrowserDocView::SendMsg(UINT msg, WPARAM wp, LPARAM lp) {
     }
     return 0;
 }
+
+struct BrowserViewCallbackAdapter : HtmlWindowCallback {
+    BrowserViewCallback* cb = nullptr;
+
+    bool OnBeforeNavigate(Str url, bool newWindow) override { return cb->OnBeforeNavigate(url, newWindow); }
+    void OnDocumentComplete(Str url) override { cb->OnDocumentComplete(url); }
+    Str GetDataForUrl(Str url) override { return cb->GetDataForUrl(url); }
+    void OnLButtonDown() override { cb->OnLButtonDown(); }
+    void DownloadData(Str url, Str data) override { cb->DownloadData(url, data); }
+    void OnFindResult(int gen, int current, int total) override { cb->OnFindResult(gen, current, total); }
+    void OnFindAllResult(Str payload) override { cb->OnFindAllResult(payload); }
+};
+
+struct BrowserView {
+    MainWindow* win = nullptr;
+    BrowserDocView* view = nullptr;
+    BrowserViewCallbackAdapter adapter;
+};
+
+bool BrowserViewAvailable() {
+    return true;
+}
+
+BrowserView* BrowserViewCreate(MainWindow* win, HWND hwndParent, BrowserViewCallback* cb, Str virtualHost) {
+    if (!hwndParent || !cb) {
+        return nullptr;
+    }
+
+    auto* res = new BrowserView();
+    res->win = win;
+    res->adapter.cb = cb;
+    res->view = BrowserDocView::Create(hwndParent, &res->adapter, virtualHost);
+    if (!res->view) {
+        delete res;
+        return nullptr;
+    }
+    return res;
+}
+
+void BrowserViewDelete(BrowserView* bv) {
+    if (!bv) {
+        return;
+    }
+    delete bv->view;
+    delete bv;
+}
+
+MainWindow* BrowserViewWindow(BrowserView* bv) {
+    return bv ? bv->win : nullptr;
+}
+
+void BrowserViewSetVisible(BrowserView* bv, bool visible) {
+    if (bv) {
+        bv->view->SetVisible(visible);
+    }
+}
+
+void BrowserViewRefreshSurface(BrowserView* bv) {
+    if (bv) {
+        bv->view->RefreshControllerSurface();
+    }
+}
+
+void BrowserViewNavigate(BrowserView* bv, Str url) {
+    if (bv) {
+        bv->view->NavigateToDataUrl(url);
+    }
+}
+
+void BrowserViewGoBack(BrowserView* bv) {
+    if (bv) {
+        bv->view->GoBack();
+    }
+}
+
+void BrowserViewGoForward(BrowserView* bv) {
+    if (bv) {
+        bv->view->GoForward();
+    }
+}
+
+bool BrowserViewCanGoBack(BrowserView* bv) {
+    return bv && bv->view->canGoBack;
+}
+
+bool BrowserViewCanGoForward(BrowserView* bv) {
+    return bv && bv->view->canGoForward;
+}
+
+void BrowserViewSetZoomPercent(BrowserView* bv, int zoom) {
+    if (bv) {
+        bv->view->SetZoomPercent(zoom);
+    }
+}
+
+int BrowserViewGetZoomPercent(BrowserView* bv) {
+    return bv ? bv->view->GetZoomPercent() : 100;
+}
+
+Point BrowserViewGetScrollPos(BrowserView* bv) {
+    return bv ? bv->view->GetScrollPos() : Point(-1, -1);
+}
+
+void BrowserViewSetScrollPos(BrowserView* bv, Point pos) {
+    if (bv) {
+        bv->view->SetScrollPos(pos);
+    }
+}
+
+void BrowserViewEval(BrowserView* bv, Str js) {
+    if (bv) {
+        bv->view->Eval(js);
+    }
+}
+
+void BrowserViewSelectAll(BrowserView* bv) {
+    if (bv) {
+        bv->view->SelectAll();
+    }
+}
+
+void BrowserViewCopySelection(BrowserView* bv) {
+    if (bv) {
+        bv->view->CopySelection();
+    }
+}
+
+// async png of the visible page; false if not supported (done is then not called)
+bool BrowserViewCapturePng(BrowserView* bv, const Func1<Str>& done) {
+    return bv && bv->view->CapturePng(done);
+}
+
+void BrowserViewPrint(BrowserView* bv, bool showUI) {
+    if (bv) {
+        bv->view->PrintCurrentPage(showUI);
+    }
+}
+
+void BrowserViewFindInPageUI(BrowserView* bv) {
+    if (bv) {
+        bv->view->FindInCurrentPage();
+    }
+}
+
+bool BrowserViewCanFindInPage(BrowserView* bv) {
+    return bv && bv->view->CanFindInPage();
+}
+
+void BrowserViewFindStart(BrowserView* bv, Str term, bool matchCase, bool wholeWord, int gen, int gotoIdx) {
+    if (bv) {
+        bv->view->FindStart(term, matchCase, wholeWord, gen, gotoIdx);
+    }
+}
+
+void BrowserViewFindAllPages(BrowserView* bv, const StrVec& urls, Str term, bool matchCase, bool wholeWord, int gen) {
+    if (bv) {
+        bv->view->FindAllPages(urls, term, matchCase, wholeWord, gen);
+    }
+}
+
+void BrowserViewFindGoto(BrowserView* bv, int idx) {
+    if (bv) {
+        bv->view->FindGoto(idx);
+    }
+}
+
+void BrowserViewFindClear(BrowserView* bv) {
+    if (bv) {
+        bv->view->FindClear();
+    }
+}
+
+LRESULT BrowserViewPassUIMsg(BrowserView* bv, UINT msg, WPARAM wp, LPARAM lp) {
+    return bv ? bv->view->SendMsg(msg, wp, lp) : 0;
+}
+
+gpui::El* BrowserViewBuild(BrowserView*, gpui::Ctx*, int) {
+    return nullptr;
+}
+
+void BrowserViewCreatePending(MainWindow*, gpui::Ctx*) {}
+void BrowserViewSetOwnHost(BrowserView*) {}
+void BrowserViewCreatePendingIn(BrowserView*, gpui::Ctx*) {}
+void BrowserViewSetBackground(BrowserView*, Color) {}

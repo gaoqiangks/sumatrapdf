@@ -1211,11 +1211,18 @@ fz_pixmap *
 fz_convert_pixmap(fz_context *ctx, const fz_pixmap *pix, fz_colorspace *ds, fz_colorspace *prf, fz_default_colorspaces *default_cs, fz_color_params color_params, int keep_alpha)
 {
 	fz_pixmap *cvt;
+	int src_alpha = pix->alpha;
 
 	if (!ds && !keep_alpha)
 		fz_throw(ctx, FZ_ERROR_ARGUMENT, "cannot both throw away and keep alpha");
 
-	cvt = fz_new_pixmap(ctx, ds, pix->w, pix->h, pix->seps, keep_alpha && pix->alpha);
+	if (pix->colorspace == NULL)
+	{
+		/* Alpha only pixmaps are treated as devicegray, with no alpha. */
+		src_alpha = 0;
+	}
+
+	cvt = fz_new_pixmap(ctx, ds, pix->w, pix->h, pix->seps, keep_alpha && src_alpha);
 
 	cvt->xres = pix->xres;
 	cvt->yres = pix->yres;
@@ -1818,6 +1825,91 @@ fz_subsample_pixmap(fz_context *ctx, fz_pixmap *tile, int factor)
 	tile->samples = fz_realloc(ctx, tile->samples, (size_t)tile->h * tile->w * tile->n);
 }
 
+#ifndef ARCH_ARM
+#if defined(_M_X64) || defined(__x86_64__) || defined(__SSE2__)
+#include <emmintrin.h>
+#define SUBSAMPLE_GRAY_SSE2 1
+#endif
+
+/* SumatraPDF: a one component image (a bitonal scan unpacked to gray) spends
+ * most of a downsampled decode in fz_subsample_pixblock. Plain indexed row
+ * sums instead of the pointer walk below: the same results, with the common
+ * 2x2 case done 8 output pixels at a time in SSE2. */
+static void
+subsample_pixblock_gray(unsigned char *s, int w, int h, int factor, ptrdiff_t stride)
+{
+	int f = 1 << factor;
+	int bw = w >> factor;		/* full block columns */
+	int sx = w - (bw << factor);	/* stray columns at the right */
+	unsigned char *d = s;
+	int y;
+
+	for (y = 0; y < h; y += f)
+	{
+		int rows = h - y < f ? h - y : f;
+		const unsigned char *row = s + (ptrdiff_t)y * stride;
+		int x, yy, xx;
+
+		if (rows == f && f == 2)
+		{
+			const unsigned char *r0 = row;
+			const unsigned char *r1 = row + stride;
+			x = 0;
+#ifdef SUBSAMPLE_GRAY_SSE2
+			{
+				/* 32 source bytes per row -> 16 outputs: the even and odd bytes of
+				 * each row as 16-bit lanes, summed, shifted and packed */
+				const __m128i lomask = _mm_set1_epi16(0x00ff);
+				for (; x + 16 <= bw; x += 16)
+				{
+					__m128i a0 = _mm_loadu_si128((const __m128i *)(r0 + 2*x));
+					__m128i a1 = _mm_loadu_si128((const __m128i *)(r0 + 2*x + 16));
+					__m128i b0 = _mm_loadu_si128((const __m128i *)(r1 + 2*x));
+					__m128i b1 = _mm_loadu_si128((const __m128i *)(r1 + 2*x + 16));
+					__m128i s0 = _mm_add_epi16(_mm_add_epi16(_mm_and_si128(a0, lomask), _mm_srli_epi16(a0, 8)),
+								_mm_add_epi16(_mm_and_si128(b0, lomask), _mm_srli_epi16(b0, 8)));
+					__m128i s1 = _mm_add_epi16(_mm_add_epi16(_mm_and_si128(a1, lomask), _mm_srli_epi16(a1, 8)),
+								_mm_add_epi16(_mm_and_si128(b1, lomask), _mm_srli_epi16(b1, 8)));
+					__m128i v = _mm_packus_epi16(_mm_srli_epi16(s0, 2), _mm_srli_epi16(s1, 2));
+					_mm_storeu_si128((__m128i *)(d + x), v);
+				}
+			}
+#endif
+			for (; x < bw; x++)
+				d[x] = (unsigned char)((r0[2*x] + r0[2*x+1] + r1[2*x] + r1[2*x+1]) >> 2);
+		}
+		else
+		{
+			int shift = factor * 2;
+			int div = rows * f;
+			for (x = 0; x < bw; x++)
+			{
+				unsigned int v = 0;
+				for (yy = 0; yy < rows; yy++)
+				{
+					const unsigned char *r = row + (ptrdiff_t)yy * stride + ((ptrdiff_t)x << factor);
+					for (xx = 0; xx < f; xx++)
+						v += r[xx];
+				}
+				d[x] = (unsigned char)(rows == f ? v >> shift : v / div);
+			}
+		}
+		if (sx)
+		{
+			unsigned int v = 0;
+			for (yy = 0; yy < rows; yy++)
+			{
+				const unsigned char *r = row + (ptrdiff_t)yy * stride + ((ptrdiff_t)bw << factor);
+				for (xx = 0; xx < sx; xx++)
+					v += r[xx];
+			}
+			d[bw] = (unsigned char)(v / (sx * rows));
+		}
+		d += bw + (sx ? 1 : 0);
+	}
+}
+#endif
+
 void
 fz_subsample_pixblock(unsigned char *s, int w, int h, int n, int factor, ptrdiff_t stride)
 {
@@ -1825,6 +1917,12 @@ fz_subsample_pixblock(unsigned char *s, int w, int h, int n, int factor, ptrdiff
 	unsigned char *d;
 #ifndef ARCH_ARM
 	int x, y, xx, yy, nn;
+
+	if (n == 1)
+	{
+		subsample_pixblock_gray(s, w, h, factor, stride);
+		return;
+	}
 #endif
 
 	d = s;

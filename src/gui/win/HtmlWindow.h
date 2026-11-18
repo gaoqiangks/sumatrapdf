@@ -79,7 +79,7 @@ class HtmlWindow {
     void SetVisible(bool visible);
     void NavigateToUrl(Str url);
     void NavigateToDataUrl(Str url);
-    void SetHtml(Str, Str url = nullptr);
+    void SetHtml(Str, Str url = {});
     void GoBack();
     void GoForward();
     void PrintCurrentPage(bool showUI);
@@ -100,6 +100,7 @@ class HtmlWindow {
     HtmlWindowCallback* htmlWinCb = nullptr;
 
     UINT_PTR subclassId = 0;
+    bool forwardingWheel = false;
 
     bool OnBeforeNavigate(Str url, bool newWindow);
     void OnDocumentComplete(Str url);

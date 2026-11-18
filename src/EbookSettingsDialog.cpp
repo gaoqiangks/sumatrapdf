@@ -14,11 +14,11 @@
 
 #include "Settings.h"
 #include "AppSettings.h"
-#include "GlobalPrefs.h"
 #include "DocController.h"
 #include "EngineBase.h"
 #include "base/GuessFileType.h"
 #include "EngineAll.h"
+#include "AIChatTypes.h"
 #include "WindowTab.h"
 #include "MainWindow.h"
 #include "FileHistory.h"
@@ -26,24 +26,32 @@
 #include "SumatraConfig.h"
 #include "SumatraPDF.h"
 #include "Translations.h"
-#include "DarkMode_win.h"
-#include "EbookSettingsDialog.h"
+#include "DarkMode.h"
+#include "SumatraDialogs.h"
+#include "shared/PdfToolsCommon.h"
+#include "EbookSettingsDialogCommon.h"
 
 // Font, size and line spacing for reflowable documents (EPUB, MOBI, FB2, ...),
 // either globally or for the current document only (issue #4600). The CSS the
 // engine generates from those values is shown read-only; "Custom CSS" hands
 // the user the pen instead, and then what they type *is* the user CSS.
-
-// what the controls hold, ready to be written to a settings struct
-struct EbookVals {
-    Str fontName; // not owned, points into the controls' temp strings
-    float fontSize = 0;
-    Vec<float> margin; // 1, 2 or 4 values; empty means unset
-    float lineSpacing = 0;
-    bool ignoreDocumentCSS = false;
-    Str customCSS; // not owned; empty unless useCustomCSS
-    bool useCustomCSS = false;
-};
+//
+//   Font:   [(default)                      v]
+//   Size:   12__   Margin: 1em__   Line spacing: 1.5__
+//   ---------------------------------------------- hairline
+//   [ ] Ignore the document's own styling
+//   [ ] Custom CSS
+//   body { ... }                          the CSS, monospaced
+//   ---------------------------------------------- hairline
+//   (o) This file   ( ) For all ebooks
+//   Reset to defaults                [Cancel] [OK]
+constexpr int kEbookDlgDx = 480;
+constexpr int kEbookNumChars = 5;
+constexpr int kEbookCssLines = 6;
+constexpr int kEbookCssFontPx = 13;
+// the generated rules are one long line; without a cap the dialog would grow
+// as wide as the text
+constexpr int kEbookCssMaxDx = 440;
 
 struct EbookSettingsWnd : WindowBase {
     ~EbookSettingsWnd() override;
@@ -85,18 +93,12 @@ struct EbookSettingsWnd : WindowBase {
     void OnCustomCssToggled();
     void OnTargetChanged();
     void Apply();
-    void UpdateTheme();
     void OnCancel(VirtMouseEvent* ev = nullptr);
     void OnReset(VirtMouseEvent* ev = nullptr);
     void OnOk(VirtMouseEvent* ev = nullptr);
 };
 
 static EbookSettingsWnd* gEbookSettingsWnd = nullptr;
-
-// the dropdown's first entry: no font of our own, whatever the engine picks
-static Str FontDefaultLabel() {
-    return _TRA("(default)");
-}
 
 EbookSettingsWnd::~EbookSettingsWnd() {
     str::Free(filePath);
@@ -107,79 +109,13 @@ static void ClearEbookSettingsWnd() {
     gEbookSettingsWnd = nullptr;
 }
 
-// a multi-line edit shows only CRLF as a line break, while our CSS (and what
-// we store in the settings) uses LF
-static TempStr ToEditTextTemp(Str s) {
-    return str::ReplaceTemp(s, StrL("\n"), StrL("\r\n"));
-}
-
 static TempStr FromEditTextTemp(Str s) {
     return str::ReplaceTemp(s, StrL("\r\n"), StrL("\n"));
 }
 
-// the margin is typed as CSS writes it: one number for all four sides, two
-// for top/bottom and left/right, or four in top-right-bottom-left order.
-// anything else (or out of range) is left empty, i.e. unset
-static void ParseMargin(Str s, Vec<float>& out) {
-    out.Reset();
-    if (!s) {
-        return;
-    }
-    StrVec parts;
-    Split(&parts, s, StrL(" "), true);
-    bool ok = true;
-    for (Str part : parts) {
-        if (!part) {
-            continue; // Split can hand back an empty piece
-        }
-        // strtof, not atof: a token that isn't a plain number (or is null,
-        // which atof faults on) has to invalidate the whole value, not read
-        // as 0 - that would silently mean "no margin at all"
-        const char* cs = CStrTemp(part);
-        char* end = nullptr;
-        float v = strtof(cs, &end);
-        if (end == cs || (end && *end != 0)) {
-            ok = false;
-            break;
-        }
-        out.Append(v);
-    }
-    int n = len(out);
-    ok = ok && (n == 1 || n == 2 || n == 4);
-    for (int i = 0; ok && i < n; i++) {
-        ok = out[i] >= 0 && out[i] <= 200;
-    }
-    if (!ok) {
-        out.Reset();
-    }
-}
-
-static TempStr MarginTextTemp(const Vec<float>* margin) {
-    int n = margin ? len(*margin) : 0;
-    TempStr res;
-    for (int i = 0; i < n; i++) {
-        TempStr one = fmt("%g", (*margin)[i]);
-        res = res ? str::JoinTemp(res, StrL(" "), one) : one;
-    }
-    return res;
-}
-
-static bool MarginEq(const Vec<float>& a, const Vec<float>* b) {
-    int n = len(a);
-    if (n != (b ? len(*b) : 0)) {
-        return false;
-    }
-    for (int i = 0; i < n; i++) {
-        if (a[i] != (*b)[i]) {
-            return false;
-        }
-    }
-    return true;
-}
-
 static float ParseFloatTemp(Edit* e) {
     TempStr s = e->GetTextTemp();
-    if (!s) {
+    if (len(s) == 0) {
         return 0;
     }
     return (float)atof(CStrTemp(s));
@@ -221,7 +157,7 @@ void EbookSettingsWnd::FillFontList() {
 // the settings this dialog is editing: the document's own values (falling back
 // to the global ones for what it doesn't set), or the global ones
 void EbookSettingsWnd::LoadFromTarget() {
-    auto* g = &gGlobalPrefs->eBookUI;
+    auto* g = &gSettings->eBookUI;
     bool thisFile = radioThisFile && radioThisFile->IsChecked();
     FileState* fs = thisFile ? FileHistoryFindByPath(filePath) : nullptr;
     FileEBookUI* f = fs ? fs->eBookUI : nullptr;
@@ -266,13 +202,13 @@ void EbookSettingsWnd::SetValues(Str fontName, float fontSize, const Vec<float>*
     cbIgnoreCss->SetIsChecked(ignoreCss);
 
     str::ReplaceWithCopy(&customCssText, customCss);
-    bool hasCustom = !!customCss;
+    bool hasCustom = len(customCss) != 0;
     cbCustomCss->SetIsChecked(hasCustom);
     updating = false;
 
     SetCssEditable(hasCustom);
     if (hasCustom) {
-        editCss->SetText(ToEditTextTemp(customCss));
+        editCss->SetText(str::LFToCRLFTemp(customCss));
     }
     UpdateCssPreview();
 }
@@ -280,7 +216,7 @@ void EbookSettingsWnd::SetValues(Str fontName, float fontSize, const Vec<float>*
 void EbookSettingsWnd::ReadControls(EbookVals& out) {
     TempStr font = ddFont->GetTextTemp();
     if (str::Eq(font, FontDefaultLabel())) {
-        font = nullptr;
+        font = {};
     }
     out.fontName = EbookFontNameFromSetting(font);
     out.fontSize = ParseFloatTemp(editSize);
@@ -293,7 +229,7 @@ void EbookSettingsWnd::ReadControls(EbookVals& out) {
         // the CSS in the box replaces what we would have generated, so the
         // values those rules came from are no longer ours to apply
         out.fontName = {};
-        out.margin.Reset();
+        VecReset(out.margin);
         out.lineSpacing = 0;
     }
 }
@@ -315,15 +251,15 @@ void EbookSettingsWnd::UpdateCssPreview() {
     }
     TempStr font = ddFont->GetTextTemp();
     if (str::Eq(font, FontDefaultLabel())) {
-        font = nullptr;
+        font = {};
     }
     Vec<float> margin;
     ParseMargin(editMargin->GetTextTemp(), margin);
     // the same DPI the engine used: it takes it from DpiGet() when the document
     // is opened (EngineCreate.cpp)
     TempStr css = EbookGeneratedCssTemp(font, &margin, ParseFloatTemp(editSpacing), DpiGet());
-    Str text = css ? css : _TRA("(the document's own styling is used as-is)");
-    editCss->SetText(ToEditTextTemp(text));
+    Str text = css ? css : Tr("The document's own styling is used.");
+    editCss->SetText(str::LFToCRLFTemp(text));
 }
 
 void EbookSettingsWnd::OnControlChanged() {
@@ -340,10 +276,10 @@ void EbookSettingsWnd::OnCustomCssToggled() {
     bool custom = cbCustomCss->IsChecked();
     if (custom) {
         // start from what was being applied, so nothing is lost by taking over
-        if (!customCssText) {
+        if (len(customCssText) == 0) {
             str::ReplaceWithCopy(&customCssText, FromEditTextTemp(editCss->GetTextTemp()));
         }
-        editCss->SetText(ToEditTextTemp(customCssText));
+        editCss->SetText(str::LFToCRLFTemp(customCssText));
     } else {
         str::ReplaceWithCopy(&customCssText, FromEditTextTemp(editCss->GetTextTemp()));
     }
@@ -364,7 +300,7 @@ void EbookSettingsWnd::OnTargetChanged() {
 void EbookSettingsWnd::Apply() {
     EbookVals v;
     ReadControls(v);
-    auto* g = &gGlobalPrefs->eBookUI;
+    auto* g = &gSettings->eBookUI;
     bool thisFile = radioThisFile && radioThisFile->IsChecked();
 
     if (!thisFile) {
@@ -381,7 +317,7 @@ void EbookSettingsWnd::Apply() {
             DeleteFileEBookUI(fs->eBookUI);
             fs->eBookUI = nullptr;
         }
-        SaveSettings();
+        ScheduleSaveSettings();
         return;
     }
 
@@ -398,7 +334,7 @@ void EbookSettingsWnd::Apply() {
         // so it stops being written out
         DeleteFileEBookUI(fs->eBookUI);
         fs->eBookUI = nullptr;
-        SaveSettings();
+        ScheduleSaveSettings();
         return;
     }
     if (!fs->eBookUI) {
@@ -408,7 +344,7 @@ void EbookSettingsWnd::Apply() {
     str::ReplaceWithCopy(&f->fontName, str::Eq(v.fontName, g->fontName) ? Str{} : v.fontName);
     f->fontSize = (v.fontSize == g->fontSize) ? 0 : v.fontSize;
     if (MarginEq(v.margin, g->margin)) {
-        f->margin->Reset();
+        VecReset(*f->margin);
     } else {
         *f->margin = v.margin;
     }
@@ -419,22 +355,7 @@ void EbookSettingsWnd::Apply() {
     }
     str::ReplaceWithCopy(&f->ignoreDocumentCSS, ignore);
     str::ReplaceWithCopy(&f->customCSS, str::Eq(v.customCSS, g->customCSS) ? Str{} : v.customCSS);
-    SaveSettings();
-}
-
-void EbookSettingsWnd::UpdateTheme() {
-    Color colBg = ThemeWindowControlBackgroundColor();
-    Color colTxt = ThemeWindowTextColor();
-    SetColors(colTxt, colBg);
-    ControlBase* ctrls[] = {ddFont,      editSize,    editMargin,    editSpacing,   editCss,
-                            cbIgnoreCss, cbCustomCss, radioThisFile, radioAllEbooks};
-    for (ControlBase* c : ctrls) {
-        if (c) {
-            c->SetColors(colTxt, colBg);
-        }
-    }
-    DarkModeApplyToWindow(hwnd);
-    RedrawWindow(hwnd, nullptr, nullptr, RDW_ERASE | RDW_INVALIDATE | RDW_ALLCHILDREN);
+    ScheduleSaveSettings();
 }
 
 void EbookSettingsWnd::OnCancel(VirtMouseEvent*) {
@@ -447,7 +368,7 @@ void EbookSettingsWnd::OnCancel(VirtMouseEvent*) {
 void EbookSettingsWnd::OnReset(VirtMouseEvent*) {
     bool thisFile = radioThisFile && radioThisFile->IsChecked();
     if (thisFile) {
-        auto* g = &gGlobalPrefs->eBookUI;
+        auto* g = &gSettings->eBookUI;
         SetValues(g->fontName, g->fontSize, g->margin, g->lineSpacing, g->ignoreDocumentCSS, g->customCSS);
         return;
     }
@@ -459,7 +380,7 @@ void EbookSettingsWnd::OnOk(VirtMouseEvent*) {
     MainWindow* w = win;
     ScheduleDelete();
     // the settings only reach the text through a fresh layout
-    if (IsMainWindowValid(w) && w->IsDocLoaded()) {
+    if (IsMainWindowValidAndNotClosing(w) && w->IsDocLoaded()) {
         ReloadDocument(w, false);
     }
 }
@@ -478,40 +399,31 @@ static void OnDestroy(WindowBase::DestroyEvent*) {
 
 bool EbookSettingsWnd::Create(MainWindow* mainWin) {
     win = mainWin;
-    {
-        CreateCustomArgs args;
-        args.title = _TRA("eBook Settings");
-        args.visible = false;
-        args.style = WS_POPUPWINDOW | WS_CAPTION;
-        args.font = GetFont();
-        args.icon = LoadIconW(GetModuleHandleW(nullptr), MAKEINTRESOURCEW(GetAppIconID()));
-        CreateCustom(args);
-    }
-    if (!hwnd) {
+    Color colTxt = ThemeWindowTextColor();
+    Color colBg = ThemeWindowControlBackgroundColor();
+    Color colMuted = ThemeWindowDarkerTextColor();
+    PlatformFont* fontText = DlgUiFont(kToolDlgTextFontPx);
+    SetFont(fontText);
+    bool isRtl = IsUIRtl();
+    if (!CreateToolDialog(this, nullptr, Tr("eBook Settings"), fontText, colTxt, colBg)) {
         return false;
     }
-    bool isRtl = IsUIRtl();
 
     auto* vbox = new VBox();
-    vbox->alignMain = MainAxisAlign::MainStart;
     vbox->alignCross = CrossAxisAlign::Stretch;
 
+    // the font, then its size, the margin and the line spacing
+    auto label = [&](Str s) { return NewDlgLabel(s, fontText, colMuted, kToolDlgRowDy); };
+    auto numberField = [&]() { return NewDlgEdit(hwnd, fontText, {}, kEbookNumChars); };
+    auto* fields = new VBox();
+    fields->alignCross = CrossAxisAlign::Stretch;
     {
-        auto* row = new HBox();
-        row->alignMain = MainAxisAlign::MainStart;
-        row->alignCross = CrossAxisAlign::CrossCenter;
-
-        labelFont = NewVirtText({
-            .s = _TRA("Font:"),
-            .font = font,
-            .isRtl = isRtl,
-            .padding = DpiScaledInsets(0, 8, 0, 0),
-        });
+        HBox* row = NewDlgFieldRow();
+        labelFont = label(Tr("Font:"));
         row->AddChild(labelFont);
-
         DropDown::CreateArgs args;
         args.parent = hwnd;
-        args.font = GetFont();
+        args.font = fontText;
         args.isRtl = isRtl;
         args.isEditable = true;
         ddFont = new DropDown();
@@ -519,170 +431,93 @@ bool EbookSettingsWnd::Create(MainWindow* mainWin) {
         ddFont->onTextChanged = MkMethod0<EbookSettingsWnd, &EbookSettingsWnd::OnControlChanged>(this);
         ddFont->onSelectionChanged = MkMethod0<EbookSettingsWnd, &EbookSettingsWnd::OnControlChanged>(this);
         row->AddChild(ddFont, 1);
-        vbox->AddChild(row);
+        fields->AddChild(row);
     }
-
     {
-        auto* row = new HBox();
-        row->alignMain = MainAxisAlign::MainStart;
-        row->alignCross = CrossAxisAlign::CrossCenter;
-
-        labelSize = NewVirtText({
-            .s = _TRA("Size:"),
-            .font = font,
-            .isRtl = isRtl,
-            .padding = DpiScaledInsets(8, 8, 0, 0),
-        });
+        HBox* row = NewDlgFieldRow();
+        labelSize = label(Tr("Size:"));
         row->AddChild(labelSize);
-
-        Edit::CreateArgs args;
-        args.parent = hwnd;
-        args.font = GetFont();
-        args.withBorder = true;
-        args.isRtl = isRtl;
-        args.idealWidthChars = 6;
-        editSize = new Edit();
-        editSize->SetInsetsPt(8, 0, 0, 0);
-        editSize->Create(args);
-        row->AddChild(editSize);
-
-        labelMargin = NewVirtText({
-            .s = _TRA("Margin:"),
-            .font = font,
-            .isRtl = isRtl,
-            .padding = DpiScaledInsets(8, 8, 0, 16),
-        });
+        editSize = numberField();
+        row->AddChild(NewDlgUnderlined(editSize));
+        row->AddChild(new Spacer(DpiScale(kToolDlgGapDx), 0));
+        labelMargin = label(Tr("Margin:"));
         row->AddChild(labelMargin);
-
-        editMargin = new Edit();
-        editMargin->SetInsetsPt(8, 0, 0, 0);
-        editMargin->Create(args);
+        editMargin = numberField();
         editMargin->onTextChanged = MkMethod0<EbookSettingsWnd, &EbookSettingsWnd::OnControlChanged>(this);
-        row->AddChild(editMargin);
-
-        labelSpacing = NewVirtText({
-            .s = _TRA("Line spacing:"),
-            .font = font,
-            .isRtl = isRtl,
-            .padding = DpiScaledInsets(8, 8, 0, 16),
-        });
+        row->AddChild(NewDlgUnderlined(editMargin));
+        row->AddChild(new Spacer(DpiScale(kToolDlgGapDx), 0));
+        labelSpacing = label(Tr("Line spacing:"));
         row->AddChild(labelSpacing);
-
-        args.idealWidthChars = 6;
-        editSpacing = new Edit();
-        editSpacing->SetInsetsPt(8, 0, 0, 0);
-        editSpacing->Create(args);
+        editSpacing = numberField();
         editSpacing->onTextChanged = MkMethod0<EbookSettingsWnd, &EbookSettingsWnd::OnControlChanged>(this);
-        row->AddChild(editSpacing);
-        vbox->AddChild(row);
+        row->AddChild(NewDlgUnderlined(editSpacing));
+        fields->AddChild(row);
     }
+    Vec<VirtText*> labels;
+    VecAppend(labels, labelFont);
+    VecAppend(labels, labelSize);
+    AlignDlgLabels(labels);
+    vbox->AddChild(NewDlgSection(fields));
+    vbox->AddChild(new VirtLine());
 
+    // the styling: the document's, the generated CSS or the user's
+    auto* styling = new VBox();
+    styling->alignCross = CrossAxisAlign::Stretch;
     {
-        Checkbox::CreateArgs args;
-        args.parent = hwnd;
-        args.text = _TRA("&Ignore the document's own styling");
-        args.isRtl = isRtl;
-        cbIgnoreCss = new Checkbox();
-        cbIgnoreCss->SetInsetsPt(10, 0, 0, 0);
-        cbIgnoreCss->Create(args);
-        vbox->AddChild(cbIgnoreCss);
-    }
+        cbIgnoreCss = NewDlgCheckbox(hwnd, Tr("&Ignore the document's own styling"), fontText, false);
+        HBox* row = NewDlgFieldRow();
+        row->AddChild(cbIgnoreCss);
+        styling->AddChild(row);
 
-    {
-        Checkbox::CreateArgs args;
-        args.parent = hwnd;
-        args.text = _TRA("&Custom CSS (edit the rules below)");
-        args.isRtl = isRtl;
-        cbCustomCss = new Checkbox();
-        cbCustomCss->SetInsetsPt(8, 0, 0, 0);
-        cbCustomCss->Create(args);
+        cbCustomCss = NewDlgCheckbox(hwnd, Tr("&Custom CSS"), fontText, false);
         cbCustomCss->onStateChanged = MkMethod0<EbookSettingsWnd, &EbookSettingsWnd::OnCustomCssToggled>(this);
-        vbox->AddChild(cbCustomCss);
-    }
+        row = NewDlgFieldRow();
+        row->AddChild(cbCustomCss);
+        styling->AddChild(row);
 
-    {
         Edit::CreateArgs args;
         args.parent = hwnd;
-        args.font = GetFont();
+        args.font = GetUserGuiFont(StrL("Consolas"), DpiScale(kEbookCssFontPx));
         args.isMultiLine = true;
-        args.withBorder = true;
+        args.withBorder = false;
         args.isRtl = isRtl;
-        args.idealSizeLines = 6;
-        args.textPadding = 4;
+        args.idealSizeLines = kEbookCssLines;
         editCss = new Edit();
-        editCss->SetInsetsPt(4, 0, 0, 0);
+        editCss->SetColors(colTxt, colBg);
         editCss->Create(args);
-        // the generated rules are one long line; without this the dialog would
-        // grow as wide as the text
-        editCss->maxDx = DpiScale(440);
+        editCss->maxDx = DpiScale(kEbookCssMaxDx);
         SendMessageW(editCss->hwnd, EM_SETREADONLY, TRUE, 0);
         SendMessageW(editCss->hwnd, EM_SETLIMITTEXT, 0, 0);
-        vbox->AddChild(editCss, 1);
+        styling->AddChild(new Padding(editCss, DpiScaledInsets(kToolDlgFilesPadDy, 0, 0, 0)), 1);
     }
+    vbox->AddChild(NewDlgSection(styling), 1);
+    vbox->AddChild(new VirtLine());
 
+    // this file or every ebook
     {
-        auto* row = new HBox();
-        row->alignMain = MainAxisAlign::MainStart;
-        row->alignCross = CrossAxisAlign::CrossCenter;
-
-        Checkbox::CreateArgs args;
-        args.parent = hwnd;
-        args.text = _TRA("&This file");
-        args.isRtl = isRtl;
-        args.isRadio = true;
-        args.isGroupStart = true;
-        args.initialState = Checkbox::State::Checked;
-        radioThisFile = new Checkbox();
-        radioThisFile->SetInsetsPt(10, 0, 0, 0);
-        radioThisFile->Create(args);
+        radioThisFile = NewDlgRadio(hwnd, Tr("&This file"), fontText, true, true);
         radioThisFile->onStateChanged = MkMethod0<EbookSettingsWnd, &EbookSettingsWnd::OnTargetChanged>(this);
-        row->AddChild(radioThisFile);
-
-        args.text = _TRA("For all &ebooks");
-        args.isGroupStart = false;
-        args.initialState = Checkbox::State::Unchecked;
-        radioAllEbooks = new Checkbox();
-        radioAllEbooks->SetInsetsPt(10, 0, 0, 12);
-        radioAllEbooks->Create(args);
+        radioAllEbooks = NewDlgRadio(hwnd, Tr("For all &ebooks"), fontText, false, false);
         radioAllEbooks->onStateChanged = MkMethod0<EbookSettingsWnd, &EbookSettingsWnd::OnTargetChanged>(this);
+        HBox* row = NewDlgFieldRow();
+        row->AddChild(radioThisFile);
         row->AddChild(radioAllEbooks);
-        vbox->AddChild(row);
+        vbox->AddChild(NewDlgSection(row));
     }
 
-    {
-        auto* hbox = new HBox();
-        hbox->alignMain = MainAxisAlign::SpaceBetween;
-        hbox->alignCross = CrossAxisAlign::CrossCenter;
-        hbox->gap = font->averageCharWidth;
-        auto pad = Insets{4, 0, 4, 0};
-
-        btnReset = NewThemedButton(hwnd, _TRA("Reset to defaults"), font, false);
-        btnReset->onClick = MkMethod1<EbookSettingsWnd, VirtMouseEvent*, &EbookSettingsWnd::OnReset>(this);
-        hbox->AddChild(new Padding(btnReset, pad));
-
-        auto* right = new HBox();
-        right->alignMain = MainAxisAlign::MainEnd;
-        right->alignCross = CrossAxisAlign::CrossCenter;
-        right->gap = font->averageCharWidth;
-        btnCancel = NewThemedButton(hwnd, _TRA("Cancel"), font, false);
-        btnCancel->onClick = MkMethod1<EbookSettingsWnd, VirtMouseEvent*, &EbookSettingsWnd::OnCancel>(this);
-        right->AddChild(new Padding(btnCancel, pad));
-        btnOk = NewThemedButton(hwnd, _TRA("OK"), font, true);
-        btnOk->onClick = MkMethod1<EbookSettingsWnd, VirtMouseEvent*, &EbookSettingsWnd::OnOk>(this);
-        right->AddChild(new Padding(btnOk, pad));
-        hbox->AddChild(right);
-        vbox->AddChild(hbox);
-    }
-
-    layout = new Padding(vbox, DpiScaledInsets(4, 8));
+    btnReset = NewDlgButton(hwnd, Tr("Reset to defaults"), fontText, DlgButtonStyle::Ghost, false);
+    btnReset->onClick = MkMethod1<EbookSettingsWnd, VirtMouseEvent*, &EbookSettingsWnd::OnReset>(this);
+    btnCancel = NewDlgButton(hwnd, Tr("Cancel"), fontText, DlgButtonStyle::Outline, false);
+    btnCancel->onClick = MkMethod1<EbookSettingsWnd, VirtMouseEvent*, &EbookSettingsWnd::OnCancel>(this);
+    btnOk = NewDlgButton(hwnd, Tr("OK"), fontText, DlgButtonStyle::Filled, true);
+    btnOk->onClick = MkMethod1<EbookSettingsWnd, VirtMouseEvent*, &EbookSettingsWnd::OnOk>(this);
+    vbox->AddChild(NewDlgFooter(btnCancel, btnOk, btnReset));
+    layout = vbox;
 
     FillFontList();
     LoadFromTarget();
 
-    int dx = DpiScale(460);
-    LayoutAndSizeToContent(layout, dx, 0, hwnd);
-    DoLayout(HwndClientRect(hwnd).Size());
-    HwndCenterDialog(hwnd, win ? win->hwndFrame : nullptr);
+    SizeToLayout(this, layout, DpiScale(kEbookDlgDx), 0, win ? win->hwndFrame : nullptr);
     UpdateTheme();
 
     SetIsVisible(true);
@@ -691,7 +526,7 @@ bool EbookSettingsWnd::Create(MainWindow* mainWin) {
 }
 
 void ShowEbookSettingsDialog(MainWindow* win) {
-    if (!IsMainWindowValid(win) || !win->CurrentTab() || !win->CurrentTab()->ctrl) {
+    if (!IsMainWindowValidAndNotClosing(win) || !win->CurrentTab() || !win->CurrentTab()->ctrl) {
         return;
     }
     if (gEbookSettingsWnd) {
@@ -700,7 +535,9 @@ void ShowEbookSettingsDialog(MainWindow* win) {
     }
     auto* wnd = new EbookSettingsWnd();
     wnd->filePath = str::Dup(win->CurrentTab()->filePath);
-    // no closeOnEsc: Esc while editing the CSS would throw the edits away
+    // Usually Esc while editing CSS should not throw the edits away. EscToExit
+    // is the explicit opt-in to close this window anyway.
+    wnd->closeOnEsc = gSettings->escToExit;
     wnd->onBeforeDelete = MkFunc0Void(ClearEbookSettingsWnd);
     wnd->onClose = MkFunc1Void<WindowBase::CloseEvent*>(OnClose);
     wnd->onDestroy = MkFunc1Void<WindowBase::DestroyEvent*>(OnDestroy);

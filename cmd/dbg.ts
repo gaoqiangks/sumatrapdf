@@ -7,13 +7,19 @@ import { runLogged } from "./util";
 // stops in the debugger with ASan's report rather than somewhere later on.
 //
 // Usage:
-//   bun cmd/dbg.ts                            # just start it
+//   bun cmd/dbg.ts                            # cdb if available, else WinDbg
+//   bun cmd/dbg.ts -windbg                    # WinDbg GUI
+//   bun cmd/dbg.ts -clean                     # clean the ASan output first
 //   bun cmd/dbg.ts -- -for-testing foo.pdf    # args after -- go to SumatraPDF
+//   bun cmd/dbg.ts -windbg -- -for-testing foo.pdf
 //
 // Pass -for-testing when opening a document to poke at: it starts a fresh
 // instance and won't overwrite the settings you actually use.
 
 const exePath = join("out", "dbg64_asan", "SumatraPDF-static.exe");
+const usage = `Usage: bun cmd/dbg.ts [-windbg] [-clean] [-- <SumatraPDF args>]`;
+
+class CliError extends Error {}
 
 function firstExisting(paths: string[]): string | null {
   return paths.find((p) => existsSync(p)) ?? null;
@@ -108,24 +114,57 @@ function findWinDbgFromWindowsApps(): string | null {
   return null;
 }
 
-// The debugger to use plus the flags that make it start the program right away
-// instead of stopping at the initial breakpoint. windbg / WinDbgX wins over
-// raddbg because it understands the ASan report.
-export function findDebugger(): { exe: string; flags: string[] } | null {
-  // windbg: -Q quiet (don't save settings), -o debug child processes,
-  // -g don't break on start, -G don't break on exit either, so the debugger
-  // closes with the program instead of sitting on the final breakpoint.
-  const windbg =
+function debuggerKits(): string[] {
+  return [
+    String.raw`C:\Program Files (x86)\Windows Kits\10\Debuggers\x64`,
+    String.raw`C:\Program Files\Windows Kits\10\Debuggers\x64`,
+  ];
+}
+
+function findCdb(): string | null {
+  return findOnPath("cdb.exe") ?? firstExisting(debuggerKits().map((d) => join(d, "cdb.exe")));
+}
+
+function findWinDbg(): string | null {
+  return (
     findOnPath("windbgx.exe") ??
     findOnPath("windbg.exe") ??
-    firstExisting([
-      String.raw`C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\windbg.exe`,
-      String.raw`C:\Program Files\Windows Kits\10\Debuggers\x64\windbg.exe`,
-    ]) ??
+    firstExisting(debuggerKits().map((d) => join(d, "windbg.exe"))) ??
     findWinDbgFromRegistry() ??
-    findWinDbgFromWindowsApps();
+    findWinDbgFromWindowsApps()
+  );
+}
+
+// -o debug child processes, -G don't break on exit. ASan maps shadow memory via
+// first-chance access violations (passed through, not handled); ignore them so
+// the debugger does not print a line per fault. Real ASan errors still stop on
+// __debugbreak. -Q (don't save settings) is WinDbg GUI only.
+//
+// cdb: -xi av is a startup switch, so it is in effect before the first AV.
+// WinDbg: -c "sxi av; g" runs at the initial breakpoint then continues (same
+// as -g, but the ignore is set first). Classic windbg has no -xi switch.
+const cdbFlags = ["-o", "-g", "-G", "-xi", "av"];
+const windbgFlags = ["-Q", "-o", "-G", "-c", "sxi av; g"];
+
+// The debugger to use plus the flags that make it start the program right away
+// instead of stopping at the initial breakpoint. Prefer cdb (console) over the
+// WinDbg GUI when it's installed, unless -windbg was passed; both beat raddbg
+// because they understand the ASan report.
+export function findDebugger(preferWindbg = false): { exe: string; flags: string[] } | null {
+  if (!preferWindbg) {
+    const cdb = findCdb();
+    if (cdb) {
+      return { exe: cdb, flags: cdbFlags };
+    }
+  }
+
+  const windbg = findWinDbg();
   if (windbg) {
-    return { exe: windbg, flags: ["-Q", "-o", "-g", "-G"] };
+    return { exe: windbg, flags: windbgFlags };
+  }
+
+  if (preferWindbg) {
+    return null;
   }
 
   const raddbg = firstExisting([join(homedir(), "OneDrive", "bin", "raddbg.exe")]) ?? findOnPath("raddbg.exe");
@@ -135,27 +174,70 @@ export function findDebugger(): { exe: string; flags: string[] } | null {
   return null;
 }
 
-// arguments after "--" (or all of them, if there's no "--") go to the app
-function appArgs(): string[] {
+// Arguments before "--" configure dbg.ts; those after it go to SumatraPDF.
+function parseCli(): { preferWindbg: boolean; clean: boolean; app: string[] } | undefined {
   const args = process.argv.slice(2);
+  if (args.length === 1 && ["-h", "-help", "--help"].includes(args[0])) {
+    return undefined;
+  }
   const sep = args.indexOf("--");
-  return sep < 0 ? args : args.slice(sep + 1);
+  const ours = sep < 0 ? args : args.slice(0, sep);
+  const afterSep = sep < 0 ? [] : args.slice(sep + 1);
+
+  let preferWindbg = false;
+  let clean = false;
+  for (const a of ours) {
+    if (a === "-windbg") {
+      if (preferWindbg) {
+        throw new CliError("-windbg can only be specified once");
+      }
+      preferWindbg = true;
+    } else if (a === "-clean") {
+      if (clean) {
+        throw new CliError("-clean can only be specified once");
+      }
+      clean = true;
+    } else {
+      throw new CliError(`unknown option: ${a}`);
+    }
+  }
+  return { preferWindbg, clean, app: afterSep };
 }
 
 async function main() {
-  await runLogged("bun", [join(import.meta.dir, "build.ts"), "-asan"]);
+  let opts: ReturnType<typeof parseCli>;
+  try {
+    opts = parseCli();
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error(`error: ${message}\n`);
+    console.error(usage);
+    process.exitCode = 1;
+    return;
+  }
+  if (!opts) {
+    console.log(usage);
+    return;
+  }
+  const { preferWindbg, clean, app } = opts;
+  // Debug builds use Ninja and leave one CPU free.
+  await runLogged("bun", [join(import.meta.dir, "build.ts"), "-asan", "-ninja", ...(clean ? ["-clean"] : [])]);
 
-  const dbg = findDebugger();
+  const dbg = findDebugger(preferWindbg);
   if (!dbg) {
-    console.error(
-      `no debugger found: looked for windbg/WinDbgX (PATH, Windows Kits, Store package) and ${join(homedir(), "OneDrive", "bin", "raddbg.exe")}`,
-    );
+    if (preferWindbg) {
+      console.error(`no WinDbg found: looked on PATH, Windows Kits, and the Store package`);
+    } else {
+      console.error(
+        `no debugger found: looked for cdb/windbg/WinDbgX (PATH, Windows Kits, Store package) and ${join(homedir(), "OneDrive", "bin", "raddbg.exe")}`,
+      );
+    }
     process.exit(1);
   }
 
   // bun kills its children when it exits, so this waits for the debugger
   // rather than launching it and returning
-  const args = [...dbg.flags, join(process.cwd(), exePath), ...appArgs()];
+  const args = [...dbg.flags, join(process.cwd(), exePath), ...app];
   console.log(`> ${dbg.exe} ${args.join(" ")}`);
   const res = Bun.spawnSync([dbg.exe, ...args], { stdio: ["inherit", "inherit", "inherit"] });
   process.exit(res.exitCode ?? 0);

@@ -3,23 +3,11 @@
 import { join } from "node:path";
 import { detectVisualStudio, runLogged } from "../util";
 
-function buildConfigPath(): string {
-  return join("src", "BuildConfig.h");
-}
-
-async function revertBuildConfig(): Promise<void> {
-  const proc = Bun.spawn(["git", "checkout", buildConfigPath()], {
-    stdout: "inherit",
-    stderr: "inherit",
-  });
-  await proc.exited;
-}
-
 export async function buildCodeql() {
   const timeStart = performance.now();
   console.log("build-codeql: static 64-bit release build for CodeQL analysis");
 
-  // SumatraPDF.rc embeds .work/embedded.dat; generate it first (same as build-ci).
+  // the prebuild packs .work/docs into IDR_EMBEDDED_PAK; generate the manual first (same as build-ci).
   const { main: genDocs } = await import("../gen-docs");
   await genDocs();
 
@@ -28,12 +16,10 @@ export async function buildCodeql() {
 
   await runLogged(msbuildPath, [
     slnPath,
-    `/t:SumatraPDF-static:Rebuild`,
+    `/t:SumatraPDF-static:Rebuild;SumatraPDF3_7-static:Rebuild`,
     `/p:Configuration=Release;Platform=x64`,
     `/m`,
   ]);
-
-  await revertBuildConfig();
 
   const elapsed = ((performance.now() - timeStart) / 1000).toFixed(1);
   console.log(`build-codeql finished in ${elapsed}s`);

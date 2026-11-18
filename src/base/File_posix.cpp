@@ -12,31 +12,37 @@
 #include <unistd.h>
 #if OS_DARWIN
 #include <mach-o/dyld.h>
+#include <sys/mount.h>
+#elif OS_LINUX
+#include <linux/magic.h>
+#include <sys/vfs.h>
+// kernel headers before 6.x (Ubuntu 22.04) lack these
+#ifndef CIFS_SUPER_MAGIC
+#define CIFS_SUPER_MAGIC 0xFF534D42
+#endif
+#ifndef SMB2_SUPER_MAGIC
+#define SMB2_SUPER_MAGIC 0xFE534D42
+#endif
+#ifndef CEPH_SUPER_MAGIC
+#define CEPH_SUPER_MAGIC 0x00C36400
+#endif
+#ifndef FUSE_SUPER_MAGIC
+#define FUSE_SUPER_MAGIC 0x65735546
+#endif
 #endif
 
 #include "base/File.h"
 
-static char* PathZTemp(Str path) {
-    return CStrTemp(path);
-}
-
 static bool StatPath(Str path, struct stat& st) {
-    if (!path) {
+    if (len(path) == 0) {
         return false;
     }
-    return stat(PathZTemp(path), &st) == 0;
+    return stat(CStrTemp(path), &st) == 0;
 }
 
 static FILETIME FileTimeFromTimespec(time_t sec, long nsec) {
-    u64 t = ((u64)sec * 1000000000ULL) + (u64)nsec;
-    FILETIME ft;
-    ft.dwLowDateTime = (DWORD)t;
-    ft.dwHighDateTime = (DWORD)(t >> 32);
-    return ft;
-}
-
-static u64 FileTimeToNs(FILETIME ft) {
-    return ((u64)ft.dwHighDateTime << 32) | ft.dwLowDateTime;
+    u64 ticks = kFileTimeUnixEpoch + ((u64)sec * kFileTimeTicksPerSec) + (u64)nsec / 100;
+    return FileTimeFromU64(ticks);
 }
 
 #if defined(__APPLE__)
@@ -62,10 +68,14 @@ static FILETIME FileTimeFromTimespec(timespec ts) {
 }
 
 static timespec TimespecFromFileTime(FILETIME ft) {
-    u64 ns = FileTimeToNs(ft);
+    u64 ticks = FileTimeToU64(ft);
+    if (ticks < kFileTimeUnixEpoch) {
+        return {};
+    }
+    u64 unixTicks = ticks - kFileTimeUnixEpoch;
     timespec ts;
-    ts.tv_sec = (time_t)(ns / 1000000000ULL);
-    ts.tv_nsec = (long)(ns % 1000000000ULL);
+    ts.tv_sec = (time_t)(unixTicks / kFileTimeTicksPerSec);
+    ts.tv_nsec = (long)((unixTicks % kFileTimeTicksPerSec) * 100);
     return ts;
 }
 
@@ -94,17 +104,13 @@ bool IsDirectory(Str path) {
 // also remembered for ~4 minutes so later queries fail fast.
 // Non-Windows: no cache (same as an uncached attribute query).
 DWORD GetCachedAttributes(Str path) {
-    struct stat st;
-    if (!StatPath(path, st)) {
-        return (DWORD)-1; // INVALID_FILE_ATTRIBUTES
-    }
-    return (DWORD)st.st_mode;
+    return file::GetAttributes(path);
 }
 
 TempStr NormalizeTemp(Str path) {
     char resolved[PATH_MAX];
-    if (realpath(PathZTemp(path), resolved)) {
-        return str::DupTemp(resolved);
+    if (realpath(CStrTemp(path), resolved)) {
+        return str::DupTemp(Str(resolved));
     }
     if (IsAbsolute(path)) {
         return str::DupTemp(path);
@@ -140,20 +146,119 @@ bool HasVariableDriveLetter(Str /*path*/) {
     return false;
 }
 
-bool IsOnNetworkDrive(Str /*path*/) {
+#if !OS_WASM
+static bool StatFileSystem(Str path, struct statfs& fs) {
+    if (len(path) == 0) {
+        return false;
+    }
+    TempStr current = path::NormalizeTemp(path);
+    for (;;) {
+        if (statfs(CStrTemp(current), &fs) == 0) {
+            return true;
+        }
+        TempStr parent = path::GetDirTemp(current);
+        if (len(parent) == 0 || str::Eq(parent, current)) {
+            return false;
+        }
+        current = parent;
+    }
+}
+#endif
+
+bool IsOnNetworkDrive(Str path) {
+#if OS_WASM
+    (void)path;
     return false;
+#else
+    struct statfs fs{};
+    if (!StatFileSystem(path, fs)) {
+        return false;
+    }
+#if OS_DARWIN
+    return (fs.f_flags & MNT_LOCAL) == 0;
+#else
+    switch ((unsigned long)fs.f_type) {
+        case NFS_SUPER_MAGIC:
+        case SMB_SUPER_MAGIC:
+        case CIFS_SUPER_MAGIC:
+        case SMB2_SUPER_MAGIC:
+        case CODA_SUPER_MAGIC:
+        case NCP_SUPER_MAGIC:
+        case AFS_SUPER_MAGIC:
+        case AFS_FS_MAGIC:
+        case CEPH_SUPER_MAGIC:
+        case V9FS_MAGIC:
+        case FUSE_SUPER_MAGIC:
+            return true;
+        default:
+            return false;
+    }
+#endif
+#endif
 }
 
 bool IsCloudPlaceholder(Str /*path*/) {
     return false;
 }
 
-bool IsOnFixedDrive(Str /*path*/) {
-    return true;
+// ng: for logs; only local / remote is known here
+TempStr StorageInfoTemp(Str path) {
+    return str::DupTemp(IsOnNetworkDrive(path) ? StrL("remote") : StrL("local"));
 }
 
-bool SupportsChangeNotifications(Str /*path*/) {
+bool IsEphemeralHostFile(Str /*path*/) {
     return false;
+}
+
+// Is path inside a temporary folder ($TMPDIR, /tmp)? macOS gives /var/folders/...
+// for $TMPDIR, which is /private/var/folders/... once resolved (#6437)
+bool IsInTempDir(Str path) {
+    if (len(path) == 0) {
+        return false;
+    }
+    Str dirs[4] = {Str(getenv("TMPDIR")), StrL("/tmp/"), StrL("/private/tmp/"), {}};
+    if (len(dirs[0]) > 0) {
+        dirs[3] = str::JoinTemp(StrL("/private"), dirs[0]);
+    }
+    for (Str dir : dirs) {
+        if (len(dir) == 0) {
+            continue;
+        }
+        if (dir.s[len(dir) - 1] != '/') {
+            dir = str::JoinTemp(dir, StrL("/"));
+        }
+        if (len(path) > len(dir) && str::StartsWith(path, dir)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool IsOnFixedDrive(Str path) {
+    return !IsOnNetworkDrive(path);
+}
+
+bool IsOnAvailableDrive(Str path) {
+    if (len(path) == 0) {
+        return false;
+    }
+    if (file::Exists(path) || dir::Exists(path)) {
+        return true;
+    }
+    TempStr dir = path::GetDirTemp(path);
+    if (len(dir) == 0 || str::Eq(dir, path)) {
+        return false;
+    }
+    return dir::Exists(dir);
+}
+
+bool SupportsChangeNotifications(Str path) {
+#if OS_LINUX
+    return !IsOnNetworkDrive(path);
+#else
+    (void)path;
+    return false;
+#endif
 }
 
 bool IsAbsolute(Str path) {
@@ -171,8 +276,8 @@ TempStr GetTempFilePathTemp(Str filePrefix) {
     if (!tmpDir || !tmpDir[0]) {
         tmpDir = "/tmp";
     }
-    if (!filePrefix) {
-        return str::DupTemp(tmpDir);
+    if (len(filePrefix) == 0) {
+        return str::DupTemp(Str(tmpDir));
     }
 
     TempStr name = fmt("%sXXXXXX", filePrefix);
@@ -196,9 +301,9 @@ TempStr GetSelfExePathTemp() {
     }
     char resolved[PATH_MAX];
     if (realpath(buf, resolved)) {
-        return str::DupTemp(resolved);
+        return str::DupTemp(Str(resolved));
     }
-    return str::DupTemp(buf);
+    return str::DupTemp(Str(buf));
 #else
     char buf[PATH_MAX];
     ssize_t n = readlink("/proc/self/exe", buf, sizeof(buf) - 1);
@@ -206,43 +311,66 @@ TempStr GetSelfExePathTemp() {
         return {};
     }
     buf[n] = 0;
-    return str::DupTemp(buf);
+    return str::DupTemp(Str(buf));
 #endif
-}
-
-// Directory containing GetSelfExePathTemp().
-TempStr GetSelfExeDirTemp() {
-    TempStr path = GetSelfExePathTemp();
-    if (!path) {
-        return {};
-    }
-    return path::GetDirTemp(path);
-}
-
-TempStr GetPathInExeDirTemp(Str fileName) {
-    TempStr dir = GetSelfExeDirTemp();
-    if (!dir) {
-        char cwd[PATH_MAX];
-        if (!getcwd(cwd, sizeof(cwd))) {
-            return fileName;
-        }
-        dir = Str(cwd);
-    }
-    return path::NormalizeTemp(path::JoinTemp(dir, fileName));
 }
 
 namespace file {
 
 FILE* OpenFILE(Str path) {
-    ReportIf(!path);
-    if (!path) {
+    ReportIf(len(path) == 0);
+    if (len(path) == 0) {
         return nullptr;
     }
-    return fopen(PathZTemp(path), "rb");
+    return fopen(CStrTemp(path), "rb");
 }
 
 FileHandle OpenReadOnly(Str path) {
-    return open(PathZTemp(path), O_RDONLY);
+    return open(CStrTemp(path), O_RDONLY);
+}
+
+// Opens path for reading and writing, creating it when createIfMissing.
+FileHandle OpenReadWrite(Str path, bool createIfMissing) {
+    int flags = O_RDWR | (createIfMissing ? O_CREAT : 0);
+    return open(CStrTemp(path), flags, 0666);
+}
+
+void Close(FileHandle h) {
+    if (h != kInvalidFileHandle) {
+        close(h);
+    }
+}
+
+// Moves the file position to the end and returns it, i.e. the current file
+// size, or -1 on failure. That offset is where the next write lands.
+i64 SeekEnd(FileHandle h) {
+    off_t pos = lseek(h, 0, SEEK_END);
+    if (pos < 0) {
+        return -1;
+    }
+    return (i64)pos;
+}
+
+// Writes all of data at the current file position, looping over partial writes.
+bool WriteAll(FileHandle h, Str data) {
+    const char* d = data.s;
+    size_t left = (size_t)data.len;
+    while (left > 0) {
+        ssize_t n = write(h, d, left);
+        if (n < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            return false;
+        }
+        d += n;
+        left -= (size_t)n;
+    }
+    return true;
+}
+
+bool Flush(FileHandle h) {
+    return fsync(h) == 0;
 }
 
 bool Exists(Str path) {
@@ -262,7 +390,7 @@ i64 GetSize(FileHandle h) {
 }
 
 i64 GetSize(Str path) {
-    if (!path) {
+    if (len(path) == 0) {
         return -1;
     }
     struct stat st;
@@ -280,7 +408,7 @@ i64 GetSize(Str path) {
 // truncated by another process, touching a mapped page raises SIGBUS instead
 // of returning an error, so avoid mapping files on unreliable media.
 bool MemoryMap(Str path, Mapping* res) {
-    int fd = open(PathZTemp(path), O_RDONLY);
+    int fd = open(CStrTemp(path), O_RDONLY);
     if (fd < 0) {
         return false;
     }
@@ -308,33 +436,20 @@ void MemoryUnmap(Mapping* m) {
 }
 
 bool WriteFile(Str path, Str d) {
-    int fd = open(PathZTemp(path), O_WRONLY | O_CREAT | O_TRUNC, 0666);
+    int fd = open(CStrTemp(path), O_WRONLY | O_CREAT | O_TRUNC, 0666);
     if (fd < 0) {
         return false;
     }
     AutoCall closeFile(close, fd);
 
-    const char* data = d.s;
-    size_t left = (size_t)d.len;
-    while (left > 0) {
-        ssize_t n = write(fd, data, left);
-        if (n < 0) {
-            if (errno == EINTR) {
-                continue;
-            }
-            return false;
-        }
-        data += n;
-        left -= (size_t)n;
-    }
-    return true;
+    return WriteAll(fd, d);
 }
 
 bool Delete(Str path) {
-    if (!path) {
+    if (len(path) == 0) {
         return false;
     }
-    if (unlink(PathZTemp(path)) == 0) {
+    if (unlink(CStrTemp(path)) == 0) {
         return true;
     }
     return errno == ENOENT;
@@ -349,7 +464,7 @@ bool Copy(Str dst, Str src, bool dontOverwrite) {
 }
 
 bool Copy(Str dst, Str src, bool dontOverwrite, const CopyProgressCb& cbProgress) {
-    int srcFd = open(PathZTemp(src), O_RDONLY);
+    int srcFd = open(CStrTemp(src), O_RDONLY);
     if (srcFd < 0) {
         return false;
     }
@@ -359,7 +474,7 @@ bool Copy(Str dst, Str src, bool dontOverwrite, const CopyProgressCb& cbProgress
     if (dontOverwrite) {
         flags |= O_EXCL;
     }
-    int dstFd = open(PathZTemp(dst), flags, 0666);
+    int dstFd = open(CStrTemp(dst), flags, 0666);
     if (dstFd < 0) {
         return false;
     }
@@ -402,14 +517,6 @@ bool Copy(Str dst, Str src, bool dontOverwrite, const CopyProgressCb& cbProgress
     }
 }
 
-FILETIME GetAccessTime(Str path) {
-    struct stat st;
-    if (!StatPath(path, st)) {
-        return {};
-    }
-    return FileTimeFromTimespec(StatAccessTime(st));
-}
-
 bool SetAccessTime(Str path, FILETIME accessTime) {
     struct stat st;
     if (!StatPath(path, st)) {
@@ -418,7 +525,7 @@ bool SetAccessTime(Str path, FILETIME accessTime) {
     timespec ts[2];
     ts[0] = TimespecFromFileTime(accessTime);
     ts[1] = StatModificationTime(st);
-    return utimensat(AT_FDCWD, PathZTemp(path), ts, 0) == 0;
+    return utimensat(AT_FDCWD, CStrTemp(path), ts, 0) == 0;
 }
 
 FILETIME GetModificationTime(Str path) {
@@ -437,7 +544,7 @@ bool SetModificationTime(Str path, FILETIME lastMod) {
     timespec ts[2];
     ts[0] = StatAccessTime(st);
     ts[1] = TimespecFromFileTime(lastMod);
-    return utimensat(AT_FDCWD, PathZTemp(path), ts, 0) == 0;
+    return utimensat(AT_FDCWD, CStrTemp(path), ts, 0) == 0;
 }
 
 DWORD GetAttributes(Str path) {
@@ -449,7 +556,7 @@ DWORD GetAttributes(Str path) {
 }
 
 bool SetAttributes(Str path, DWORD attrs) {
-    return chmod(PathZTemp(path), (mode_t)(attrs & 07777)) == 0;
+    return chmod(CStrTemp(path), (mode_t)(attrs & 07777)) == 0;
 }
 
 int GetZoneIdentifier(Str /*path*/) {
@@ -465,14 +572,19 @@ bool DeleteZoneIdentifier(Str /*path*/) {
 }
 
 bool Rename(Str newPath, Str oldPath) {
-    if (!newPath || !oldPath) {
+    if (len(newPath) == 0 || len(oldPath) == 0) {
         return false;
     }
-    return rename(PathZTemp(oldPath), PathZTemp(newPath)) == 0;
+    return rename(CStrTemp(oldPath), CStrTemp(newPath)) == 0;
+}
+
+// rename() already replaces an existing newPath, so this is Rename().
+bool RenameReplace(Str newPath, Str oldPath) {
+    return Rename(newPath, oldPath);
 }
 
 bool OverwriteAtomicRetry(Str dst, Str src, int retryCount, int retrySleepMs) {
-    if (!dst || !src) {
+    if (len(dst) == 0 || len(src) == 0) {
         return false;
     }
 
@@ -494,7 +606,7 @@ bool OverwriteAtomicRetry(Str dst, Str src, int retryCount, int retrySleepMs) {
 
     retryCount = std::max(retryCount, 1);
     for (int i = 0; i < retryCount; i++) {
-        if (rename(PathZTemp(tempPath), PathZTemp(dst)) == 0) {
+        if (rename(CStrTemp(tempPath), CStrTemp(dst)) == 0) {
             return true;
         }
         if (i + 1 < retryCount && retrySleepMs > 0) {
@@ -509,8 +621,8 @@ bool OverwriteAtomicRetry(Str dst, Str src, int retryCount, int retrySleepMs) {
 } // namespace file
 
 int FileTimeDiffInSecs(const FILETIME& ft1, const FILETIME& ft2) {
-    i64 diff = (i64)FileTimeToNs(ft1) - (i64)FileTimeToNs(ft2);
-    return (int)(diff / 1000000000LL);
+    i64 diff = (i64)FileTimeToU64(ft1) - (i64)FileTimeToU64(ft2);
+    return (int)(diff / (i64)kFileTimeTicksPerSec);
 }
 
 namespace dir {
@@ -526,7 +638,7 @@ bool Exists(Str dir) {
 }
 
 bool Create(Str dir) {
-    if (mkdir(PathZTemp(dir), 0777) == 0) {
+    if (mkdir(CStrTemp(dir), 0777) == 0) {
         return true;
     }
     return errno == EEXIST && Exists(dir);
@@ -537,7 +649,7 @@ bool CreateAll(Str dir, int* errOut) {
     if (errOut) {
         *errOut = 0;
     }
-    if (!dir) {
+    if (len(dir) == 0) {
         return false;
     }
     if (Exists(dir)) {
@@ -600,26 +712,26 @@ static bool RemoveDirContentsZ(const char* dir, bool removeDir) {
 }
 
 bool RemoveAll(Str dir) {
-    return RemoveDirContentsZ(PathZTemp(dir), true);
+    return RemoveDirContentsZ(CStrTemp(dir), true);
 }
 
 // Delete everything inside dir but keep dir itself, so code that races with us
 // still finds the directory there (see SaveThumbnail / dir::CreateAll).
 bool Empty(Str dir) {
-    return RemoveDirContentsZ(PathZTemp(dir), false);
+    return RemoveDirContentsZ(CStrTemp(dir), false);
 }
 
 bool HasWriteAccess(Str dir) {
-    if (!dir) {
+    if (len(dir) == 0) {
         return false;
     }
     TempStr path = path::JoinTemp(dir, StrL("__sumatra_write_test__.tmp"));
-    int fd = open(PathZTemp(path), O_WRONLY | O_CREAT | O_EXCL, 0666);
+    int fd = open(CStrTemp(path), O_WRONLY | O_CREAT | O_EXCL, 0666);
     if (fd < 0) {
         return false;
     }
     close(fd);
-    unlink(PathZTemp(path));
+    unlink(CStrTemp(path));
     return true;
 }
 
@@ -630,17 +742,50 @@ TempStr GetHomeDirTemp() {
     if (!home || !home[0]) {
         return {};
     }
-    return str::DupTemp(home);
+    return str::DupTemp(Str(home));
 }
 
-TempStr ExpandEnvVarTemp(Str varName) {
-    const char* val = getenv(CStrTemp(varName));
-    if (!val) {
+// Linux: XDG_DOWNLOAD_DIR="$HOME/Downloads" in ~/.config/user-dirs.dirs
+static TempStr XdgDownloadDirTemp(Str home) {
+    const char* configHome = getenv("XDG_CONFIG_HOME");
+    TempStr config =
+        configHome && configHome[0] ? str::DupTemp(Str(configHome)) : path::JoinTemp(home, StrL(".config"));
+    Str data = file::ReadFile(path::JoinTemp(config, StrL("user-dirs.dirs")));
+    TempStr res;
+    StrVec lines;
+    Split(&lines, data, StrL("\n"));
+    for (int i = 0; i < len(lines); i++) {
+        Str line = lines[i];
+        Str prefix = StrL("XDG_DOWNLOAD_DIR=\"");
+        if (!str::StartsWith(line, prefix) || !str::EndsWith(line, StrL("\""))) {
+            continue;
+        }
+        Str val = Str(line.s + len(prefix), len(line) - len(prefix) - 1);
+        if (str::StartsWith(val, StrL("$HOME"))) {
+            val = str::JoinTemp(home, Str(val.s + 5, len(val) - 5));
+        }
+        res = str::DupTemp(val);
+        break;
+    }
+    str::Free(data);
+    return res;
+}
+
+// the user's Downloads folder, where web browsers save files by default
+TempStr GetDownloadsDirTemp() {
+#if OS_WASM
+    return str::DupTemp(StrL("/uploads"));
+#else
+    TempStr home = GetHomeDirTemp();
+    if (len(home) == 0) {
         return {};
     }
-    return str::DupTemp(val);
-}
-
-TempStr ToAbsolutePathTemp(Str path) {
-    return path::NormalizeTemp(path);
+#if !OS_DARWIN
+    TempStr xdg = XdgDownloadDirTemp(home);
+    if (len(xdg) > 0) {
+        return xdg;
+    }
+#endif
+    return path::JoinTemp(home, StrL("Downloads"));
+#endif
 }

@@ -2,15 +2,15 @@
    License: GPLv3 */
 
 #include "base/Base.h"
-#include "base/BitManip.h"
 #include "base/WinDynCalls.h"
 #include "gui/Dpi.h"
 #include "base/File.h"
 #include "base/Timer.h"
 #include "base/UITask.h"
 #include "base/Win.h"
-#include "base/ScopedWin.h"
+#include "base/AutoWin.h"
 #include "base/Http.h"
+#include "base/Pixmap.h"
 #include "base/GdiPlusUtil.h"
 #include "base/GuessFileType.h"
 
@@ -23,49 +23,75 @@
 #include "gui/Layout.h"
 #include "gui/PlatformFont.h"
 #include "gui/win/WinGui.h"
+#include "gui/VirtCtrl.h"
 
 #include "Settings.h"
 #include "DisplayMode.h"
 #include "Annotation.h"
 #include "FormFields.h"
+#include "SumatraDialogs.h"
 #include "DocController.h"
 #include "EngineBase.h"
 #include "EngineAll.h"
 
 #include "DisplayModel.h"
 #include "Theme.h"
-#include "GlobalPrefs.h"
+#include "AppSettings.h"
 #include "RenderCache.h"
 #include "ProgressUpdateUI.h"
 #include "TextSelection.h"
 #include "TextSearch.h"
 #include "SumatraConfig.h"
+#include "AIChatTypes.h"
 #include "WindowTab.h"
 #include "SumatraPDF.h"
-#include "EditAnnotations.h"
+#include "AnnotFilterToolbar.h"
 #include "Notifications.h"
 #include "MainWindow.h"
-#include "Canvas.h"
+#include "SidebarPanel.h"
+#include "AnnotPlacement.h"
 #include "Menu.h"
 #include "uia/Provider.h"
 #include "SearchAndDDE.h"
+#include "SignatureUI.h"
 #include "Selection.h"
 #include "LinkFollow.h"
 #include "SelectTextKeyboard.h"
 #include "SelectionToolbar.h"
-#include "ReadAloudHighlight.h"
-#include "ReadAloudPlaybackBar.h"
-#include "TextToSpeech.h"
+#include "AnnotEditToolbar.h"
+#include "AnnotTextPopup.h"
+#include "OleDragDropCommon.h"
+#include "CanvasCommon.h"
+#include "LaserPointerCursor.h"
+#include "ReadAloud.h"
+#include "ReadingAutoScroll.h"
+#include "ReadingBar.h"
 #include "HomePage.h"
+#include "Commands.h"
 #include "Toolbar.h"
 #include "Translations.h"
 
 #include "RefHover.h"
+#include "Canvas.h"
+#include "HexView.h"
+#include "PageGridDialogCommon.h"
+#include "MeasurementToolbar.h"
+#include "SumatraLog.h"
 
 // if set instead of trying to render pages we don't have, we simply do nothing
 // this reduces the flickering when going quickly through pages but creates
 // impression of lag
 static bool gNoFlickerRender = true;
+
+void CancelAnnotationResizeRerender(MainWindow* win) {
+    if (!win) {
+        return;
+    }
+    if (win->hwndCanvas) {
+        KillTimer(win->hwndCanvas, kAnnotationResizeRerenderTimerID);
+    }
+    win->annotationResizeRerenderTimer = 0;
+}
 
 Kind kNotifAnnotation = "notifAnnotation";
 
@@ -73,133 +99,13 @@ constexpr int kRenderDelayShowNotif = 500;
 
 //--- laser pointer (CmdToggleLaserPointer)
 
-// A laser pointer is a session mode, not a setting: it's turned on to point
-// things out during a presentation and off again afterwards, and an app that
-// started up with the mouse cursor replaced by a red dot would look broken.
-static bool gLaserPointer = false;
-
-// logical size of the cursor bitmap. The dot itself is a small part of it,
-// the rest is the glow fading out to fully transparent
-constexpr int kLaserPointerCursorSize = 32;
-
-static HCURSOR gCursorLaserPointer = nullptr;
-static int gCursorLaserPointerSize = 0;
-
-// A laser dot: a white-hot center inside a saturated red core, surrounded by a
-// glow that fades to transparent so the dot is visible on light and dark pages
-// alike. The hotspot is the center of the dot, unlike an arrow's tip.
-static HCURSOR CreateLaserPointerCursor(int size) {
-    BITMAPINFO bmi{};
-    bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-    bmi.bmiHeader.biWidth = size;
-    bmi.bmiHeader.biHeight = -size; // top-down
-    bmi.bmiHeader.biPlanes = 1;
-    bmi.bmiHeader.biBitCount = 32;
-    bmi.bmiHeader.biCompression = BI_RGB;
-
-    void* bits = nullptr;
-    HBITMAP hbmpColor = CreateDIBSection(nullptr, &bmi, DIB_RGB_COLORS, &bits, nullptr, 0);
-    if (!hbmpColor || !bits) {
-        DeleteObject(hbmpColor);
-        return nullptr;
-    }
-
-    float center = (float)size / 2.f;
-    float glowR = center;
-    float coreR = (float)size * 0.16f;
-    float hotR = (float)size * 0.07f;
-    DWORD* pixels = (DWORD*)bits;
-    for (int y = 0; y < size; y++) {
-        for (int x = 0; x < size; x++) {
-            float dx = ((float)x + 0.5f) - center;
-            float dy = ((float)y + 0.5f) - center;
-            float d = sqrtf((dx * dx) + (dy * dy));
-
-            // the glow, densest where it meets the core and quadratically
-            // fading out; it also fills the core, so that anti-aliasing the
-            // core's edge blends it into the glow rather than into a gap
-            float t = limitValue((d - coreR) / (glowR - coreR), 0.f, 1.f);
-            float glowA = (d < glowR) ? 0.45f * (1.f - t) * (1.f - t) : 0.f;
-            // the dot itself, white-hot in the middle, saturated red at the edge
-            float coreA = limitValue(coreR + 0.5f - d, 0.f, 1.f);
-            float hot = limitValue(d / hotR, 0.f, 1.f);
-            float coreG = 255.f - (200.f * hot);
-
-            // core over glow, written out premultiplied (as 32bpp cursors want)
-            float glowW = glowA * (1.f - coreA);
-            float alpha = coreA + glowW;
-            if (alpha <= 0.f) {
-                pixels[(y * size) + x] = 0;
-                continue;
-            }
-            u8 a = (u8)(alpha * 255.f);
-            u8 r = (u8)((255.f * coreA) + (255.f * glowW));
-            u8 g = (u8)((coreG * coreA) + (16.f * glowW));
-            u8 b = g;
-            pixels[(y * size) + x] = ((DWORD)a << 24) | ((DWORD)r << 16) | ((DWORD)g << 8) | b;
-        }
-    }
-
-    // 32bpp cursors carry their own alpha, but CreateIconIndirect still wants a
-    // mask bitmap; an all-zero AND mask leaves the color bitmap in charge
-    int maskBytesPerRow = ((size + 15) / 16) * 2;
-    u8* maskBits = AllocArray<u8>(maskBytesPerRow * size);
-    HBITMAP hbmpMask = CreateBitmap(size, size, 1, 1, maskBits);
-    HCURSOR res = nullptr;
-    if (hbmpMask) {
-        ICONINFO ii{};
-        ii.fIcon = FALSE;
-        ii.xHotspot = (DWORD)(size / 2);
-        ii.yHotspot = (DWORD)(size / 2);
-        ii.hbmMask = hbmpMask;
-        ii.hbmColor = hbmpColor;
-        res = (HCURSOR)CreateIconIndirect(&ii);
-        DeleteObject(hbmpMask);
-    }
-    DeleteObject(hbmpColor);
-    free(maskBits);
-    return res;
-}
-
-// the cursor is sized for the DPI of the window it's shown in, so it's
-// re-created when the canvas moves to a monitor with a different scaling
-static HCURSOR GetLaserPointerCursor() {
-    int size = DpiScale(kLaserPointerCursorSize);
-    if (gCursorLaserPointer && (gCursorLaserPointerSize == size)) {
-        return gCursorLaserPointer;
-    }
-    HCURSOR cur = CreateLaserPointerCursor(size);
-    if (!cur) {
-        // a cursor of the wrong size beats no cursor at all
-        return gCursorLaserPointer;
-    }
-    if (gCursorLaserPointer) {
-        DestroyCursor(gCursorLaserPointer);
-    }
-    gCursorLaserPointer = cur;
-    gCursorLaserPointerSize = size;
-    return cur;
-}
-
-void DeleteLaserPointerCursor() {
-    if (gCursorLaserPointer) {
-        DestroyCursor(gCursorLaserPointer);
-        gCursorLaserPointer = nullptr;
-        gCursorLaserPointerSize = 0;
-    }
-}
-
-bool IsLaserPointerActive() {
-    return gLaserPointer;
-}
-
 // while on, the canvas cursor is the laser dot no matter what is under it:
 // links, text and annotations still work, they just don't change the cursor
 static bool SetLaserPointerCursor(MainWindow* win) {
     if (!gLaserPointer) {
         return false;
     }
-    if (PM_BLACK_SCREEN == win->presentation || PM_WHITE_SCREEN == win->presentation) {
+    if (win->InBlankPresentation()) {
         // the presenter blanked the screen on purpose, don't put a dot on it
         return false;
     }
@@ -226,333 +132,10 @@ void ToggleLaserPointer(MainWindow* win) {
     SendMessageW(win->hwndCanvas, WM_SETCURSOR, 0, 0);
 }
 
-// OLE drag-drop support for dragging selected text out of the window
-class TextDropSource : public IDropSource {
-    AtomicInt refCount = 1;
-
-  public:
-    STDMETHODIMP QueryInterface(REFIID riid, void** ppv) override {
-        if (riid == IID_IUnknown || riid == IID_IDropSource) {
-            *ppv = this;
-            AddRef();
-            return S_OK;
-        }
-        *ppv = nullptr;
-        return E_NOINTERFACE;
-    }
-    ULONG STDMETHODCALLTYPE AddRef() override { return AtomicIntInc(&refCount); }
-    ULONG STDMETHODCALLTYPE Release() override {
-        LONG r = InterlockedDecrement(&refCount);
-        if (r == 0) {
-            delete this;
-        }
-        return r;
-    }
-    STDMETHODIMP QueryContinueDrag(BOOL fEscapePressed, DWORD grfKeyState) override {
-        if (fEscapePressed) {
-            return DRAGDROP_S_CANCEL;
-        }
-        if (!(grfKeyState & MK_LBUTTON)) {
-            return DRAGDROP_S_DROP;
-        }
-        return S_OK;
-    }
-    STDMETHODIMP GiveFeedback(__unused DWORD dwEffect) override { return DRAGDROP_S_USEDEFAULTCURSORS; }
-};
-
-// Drop source that paints a proportional thumbnail via ImageList_BeginDrag
-// (IDragSourceHelper does not show a drag image for our custom IDataObject).
-class ImageDropSource : public IDropSource {
-    AtomicInt refCount = 1;
-    HIMAGELIST himl = nullptr;
-    bool dragStarted = false;
-
-  public:
-    explicit ImageDropSource(HIMAGELIST list) : himl(list) {}
-    ~ImageDropSource() {
-        EndImageListDrag();
-        if (himl) {
-            ImageList_Destroy(himl);
-            himl = nullptr;
-        }
-    }
-
-    bool BeginImageListDrag(int hotX, int hotY) {
-        if (!himl) {
-            return false;
-        }
-        if (!ImageList_BeginDrag(himl, 0, hotX, hotY)) {
-            return false;
-        }
-        Point pt = GetCursorPosition();
-        // Desktop HWND so the drag image is not clipped to our canvas
-        if (!ImageList_DragEnter(GetDesktopWindow(), pt.x, pt.y)) {
-            ImageList_EndDrag();
-            return false;
-        }
-        dragStarted = true;
-        return true;
-    }
-
-    void EndImageListDrag() {
-        if (!dragStarted) {
-            return;
-        }
-        ImageList_DragLeave(GetDesktopWindow());
-        ImageList_EndDrag();
-        dragStarted = false;
-    }
-
-    STDMETHODIMP QueryInterface(REFIID riid, void** ppv) override {
-        if (riid == IID_IUnknown || riid == IID_IDropSource) {
-            *ppv = this;
-            AddRef();
-            return S_OK;
-        }
-        *ppv = nullptr;
-        return E_NOINTERFACE;
-    }
-    ULONG STDMETHODCALLTYPE AddRef() override { return AtomicIntInc(&refCount); }
-    ULONG STDMETHODCALLTYPE Release() override {
-        LONG r = InterlockedDecrement(&refCount);
-        if (r == 0) {
-            delete this;
-        }
-        return r;
-    }
-    STDMETHODIMP QueryContinueDrag(BOOL fEscapePressed, DWORD grfKeyState) override {
-        if (fEscapePressed) {
-            return DRAGDROP_S_CANCEL;
-        }
-        if (!(grfKeyState & MK_LBUTTON)) {
-            return DRAGDROP_S_DROP;
-        }
-        return S_OK;
-    }
-    STDMETHODIMP GiveFeedback(__unused DWORD dwEffect) override {
-        if (dragStarted) {
-            Point pt = GetCursorPosition();
-            ImageList_DragMove(pt.x, pt.y);
-            // S_OK: we supply the drag visual via ImageList (not the OLE default cursor)
-            return S_OK;
-        }
-        return DRAGDROP_S_USEDEFAULTCURSORS;
-    }
-};
-
-class SimpleEnumFormatEtc : public IEnumFORMATETC {
-    AtomicInt refCount = 1;
-    const FORMATETC* formats = nullptr;
-    ULONG count = 0;
-    ULONG index = 0;
-
-  public:
-    SimpleEnumFormatEtc(const FORMATETC* fmts, ULONG n) : formats(fmts), count(n) {}
-
-    STDMETHODIMP QueryInterface(REFIID riid, void** ppv) override {
-        if (riid == IID_IUnknown || riid == IID_IEnumFORMATETC) {
-            *ppv = this;
-            AddRef();
-            return S_OK;
-        }
-        *ppv = nullptr;
-        return E_NOINTERFACE;
-    }
-    ULONG STDMETHODCALLTYPE AddRef() override { return AtomicIntInc(&refCount); }
-    ULONG STDMETHODCALLTYPE Release() override {
-        LONG r = InterlockedDecrement(&refCount);
-        if (r == 0) {
-            delete this;
-        }
-        return r;
-    }
-
-    STDMETHODIMP Next(ULONG celt, FORMATETC* rgelt, ULONG* pceltFetched) override {
-        if (!rgelt) {
-            return E_POINTER;
-        }
-        ULONG fetched = 0;
-        while (fetched < celt && index < count) {
-            rgelt[fetched++] = formats[index++];
-        }
-        if (pceltFetched) {
-            *pceltFetched = fetched;
-        }
-        return fetched == celt ? S_OK : S_FALSE;
-    }
-    STDMETHODIMP Skip(ULONG celt) override {
-        if (index + celt < count) {
-            index += celt;
-            return S_OK;
-        }
-        index = count;
-        return S_FALSE;
-    }
-    STDMETHODIMP Reset() override {
-        index = 0;
-        return S_OK;
-    }
-    STDMETHODIMP Clone(IEnumFORMATETC** ppEnum) override {
-        if (!ppEnum) {
-            return E_POINTER;
-        }
-        auto* e = new SimpleEnumFormatEtc(formats, count);
-        e->index = index;
-        *ppEnum = e;
-        return S_OK;
-    }
-};
-
-class TextDataObject : public IDataObject {
-    AtomicInt refCount = 1;
-    HGLOBAL hText = nullptr;
-
-  public:
-    explicit TextDataObject(WStr text) {
-        if (!text) {
-            return;
-        }
-        size_t cb = (size_t)(text.len + 1) * sizeof(WCHAR);
-        hText = GlobalAlloc(GMEM_MOVEABLE, cb);
-        if (hText) {
-            void* p = GlobalLock(hText);
-            if (p) {
-                memcpy(p, text.s, text.len * sizeof(WCHAR));
-                ((WCHAR*)p)[text.len] = 0;
-                GlobalUnlock(hText);
-            } else {
-                GlobalFree(hText);
-                hText = nullptr;
-            }
-        }
-    }
-    ~TextDataObject() {
-        if (hText) {
-            GlobalFree(hText);
-        }
-    }
-
-    STDMETHODIMP QueryInterface(REFIID riid, void** ppv) override {
-        if (riid == IID_IUnknown || riid == IID_IDataObject) {
-            *ppv = this;
-            AddRef();
-            return S_OK;
-        }
-        *ppv = nullptr;
-        return E_NOINTERFACE;
-    }
-    ULONG STDMETHODCALLTYPE AddRef() override { return AtomicIntInc(&refCount); }
-    ULONG STDMETHODCALLTYPE Release() override {
-        LONG r = InterlockedDecrement(&refCount);
-        if (r == 0) {
-            delete this;
-        }
-        return r;
-    }
-
-    STDMETHODIMP GetData(FORMATETC* pFE, STGMEDIUM* pMedium) override {
-        if (!hText) {
-            return E_UNEXPECTED;
-        }
-        if (pFE->cfFormat != CF_UNICODETEXT || !(pFE->tymed & TYMED_HGLOBAL)) {
-            return DV_E_FORMATETC;
-        }
-        size_t cb = GlobalSize(hText);
-        HGLOBAL hCopy = GlobalAlloc(GMEM_MOVEABLE, cb);
-        if (!hCopy) {
-            return E_OUTOFMEMORY;
-        }
-        void* src = GlobalLock(hText);
-        void* dst = GlobalLock(hCopy);
-        if (!src || !dst) {
-            if (src) {
-                GlobalUnlock(hText);
-            }
-            if (dst) {
-                GlobalUnlock(hCopy);
-            }
-            GlobalFree(hCopy);
-            return E_OUTOFMEMORY;
-        }
-        memcpy(dst, src, cb);
-        GlobalUnlock(hCopy);
-        GlobalUnlock(hText);
-        pMedium->tymed = TYMED_HGLOBAL;
-        pMedium->hGlobal = hCopy;
-        pMedium->pUnkForRelease = nullptr;
-        return S_OK;
-    }
-    STDMETHODIMP GetDataHere(__unused FORMATETC* pFE, __unused STGMEDIUM* pMed) override { return E_NOTIMPL; }
-    STDMETHODIMP QueryGetData(FORMATETC* pFE) override {
-        if (pFE->cfFormat == CF_UNICODETEXT && (pFE->tymed & TYMED_HGLOBAL)) {
-            return S_OK;
-        }
-        return DV_E_FORMATETC;
-    }
-    STDMETHODIMP GetCanonicalFormatEtc(__unused FORMATETC* pIn, FORMATETC* pOut) override {
-        pOut->ptd = nullptr;
-        return E_NOTIMPL;
-    }
-    STDMETHODIMP SetData(__unused FORMATETC* pFE, __unused STGMEDIUM* pMed, __unused BOOL fRelease) override {
-        return E_NOTIMPL;
-    }
-    STDMETHODIMP EnumFormatEtc(__unused DWORD dwDirection, __unused IEnumFORMATETC** ppEnum) override {
-        return E_NOTIMPL;
-    }
-    STDMETHODIMP DAdvise(__unused FORMATETC* pFE, __unused DWORD advf, __unused IAdviseSink* pAdvSink,
-                         __unused DWORD* pdwConn) override {
-        return E_NOTIMPL;
-    }
-    STDMETHODIMP DUnadvise(__unused DWORD dwConn) override { return E_NOTIMPL; }
-    STDMETHODIMP EnumDAdvise(__unused IEnumSTATDATA** ppEnumAdvise) override { return E_NOTIMPL; }
-};
-
-static bool IsPointInSelection(MainWindow* win, Point pt) {
-    WindowTab* tab = win->CurrentTab();
-    if (!tab || !tab->selectionOnPage) {
-        return false;
-    }
-    DisplayModel* dm = win->AsFixed();
-    if (!dm) {
-        return false;
-    }
-    for (SelectionOnPage& sel : *tab->selectionOnPage) {
-        Rect r = sel.GetRect(dm);
-        if (r.Contains(pt)) {
-            return true;
-        }
-    }
-    return false;
-}
-
-// data object of the most recent drag-out, kept connected because cross-process
-// drop targets can still extract data after DoDragDrop returns (e.g. Explorer
-// fetches CFSTR_FILECONTENTS after IDropTarget::Drop returns)
-static IDataObject* gLastDragDataObj = nullptr;
-
-// DoDragDrop marshals the data object (CoMarshalInterface) for cross-process
-// targets and never releases the stub's references, not even in
-// OleUninitialize, which would leak the object. Disconnecting right after
-// DoDragDrop returns breaks targets that extract data after Drop() returns,
-// so we keep the object connected until the next drag-out or app exit.
-void DisconnectLastDragDataObject() {
-    if (!gLastDragDataObj) {
-        return;
-    }
-    CoDisconnectObject(gLastDragDataObj, 0);
-    gLastDragDataObj->Release();
-    gLastDragDataObj = nullptr;
-}
-
-static void FinishDragDrop(IDataObject* dataObj) {
-    DisconnectLastDragDataObject();
-    gLastDragDataObj = dataObj; // transfers our reference
-}
-
 static void StartTextDragDrop(MainWindow* win) {
     WindowTab* tab = win->CurrentTab();
     bool isTextOnly = false;
-    TempStr text = GetSelectedTextTemp(tab, "\r\n", isTextOnly);
+    TempStr text = GetSelectedTextTemp(tab, StrL("\r\n"), isTextOnly);
     if (len(text) == 0) {
         return;
     }
@@ -565,336 +148,13 @@ static void StartTextDragDrop(MainWindow* win) {
     FinishDragDrop(dataObj);
 }
 
-// encode HBITMAP to PNG in memory using GDI+ IStream
-static HGLOBAL EncodeBitmapToPngGlobal(HBITMAP hbmp) {
-    Gdiplus::Bitmap gdipBmp(hbmp, nullptr);
-    if (gdipBmp.GetLastStatus() != Gdiplus::Ok) {
-        return nullptr;
-    }
-    CLSID pngClsid = GetGdiPlusEncoderClsid(L"image/png");
-    IStream* stream = nullptr;
-    HRESULT hr = CreateStreamOnHGlobal(nullptr, FALSE, &stream);
-    if (FAILED(hr) || !stream) {
-        return nullptr;
-    }
-    Gdiplus::Status status = gdipBmp.Save(stream, &pngClsid, nullptr);
-    HGLOBAL hMem = nullptr;
-    if (status == Gdiplus::Ok) {
-        GetHGlobalFromStream(stream, &hMem);
-    }
-    stream->Release();
-    if (status != Gdiplus::Ok) {
-        return nullptr;
-    }
-    return hMem;
-}
-
-// IDataObject that provides an image as a virtual file (CFSTR_FILEDESCRIPTOR + CFSTR_FILECONTENTS)
-// without creating any temporary files on disk.
-class ImageDataObject : public IDataObject {
-    AtomicInt refCount = 1;
-    HGLOBAL hPngData = nullptr; // PNG-encoded image data
-    size_t pngSize = 0;
-    UINT cfFileDescriptor = 0;
-    UINT cfFileContents = 0;
-    UINT cfPreferredDropEffect = 0;
-    FORMATETC fmts[3]{};
-    ULONG fmtCount = 0;
-
-    bool QueryFormatSupported(FORMATETC* pFE) const {
-        for (ULONG i = 0; i < fmtCount; i++) {
-            const FORMATETC& fmt = fmts[i];
-            if (pFE->cfFormat != fmt.cfFormat) {
-                continue;
-            }
-            if (fmt.lindex >= 0 && pFE->lindex != fmt.lindex) {
-                continue;
-            }
-            if (pFE->tymed & fmt.tymed) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-  public:
-    explicit ImageDataObject(HGLOBAL hPng) {
-        hPngData = hPng;
-        pngSize = GlobalSize(hPng);
-        cfFileDescriptor = RegisterClipboardFormatW(CFSTR_FILEDESCRIPTORW);
-        cfFileContents = RegisterClipboardFormatW(CFSTR_FILECONTENTS);
-        cfPreferredDropEffect = RegisterClipboardFormatW(L"Preferred DropEffect");
-
-        fmts[0] = {(CLIPFORMAT)cfFileDescriptor, nullptr, DVASPECT_CONTENT, -1, TYMED_HGLOBAL};
-        fmts[1] = {(CLIPFORMAT)cfFileContents, nullptr, DVASPECT_CONTENT, 0, TYMED_ISTREAM | TYMED_HGLOBAL};
-        fmts[2] = {(CLIPFORMAT)cfPreferredDropEffect, nullptr, DVASPECT_CONTENT, -1, TYMED_HGLOBAL};
-        fmtCount = 3;
-    }
-    ~ImageDataObject() {
-        if (hPngData) {
-            GlobalFree(hPngData);
-        }
-    }
-
-    STDMETHODIMP QueryInterface(REFIID riid, void** ppv) override {
-        if (riid == IID_IUnknown || riid == IID_IDataObject) {
-            *ppv = this;
-            AddRef();
-            return S_OK;
-        }
-        *ppv = nullptr;
-        return E_NOINTERFACE;
-    }
-    ULONG STDMETHODCALLTYPE AddRef() override { return AtomicIntInc(&refCount); }
-    ULONG STDMETHODCALLTYPE Release() override {
-        LONG r = InterlockedDecrement(&refCount);
-        if (r == 0) {
-            delete this;
-        }
-        return r;
-    }
-
-    STDMETHODIMP GetData(FORMATETC* pFE, STGMEDIUM* pMedium) override {
-        if (!hPngData) {
-            return E_UNEXPECTED;
-        }
-
-        // CFSTR_FILEDESCRIPTORW: describe one virtual file "image.png"
-        if (pFE->cfFormat == cfFileDescriptor && (pFE->tymed & TYMED_HGLOBAL)) {
-            size_t cb = offsetof(FILEGROUPDESCRIPTORW, fgd) + sizeof(FILEDESCRIPTORW);
-            HGLOBAL h = GlobalAlloc(GMEM_MOVEABLE | GMEM_ZEROINIT, cb);
-            if (!h) {
-                return E_OUTOFMEMORY;
-            }
-            auto* fgd = (FILEGROUPDESCRIPTORW*)GlobalLock(h);
-            if (!fgd) {
-                GlobalFree(h);
-                return E_OUTOFMEMORY;
-            }
-            fgd->cItems = 1;
-            fgd->fgd[0].dwFlags = FD_FILESIZE | FD_ATTRIBUTES;
-            fgd->fgd[0].dwFileAttributes = FILE_ATTRIBUTE_NORMAL;
-            fgd->fgd[0].nFileSizeLow = (DWORD)pngSize;
-            fgd->fgd[0].nFileSizeHigh = 0;
-            wstr::BufSet(WStr(fgd->fgd[0].cFileName, MAX_PATH), WStrL(L"image.png"));
-            GlobalUnlock(h);
-            pMedium->tymed = TYMED_HGLOBAL;
-            pMedium->hGlobal = h;
-            pMedium->pUnkForRelease = nullptr;
-            return S_OK;
-        }
-
-        // CFSTR_FILECONTENTS: provide the PNG data as an IStream or HGLOBAL
-        if (pFE->cfFormat == cfFileContents && pFE->lindex == 0) {
-            if (pFE->tymed & TYMED_HGLOBAL) {
-                HGLOBAL hCopy = GlobalAlloc(GMEM_MOVEABLE, pngSize);
-                if (!hCopy) {
-                    return E_OUTOFMEMORY;
-                }
-                void* src = GlobalLock(hPngData);
-                void* dst = GlobalLock(hCopy);
-                if (!src || !dst) {
-                    if (src) {
-                        GlobalUnlock(hPngData);
-                    }
-                    if (dst) {
-                        GlobalUnlock(hCopy);
-                    }
-                    GlobalFree(hCopy);
-                    return E_OUTOFMEMORY;
-                }
-                memcpy(dst, src, pngSize);
-                GlobalUnlock(hCopy);
-                GlobalUnlock(hPngData);
-                pMedium->tymed = TYMED_HGLOBAL;
-                pMedium->hGlobal = hCopy;
-                pMedium->pUnkForRelease = nullptr;
-                return S_OK;
-            }
-            if (pFE->tymed & TYMED_ISTREAM) {
-                IStream* stream = nullptr;
-                HRESULT hr = CreateStreamOnHGlobal(nullptr, TRUE, &stream);
-                if (FAILED(hr) || !stream) {
-                    return E_OUTOFMEMORY;
-                }
-                void* src = GlobalLock(hPngData);
-                if (!src) {
-                    stream->Release();
-                    return E_OUTOFMEMORY;
-                }
-                ULONG written = 0;
-                stream->Write(src, (ULONG)pngSize, &written);
-                GlobalUnlock(hPngData);
-                LARGE_INTEGER zero{};
-                stream->Seek(zero, STREAM_SEEK_SET, nullptr);
-                pMedium->tymed = TYMED_ISTREAM;
-                pMedium->pstm = stream;
-                pMedium->pUnkForRelease = nullptr;
-                return S_OK;
-            }
-        }
-
-        if (pFE->cfFormat == cfPreferredDropEffect && (pFE->tymed & TYMED_HGLOBAL)) {
-            HGLOBAL h = GlobalAlloc(GMEM_MOVEABLE, sizeof(DWORD));
-            if (!h) {
-                return E_OUTOFMEMORY;
-            }
-            auto* effect = (DWORD*)GlobalLock(h);
-            if (!effect) {
-                GlobalFree(h);
-                return E_OUTOFMEMORY;
-            }
-            *effect = DROPEFFECT_COPY;
-            GlobalUnlock(h);
-            pMedium->tymed = TYMED_HGLOBAL;
-            pMedium->hGlobal = h;
-            pMedium->pUnkForRelease = nullptr;
-            return S_OK;
-        }
-
-        return DV_E_FORMATETC;
-    }
-    STDMETHODIMP GetDataHere(__unused FORMATETC* pFE, __unused STGMEDIUM* pMed) override { return E_NOTIMPL; }
-    STDMETHODIMP QueryGetData(FORMATETC* pFE) override { return QueryFormatSupported(pFE) ? S_OK : DV_E_FORMATETC; }
-    STDMETHODIMP GetCanonicalFormatEtc(__unused FORMATETC* pIn, FORMATETC* pOut) override {
-        pOut->ptd = nullptr;
-        return E_NOTIMPL;
-    }
-    STDMETHODIMP SetData(__unused FORMATETC* pFE, __unused STGMEDIUM* pMed, __unused BOOL fRelease) override {
-        return E_NOTIMPL;
-    }
-    STDMETHODIMP EnumFormatEtc(DWORD dwDirection, IEnumFORMATETC** ppEnum) override {
-        if (!ppEnum) {
-            return E_POINTER;
-        }
-        if (dwDirection != DATADIR_GET) {
-            return E_NOTIMPL;
-        }
-        *ppEnum = new SimpleEnumFormatEtc(fmts, fmtCount);
-        return S_OK;
-    }
-    STDMETHODIMP DAdvise(__unused FORMATETC* pFE, __unused DWORD advf, __unused IAdviseSink* pAdvSink,
-                         __unused DWORD* pdwConn) override {
-        return E_NOTIMPL;
-    }
-    STDMETHODIMP DUnadvise(__unused DWORD dwConn) override { return E_NOTIMPL; }
-    STDMETHODIMP EnumDAdvise(__unused IEnumSTATDATA** ppEnumAdvise) override { return E_NOTIMPL; }
-};
-
 // Longest edge of the proportional drag-out thumbnail (logical px; DPI-scaled).
 constexpr int kDragImageThumbnailSize = 220;
 
-// Proportional drag thumbnail (longest edge capped), Chrome-like.
-// GDI+ scales the source (StretchBlt on some DIB/mapped bitmaps leaves pure white).
-// Top-down 32bpp DIB with a 1px border so light pages stay visible. Caller owns HBITMAP.
-static HBITMAP CreateProportionalDragThumbnail(HBITMAP src, int maxEdge) {
-    if (!src || maxEdge < 16) {
-        return nullptr;
-    }
-    BITMAP bm{};
-    if (!GetObject(src, sizeof(bm), &bm) || bm.bmWidth <= 0 || bm.bmHeight <= 0) {
-        return nullptr;
-    }
-    int sw = bm.bmWidth;
-    int sh = bm.bmHeight;
-    int maxDim = sw > sh ? sw : sh;
-    int dw = sw;
-    int dh = sh;
-    if (maxDim > maxEdge) {
-        dw = (int)((i64)sw * maxEdge / maxDim);
-        dh = (int)((i64)sh * maxEdge / maxDim);
-        dw = std::max(dw, 1);
-        dh = std::max(dh, 1);
-    }
-
-    Gdiplus::Bitmap srcGdip(src, nullptr);
-    if (srcGdip.GetLastStatus() != Gdiplus::Ok) {
-        return nullptr;
-    }
-    Gdiplus::Bitmap scaled(dw, dh, PixelFormat32bppARGB);
-    if (scaled.GetLastStatus() != Gdiplus::Ok) {
-        return nullptr;
-    }
-    {
-        Gdiplus::Graphics g(&scaled);
-        g.SetInterpolationMode(Gdiplus::InterpolationModeHighQualityBicubic);
-        g.SetPixelOffsetMode(Gdiplus::PixelOffsetModeHighQuality);
-        g.Clear(Gdiplus::Color(255, 255, 255, 255));
-        g.DrawImage(&srcGdip, 0, 0, dw, dh);
-        Gdiplus::Pen border(Gdiplus::Color(255, 60, 60, 60), 1.0f);
-        g.DrawRectangle(&border, 0, 0, dw - 1, dh - 1);
-    }
-
-    Gdiplus::BitmapData bd{};
-    Gdiplus::Rect lockRc(0, 0, dw, dh);
-    if (scaled.LockBits(&lockRc, Gdiplus::ImageLockModeRead, PixelFormat32bppARGB, &bd) != Gdiplus::Ok) {
-        return nullptr;
-    }
-
-    BITMAPINFO bmi{};
-    bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-    bmi.bmiHeader.biWidth = dw;
-    bmi.bmiHeader.biHeight = -dh; // top-down
-    bmi.bmiHeader.biPlanes = 1;
-    bmi.bmiHeader.biBitCount = 32;
-    bmi.bmiHeader.biCompression = BI_RGB;
-
-    void* bits = nullptr;
-    HDC screenDc = GetDC(nullptr);
-    HBITMAP dib = screenDc ? CreateDIBSection(screenDc, &bmi, DIB_RGB_COLORS, &bits, nullptr, 0) : nullptr;
-    if (screenDc) {
-        ReleaseDC(nullptr, screenDc);
-    }
-    if (!dib || !bits) {
-        scaled.UnlockBits(&bd);
-        if (dib) {
-            DeleteObject(dib);
-        }
-        return nullptr;
-    }
-
-    auto* dst = (BYTE*)bits;
-    const auto* srcRow = (const BYTE*)bd.Scan0;
-    for (int y = 0; y < dh; y++) {
-        const auto* s = srcRow + ((size_t)y * bd.Stride);
-        auto* d = dst + ((size_t)y * dw * 4);
-        for (int x = 0; x < dw; x++) {
-            // GDI+ 32bppARGB is B,G,R,A in memory on Windows; full opacity
-            d[0] = s[0];
-            d[1] = s[1];
-            d[2] = s[2];
-            d[3] = 0xFF;
-            s += 4;
-            d += 4;
-        }
-    }
-    scaled.UnlockBits(&bd);
-    return dib;
-}
-
-// Build an imagelist from the thumbnail for ImageList_BeginDrag.
-// Takes ownership of hbmp (always destroyed before return).
-static HIMAGELIST CreateDragImageList(HBITMAP hbmp) {
-    if (!hbmp) {
-        return nullptr;
-    }
-    BITMAP bm{};
-    if (!GetObject(hbmp, sizeof(bm), &bm) || bm.bmWidth <= 0 || bm.bmHeight <= 0) {
-        DeleteObject(hbmp);
-        return nullptr;
-    }
-    HIMAGELIST himl = ImageList_Create(bm.bmWidth, bm.bmHeight, ILC_COLOR32, 1, 1);
-    if (!himl) {
-        DeleteObject(hbmp);
-        return nullptr;
-    }
-    int idx = ImageList_Add(himl, hbmp, nullptr);
-    DeleteObject(hbmp);
-    if (idx < 0) {
-        ImageList_Destroy(himl);
-        return nullptr;
-    }
-    return himl;
+// page elements are freed when the page content changes (redaction, image
+// replace): a pointer kept across that must not be used
+static int ElementsGen(DisplayModel* dm) {
+    return dm ? AtomicIntGet(&dm->GetEngine()->elementsGeneration) : 0;
 }
 
 static void StartImageDragDrop(MainWindow* win) {
@@ -903,7 +163,7 @@ static void StartImageDragDrop(MainWindow* win) {
         return;
     }
     IPageElement* el = win->imageDragElement;
-    if (!el) {
+    if (!el || win->imageDragElementGen != ElementsGen(dm)) {
         return;
     }
     RenderedBitmap* rb = dm->GetEngine()->GetImageForPageElement(el);
@@ -963,22 +223,6 @@ static void StartImageDragDrop(MainWindow* win) {
     FinishDragDrop(dataObj);
 }
 
-// Resize handle positions that used in resizing annotations
-enum class ResizeHandle {
-    None = 0,
-    TopLeft,
-    Top,
-    TopRight,
-    Right,
-    BottomRight,
-    Bottom,
-    BottomLeft,
-    Left
-};
-
-// Size of resize handle hit area (in pixels)
-constexpr int kResizeHandleSize = 8;
-
 // Smooth wheel scrolling: frame-rate–independent exponential chase of the
 // target offset (common browser-style "lerp toward destination").
 //
@@ -997,16 +241,55 @@ static int gDeltaPerLine = 0;
 static bool gWheelMsgRedirect = false;
 static bool gInMouseWheelScroll = false;
 
-static int ScrollLineAmount(int configuredAmount) {
-    return configuredAmount > 0 ? configuredAmount : 16;
-}
-
-#if defined(DEBUG)
+#if IS_DEBUG
 bool Canvas_UnitTestScrollLineAmount() {
     return ScrollLineAmount(16) == 16 && ScrollLineAmount(30) == 30 && ScrollLineAmount(1) == 1 &&
            ScrollLineAmount(0) == 16 && ScrollLineAmount(-1) == 16;
 }
 #endif
+
+void CanvasSetCapture(MainWindow* win, bool capture) {
+    if (!win->hwndCanvas) {
+        return;
+    }
+    if (capture) {
+        SetCapture(win->hwndCanvas);
+        return;
+    }
+    if (GetCapture() == win->hwndCanvas) {
+        ReleaseCapture();
+    }
+}
+
+void CanvasStartTimer(MainWindow* win, int id, int ms) {
+    SetTimer(win->hwndCanvas, id, ms, nullptr);
+}
+
+void CanvasKillTimer(MainWindow* win, int id) {
+    KillTimer(win->hwndCanvas, id);
+}
+
+void CanvasTrackMouseLeave(MainWindow* win) {
+    if (win->hwndCanvas) {
+        TrackMouseLeave(win->hwndCanvas);
+    }
+}
+
+void CanvasRelayoutAutoScroll(MainWindow* win) {
+    if (win && win->hwndCanvas) {
+        ReadingAutoScrollRelayout(win->hwndCanvas);
+    }
+}
+
+// the rect's top-left in screen pixels; size unchanged
+bool CanvasClientToScreen(MainWindow* win, Rect r, Rect& out) {
+    if (!win->hwndCanvas) {
+        return false;
+    }
+    Point p = HwndClientToScreen(win->hwndCanvas, r.TL());
+    out = Rect(p.x, p.y, r.dx, r.dy);
+    return true;
+}
 
 static void StopSmoothScroll(MainWindow* win) {
     if (!win) {
@@ -1077,10 +360,10 @@ __unused static Str scrollMsgStr(USHORT msg) {
             return StrL("SB_LINEDOWN");
         case SB_LINEUP:
             return StrL("SB_LINEUP");
-        case SB_HALF_PAGEDOWN:
-            return StrL("SB_HALF_PAGEDOWN");
-        case SB_HALF_PAGEUP:
-            return StrL("SB_HALF_PAGEUP");
+        case kSbHalfPageDown:
+            return StrL("kSbHalfPageDown");
+        case kSbHalfPageUp:
+            return StrL("kSbHalfPageUp");
         case SB_PAGEDOWN:
             return StrL("SB_PAGEDOWN");
         case SB_PAGEUP:
@@ -1090,7 +373,9 @@ __unused static Str scrollMsgStr(USHORT msg) {
 }
 
 static void OnVScroll(MainWindow* win, WPARAM wp) {
-    ReportIf(!win->AsFixed());
+    if (ReportIf(!win->AsFixed())) {
+        return;
+    }
 
     // Use overlay state whenever overlay mode is on — including SmartInvisible
     // (auto-hidden). Requiring IsOverlayScrollbarVisible() left keyboard scroll
@@ -1108,16 +393,16 @@ static void OnVScroll(MainWindow* win, WPARAM wp) {
 
     USHORT msg = LOWORD(wp);
     // for next-file-in-folder tip: scroll intent after handling the action
-    bool scrollDown = (msg == SB_LINEDOWN || msg == SB_PAGEDOWN || msg == SB_HALF_PAGEDOWN || msg == SB_BOTTOM);
-    bool scrollUp = (msg == SB_LINEUP || msg == SB_PAGEUP || msg == SB_HALF_PAGEUP || msg == SB_TOP);
+    bool scrollDown = (msg == SB_LINEDOWN || msg == SB_PAGEDOWN || msg == kSbHalfPageDown || msg == SB_BOTTOM);
+    bool scrollUp = (msg == SB_LINEUP || msg == SB_PAGEUP || msg == kSbHalfPageUp || msg == SB_TOP);
     auto* ctrl = win->ctrl;
     bool dmIsSinglePage = (ctrl->GetDisplayMode() == DisplayMode::SinglePage);
     // scrollbarInSinglePage is false by default
     // if true, we show scrollbar in single page mode and make its position correspond to page number, so user can
     // scroll through pages using scrollbar even in single page mode
-    bool singlePageWithScrollbar = gGlobalPrefs->scrollbarInSinglePage && dmIsSinglePage;
+    bool singlePageWithScrollbar = gSettings->scrollbarInSinglePage && dmIsSinglePage;
 
-    int lineHeight = DpiScale(ScrollLineAmount(gGlobalPrefs->scrollLineAmount));
+    int lineHeight = DpiScale(ScrollLineAmount(gSettings->scrollLineAmount));
     bool isFitPage = (kZoomFitPage == ctrl->GetZoomVirtual());
     if (!IsContinuous(ctrl->GetDisplayMode()) && isFitPage) {
         lineHeight = 1;
@@ -1143,10 +428,10 @@ static void OnVScroll(MainWindow* win, WPARAM wp) {
             case SB_LINEDOWN:
                 targetPage = std::min(ctrl->PageCount(), targetPage + 1);
                 break;
-            case SB_HALF_PAGEUP:
+            case kSbHalfPageUp:
                 targetPage = std::max(1, targetPage - 1);
                 break;
-            case SB_HALF_PAGEDOWN:
+            case kSbHalfPageDown:
                 targetPage = std::min(ctrl->PageCount(), targetPage + 1);
                 break;
             case SB_PAGEUP:
@@ -1171,17 +456,89 @@ static void OnVScroll(MainWindow* win, WPARAM wp) {
         return;
     }
 
+    // Read Columns: line and page steps go column by column; the thumb still
+    // drags anywhere
+    DisplayModel* dm = win->AsFixed();
+    if (dm && dm->ReadsColumnsNow()) {
+        int step = 0;
+        int page = (int)si.nPage;
+        switch (msg) {
+            case SB_LINEUP:
+                step = -lineHeight;
+                break;
+            case SB_LINEDOWN:
+                step = lineHeight;
+                break;
+            case SB_PAGEUP:
+                step = -page;
+                break;
+            case SB_PAGEDOWN:
+                step = page;
+                break;
+            case kSbHalfPageUp:
+                step = -page / 2;
+                break;
+            case kSbHalfPageDown:
+                step = page / 2;
+                break;
+        }
+        if (step != 0) {
+            dm->ScrollYBy(step, true);
+            ReadAloudOnUserViewChanged(win);
+            OnDocumentVerticalScrollIntent(win, step > 0);
+            return;
+        }
+    }
+
+    // Page Up/Down follow the rotated stack. Arrow keys stay on this scrollbar.
+    if (dm && dm->ScrollFollowsRotation() && msg != SB_LINEUP && msg != SB_LINEDOWN && msg != SB_THUMBTRACK) {
+        bool handled = true;
+        int span = dm->ContentScrollHorizontal() ? dm->GetViewPort().dx : dm->GetViewPort().dy;
+        switch (msg) {
+            case SB_TOP:
+                dm->ScrollContentToEdge(false);
+                break;
+            case SB_BOTTOM:
+                dm->ScrollContentToEdge(true);
+                break;
+            case SB_PAGEUP:
+                dm->ScrollContentBy(-span, false);
+                break;
+            case SB_PAGEDOWN:
+                dm->ScrollContentBy(span, false);
+                break;
+            case kSbHalfPageUp:
+                dm->ScrollContentBy(-span / 2, false);
+                break;
+            case kSbHalfPageDown:
+                dm->ScrollContentBy(span / 2, false);
+                break;
+            default:
+                handled = false;
+                break;
+        }
+        if (handled) {
+            ReadAloudOnUserViewChanged(win);
+            if (scrollDown || scrollUp) {
+                OnDocumentVerticalScrollIntent(win, scrollDown);
+            }
+            return;
+        }
+    }
+
     // Original logic for other display modes
 
-    bool smoothWheel = gGlobalPrefs->smoothScroll && gInMouseWheelScroll;
+    // SmoothScroll eases wheel input and arrow-key / scrollbar line steps
+    // (issue #4662). Page-up/down and thumb stay instant.
+    bool isLineScroll = (msg == SB_LINEUP || msg == SB_LINEDOWN);
+    bool useSmoothScroll = gSettings->smoothScroll && (gInMouseWheelScroll || isLineScroll);
     // While a smooth scroll is in flight the animation moves the view a bit at a
     // time, and ScrollYTo -> UpdateScrollbars keeps nPos on that lagging
     // position. Stepping from it discards the distance still to be travelled, so
-    // a fast stream of wheel events (touchpads send many small ones) advances
-    // only a fraction of what the same events do with SmoothScroll off
-    // (issue #5857). Step from the pending target instead, so wheel events
-    // accumulate the same total distance either way.
-    if (smoothWheel && win->scrollAnimActive) {
+    // a fast stream of wheel / key-repeat events advances only a fraction of
+    // what the same events do with SmoothScroll off (issue #5857). Step from
+    // the pending target instead, so they accumulate the same total distance.
+    if (useSmoothScroll && win->scrollAnimActive) {
         si.nPos = win->scrollTargetY;
     }
 
@@ -1201,10 +558,10 @@ static void OnVScroll(MainWindow* win, WPARAM wp) {
         case SB_LINEDOWN:
             si.nPos += lineHeight;
             break;
-        case SB_HALF_PAGEUP:
+        case kSbHalfPageUp:
             si.nPos -= halfPage;
             break;
-        case SB_HALF_PAGEDOWN:
+        case kSbHalfPageDown:
             si.nPos += halfPage;
             break;
         case SB_PAGEUP:
@@ -1225,16 +582,17 @@ static void OnVScroll(MainWindow* win, WPARAM wp) {
     bool showScrollbar = !ScrollbarsAreHidden();
     BOOL showWinScrollbar = showScrollbar && !overlayMode;
     BOOL showOverScrollbar = showScrollbar && useOverlay;
-    if (smoothWheel) {
+    if (useSmoothScroll) {
         // Don't hand the target to the scrollbar: the thumb would jump ahead of
         // the view and be pulled back by the next animation tick (which updates
         // it via ScrollYTo -> UpdateScrollbars as the view actually moves).
         // Clamp the way SetScrollInfo would have, so the target stays in range.
         int maxPos = si.nMax - (int)si.nPage + 1;
         si.nPos = limitValue(si.nPos, si.nMin, std::max(si.nMin, maxPos));
-        // Still reveal the thin smart bar on wheel input (without moving the
-        // thumb to the pending target). Mouse-move tracking alone is not enough
-        // when the user scrolls with the wheel while the cursor is still (#5859).
+        // Still reveal the thin smart bar on wheel / key input (without moving
+        // the thumb to the pending target). Mouse-move tracking alone is not
+        // enough when the user scrolls with the wheel while the cursor is still
+        // (#5859).
         if (showOverScrollbar) {
             OverlayScrollbarNotifyScroll(win->overlayScrollV);
         }
@@ -1249,10 +607,10 @@ static void OnVScroll(MainWindow* win, WPARAM wp) {
     // If the position has changed or we're dealing with a touchpad scroll event,
     // scroll the window and update it
     if (si.nPos != currPos || msg == SB_THUMBTRACK) {
-        if (smoothWheel) {
+        if (useSmoothScroll) {
             StartOrUpdateSmoothScrollY(win, si.nPos);
         } else {
-            // Keyboard / scrollbar / programmatic scroll, or SmoothScroll off: apply immediately.
+            // Page / thumb / programmatic scroll, or SmoothScroll off: apply immediately.
             StopSmoothScroll(win);
             win->AsFixed()->ScrollYTo(si.nPos);
             ReadAloudOnUserViewChanged(win);
@@ -1264,7 +622,9 @@ static void OnVScroll(MainWindow* win, WPARAM wp) {
 }
 
 static void OnHScroll(MainWindow* win, WPARAM wp) {
-    ReportIf(!win->AsFixed());
+    if (ReportIf(!win->AsFixed())) {
+        return;
+    }
 
     bool overlayMode = ScrollbarsUseOverlay();
     bool useOverlay = overlayMode && win->overlayScrollH;
@@ -1279,7 +639,7 @@ static void OnHScroll(MainWindow* win, WPARAM wp) {
 
     int currPos = si.nPos;
     USHORT msg = LOWORD(wp);
-    int lineAmount = DpiScale(ScrollLineAmount(gGlobalPrefs->scrollLineAmount));
+    int lineAmount = DpiScale(ScrollLineAmount(gSettings->scrollLineAmount));
     switch (msg) {
         case SB_LEFT:
             si.nPos = si.nMin;
@@ -1345,48 +705,6 @@ static void StartMouseDrag(MainWindow* win, int x, int y, bool right = false) {
     }
 }
 
-// Get the resize handle at the given point for the selected annotation
-static ResizeHandle GetResizeHandleAt(MainWindow* win, Point pt, Annotation* annot) {
-    if (!annot) {
-        return ResizeHandle::None;
-    }
-
-    DisplayModel* dm = win->AsFixed();
-    if (!dm) {
-        return ResizeHandle::None;
-    }
-
-    int pageNo = annot->pageNo;
-    if (!dm->PageVisible(pageNo)) {
-        return ResizeHandle::None;
-    }
-
-    Rect rect = dm->CvtToScreen(pageNo, GetRect(annot));
-    int hs = kResizeHandleSize;
-
-    bool nearLeft = pt.x >= rect.x - hs && pt.x <= rect.x + hs;
-    bool nearRight = pt.x >= rect.x + rect.dx - hs && pt.x <= rect.x + rect.dx + hs;
-    bool nearTop = pt.y >= rect.y - hs && pt.y <= rect.y + hs;
-    bool nearBottom = pt.y >= rect.y + rect.dy - hs && pt.y <= rect.y + rect.dy + hs;
-    bool betweenX = pt.x >= rect.x + hs && pt.x <= rect.x + rect.dx - hs;
-    bool betweenY = pt.y >= rect.y + hs && pt.y <= rect.y + rect.dy - hs;
-
-    // clang-format off
-    // corners have priority over edges
-    if (nearLeft  && nearTop)    return ResizeHandle::TopLeft;
-    if (nearRight && nearTop)    return ResizeHandle::TopRight;
-    if (nearRight && nearBottom) return ResizeHandle::BottomRight;
-    if (nearLeft  && nearBottom) return ResizeHandle::BottomLeft;
-    // edges
-    if (betweenX  && nearTop)    return ResizeHandle::Top;
-    if (nearRight && betweenY)   return ResizeHandle::Right;
-    if (betweenX  && nearBottom) return ResizeHandle::Bottom;
-    if (nearLeft  && betweenY)   return ResizeHandle::Left;
-    // clang-format on
-
-    return ResizeHandle::None;
-}
-
 // Get the appropriate cursor for a resize handle
 static LPWSTR GetCursorForResizeHandle(ResizeHandle handle) {
     switch (handle) {
@@ -1402,6 +720,10 @@ static LPWSTR GetCursorForResizeHandle(ResizeHandle handle) {
         case ResizeHandle::Left:
         case ResizeHandle::Right:
             return IDC_SIZEWE;
+        case ResizeHandle::LineStart:
+        case ResizeHandle::LineEnd:
+        case ResizeHandle::Vertex:
+            return IDC_SIZEALL;
         default:
             return IDC_ARROW;
     }
@@ -1435,12 +757,97 @@ static bool StopDraggingAnnotation(MainWindow* win, int x, int y, bool aborted) 
         // logf("prev rect: x=%.2f, y=%.2f, dx=%.2f, dy=%.2f\n", ar.x, ar.y, ar.dx, ar.dy);
         // logf(" new rect: x=%.2f, y=%.2f, dx=%.2f, dy=%.2f\n", r.x, r.y, r.dx, r.dy);
         SetRect(annot, r);
-        NotifyAnnotationsChanged(win->CurrentTab()->editAnnotsWindow);
+        NotifyAnnotationsChanged(win->CurrentTab());
         MainWindowRerender(win);
         ToolbarUpdateStateForWindow(win, true);
+        UpdateAnnotFilterToolbar(win);
     }
     return true;
 }
+
+// arrow keys nudge the selected annotation by a pixel, Shift+arrow by 10
+bool NudgeSelectedAnnotation(MainWindow* win, WPARAM key) {
+    constexpr int kNudgeStep = 1;
+    constexpr int kNudgeStepShift = 10;
+
+    Point dir;
+    switch (key) {
+        case VK_LEFT:
+            dir = {-1, 0};
+            break;
+        case VK_RIGHT:
+            dir = {1, 0};
+            break;
+        case VK_UP:
+            dir = {0, -1};
+            break;
+        case VK_DOWN:
+            dir = {0, 1};
+            break;
+        default:
+            return false;
+    }
+
+    WindowTab* tab = win ? win->CurrentTab() : nullptr;
+    DisplayModel* dm = win ? win->AsFixed() : nullptr;
+    Annotation* annot = tab ? tab->selectedAnnotation : nullptr;
+    if (!dm || !AnnotationIsLive(annot) || win->annotationBeingDragged) {
+        return false;
+    }
+    if (!AnnotationCanBeMoved(annot->type) || annot->type == AnnotationType::Widget) {
+        return false;
+    }
+
+    // the screen step as a page-space offset (handles zoom and rotation);
+    // moving in page space avoids rounding back to the old spot at odd zooms
+    int step = DpiScale(IsShiftPressed() ? kNudgeStepShift : kNudgeStep);
+    int pageNo = PageNo(annot);
+    RectF ar = GetRect(annot);
+    Point from = dm->CvtToScreen(pageNo, PointF{ar.x, ar.y});
+    Point to{from.x + (dir.x * step), from.y + (dir.y * step)};
+    if (dm->GetPageNoByPoint(to) != pageNo) {
+        return true;
+    }
+    PointF pFrom = dm->CvtFromScreen(from, pageNo);
+    PointF pTo = dm->CvtFromScreen(to, pageNo);
+    RectF r = ar;
+    r.x += pTo.x - pFrom.x;
+    r.y += pTo.y - pFrom.y;
+    SetRect(annot, r);
+
+    // the selection box and edit toolbar follow right away, over the old page
+    // bitmap; the page and the rest of the UI update once the keys pause
+    HwndInvalidate(win->hwndCanvas);
+    RepositionAnnotEditToolbar(win);
+    if (win->annotationNudgeTab != tab || win->annotationNudgePageNo != pageNo) {
+        FinishAnnotationNudge(win);
+    }
+    win->annotationNudgeTab = tab;
+    win->annotationNudgePageNo = pageNo;
+    SetTimer(win->hwndCanvas, kAnnotationNudgeTimerID, kAnnotationNudgeDelayMs, nullptr);
+    return true;
+}
+
+// the debounced half of NudgeSelectedAnnotation
+void FinishAnnotationNudge(MainWindow* win) {
+    if (!win || !win->annotationNudgeTab) {
+        return;
+    }
+    KillTimer(win->hwndCanvas, kAnnotationNudgeTimerID);
+    WindowTab* tab = win->annotationNudgeTab;
+    int pageNo = win->annotationNudgePageNo;
+    win->annotationNudgeTab = nullptr;
+    win->annotationNudgePageNo = 0;
+    // the tab may have been closed meanwhile
+    if (!VecContains(win->Tabs(), tab)) {
+        return;
+    }
+    RerenderTabPage(tab, pageNo);
+    NotifyAnnotationsChanged(tab);
+    ToolbarUpdateStateForWindow(win, true);
+}
+
+static void StopAutoScroll(MainWindow* win);
 
 static void StopMouseDrag(MainWindow* win, int x, int y, bool aborted) {
     if (GetCapture() != win->hwndCanvas) {
@@ -1464,11 +871,38 @@ static void StopMouseDrag(MainWindow* win, int x, int y, bool aborted) {
     win->MoveDocBy(drag.dx, -2 * drag.dy);
 }
 
+static bool StopAnnotationResize(MainWindow* win, bool aborted);
+
 void CancelDrag(MainWindow* win) {
+    if (PageGridDragActive()) {
+        PageGridDragCancel();
+        CanvasSetCapture(win, false);
+        SetCanvasCursor(win, IDC_ARROW);
+        return;
+    }
+    if (StopAnnotationResize(win, true)) {
+        win->mouseAction = MouseAction::None;
+        win->linkOnLastButtonDown = nullptr;
+        SetCanvasCursor(win, IDC_ARROW);
+        return;
+    }
     auto pt = win->dragPrevPos;
     auto [x, y] = pt;
-    StopMouseDrag(win, x, y, true);
+    // as ng: a selection ends as aborted, so a rectangle edit reverts
+    bool selecting = win->mouseAction == MouseAction::Selecting || win->mouseAction == MouseAction::SelectingText;
+    if (selecting && win->AsFixed()) {
+        OnSelectionStop(win, x, y, true);
+    } else {
+        StopMouseDrag(win, x, y, true);
+    }
     win->mouseAction = MouseAction::None;
+    // a press on selected text / an image waits for a move to start an OLE
+    // drag; without this a later button-less move would start one
+    win->dragStartPending = false;
+    win->textDragPending = false;
+    win->imageDragPending = false;
+    win->imageDragElement = nullptr;
+    win->imageDragPageNo = -1;
     win->linkOnLastButtonDown = nullptr;
     win->annotationBeingDragged = nullptr;
     win->annotationBeingResized = false;
@@ -1488,18 +922,18 @@ bool IsDragDistance(int x1, int x2, int y1, int y2) {
 }
 
 // Forward declaration
-static RectF CalculateResizedRect(MainWindow* win, int x, int y);
 
 // --- touch text selection (issue #538) --------------------------------------
 // Everything here logs under "touch:" so a session on a real touchscreen can be
 // read back from the log (run with -log -log-to-file <path>).
 
-// How long a finger has to hold still before it counts as a long press. The
-// gesture engine only reports a contact once it has decided it is a pan, and
-// the finger drifts while settling, so this is measured from when it comes to
-// rest rather than from touch-down -- which leaves a lot less time than the
-// second or so Windows' own press-and-hold takes.
-constexpr DWORD kTouchLongPressMs = 300;
+// How long a finger has to hold still before it counts as a long press.
+// 500ms is the usual touch long-press (Chrome, Android). 300ms was too easy
+// to trip while starting a scroll (issue #6006). The gesture engine only
+// reports a contact once it has decided it is a pan, and the finger drifts
+// while settling, so the GID_PAN path measures from when it comes to rest
+// rather than from touch-down.
+constexpr DWORD kTouchLongPressMs = 500;
 
 // How far from the word the press may land and still count as meaning it.
 constexpr int kTouchLongPressMaxDistDip = 40;
@@ -1528,6 +962,20 @@ static Str TouchSelHandleName(TouchSelHandle h) {
     }
 }
 
+// This contact is scrolling, so a later pause must not become a long press
+// (issue #6006).
+static void MarkTouchPanDidScroll(MainWindow* win) {
+    win->touchState.panDidScroll = true;
+    KillTimer(win->hwndCanvas, kTouchLongPressTimerID);
+}
+
+static void ResetTouchLongPress(MainWindow* win) {
+    win->touchState.longPressFired = false;
+    win->touchState.panMovedOnce = false;
+    win->touchState.panDidScroll = false;
+    win->touchLongPressDone = false;
+}
+
 // Dragging a touch selection handle: the other end stays put and the selection
 // is extended from it to wherever the finger is now.
 static void DragTouchSelHandle(MainWindow* win, int x, int y) {
@@ -1554,7 +1002,11 @@ static void DragTouchSelHandle(MainWindow* win, int x, int y) {
     PointF ptf = dm->CvtFromScreen(pt, pageNo);
     dm->textSelection->SelectUpTo(pageNo, ptf.x, ptf.y);
 
+    // the selection is rebuilt under the handles: they and the drag stay
+    TouchSelHandle dragging = win->touchSelDragging;
     DeleteOldSelectionInfo(win, false);
+    win->touchSelHandles = true;
+    win->touchSelDragging = dragging;
     WindowTab* tab = win->CurrentTab();
     tab->selectionOnPage = SelectionOnPage::FromTextSelect(&dm->textSelection->result);
     win->showSelection = tab->selectionOnPage != nullptr;
@@ -1582,10 +1034,8 @@ static bool OnTouchLongPress(MainWindow* win, int x, int y) {
         win->mouseAction = MouseAction::None;
         win->dragStartPending = false;
         win->selectingByWord = false;
-        if (GetCapture() == win->hwndCanvas) {
-            ReleaseCapture();
-        }
-        KillTimer(win->hwndCanvas, SMOOTHSCROLL_TIMER_ID);
+        CanvasSetCapture(win, false);
+        KillTimer(win->hwndCanvas, kSelectSmoothScrollTimerID);
     }
 
     PointF ptf = dm->CvtFromScreen(pt, pageNo);
@@ -1623,10 +1073,75 @@ static bool OnTouchLongPress(MainWindow* win, int x, int y) {
     return true;
 }
 
-static void OnMouseMove(MainWindow* win, int x, int y, WPARAM /*key*/) {
+// the last left press only deselected an annotation, so a double-click it
+// started must not act on the page
+static bool gPressOnlyDeselected = false;
+
+// Shift snaps a line end or polyline vertex. Mouse-up applies this too: SetCapture
+// posts a move at the real cursor with no key flags, after the last drag sample.
+static void UpdateDraggedLineOrVertex(MainWindow* win, DisplayModel* dm, int x, int y, WPARAM key) {
+    Annotation* annot = win->annotationBeingDragged;
+    if (!annot || !dm) {
+        return;
+    }
+    auto handle = (ResizeHandle)win->resizeHandle;
+    bool shift = IsShiftPressed() || bit::IsMaskSet(key, (WPARAM)MK_SHIFT);
+    if (IsLineEndpointHandle(handle)) {
+        int linePageNo = PageNo(annot);
+        Point screenPt{x, y};
+        if (shift) {
+            Point fixed = handle == ResizeHandle::LineStart
+                              ? dm->CvtToScreen(linePageNo, win->annotationOriginalLineEnd)
+                              : dm->CvtToScreen(linePageNo, win->annotationOriginalLineStart);
+            screenPt = SnapLineEndpoint(fixed, screenPt);
+        }
+        PointF pagePt = dm->CvtFromScreen(screenPt, linePageNo);
+        if (handle == ResizeHandle::LineStart) {
+            win->annotationLinePreviewStart = pagePt;
+        } else {
+            win->annotationLinePreviewEnd = pagePt;
+        }
+        return;
+    }
+    if (!IsVertexHandle(handle)) {
+        return;
+    }
+    Vec<PointF>& pts = win->annotationVertexPreview;
+    int idx = win->annotationResizeVertexIndex;
+    if (idx < 0 || idx >= len(pts)) {
+        return;
+    }
+    Point screenPt{x, y};
+    // snap to the segment from the previous vertex (next one for the first)
+    int anchor = idx > 0 ? idx - 1 : idx + 1;
+    if (shift && anchor < len(pts)) {
+        int polyPageNo = PageNo(annot);
+        screenPt = SnapLineEndpoint(dm->CvtToScreen(polyPageNo, pts[anchor]), screenPt);
+    }
+    pts[idx] = dm->CvtFromScreen(screenPt, PageNo(annot));
+}
+
+static void OnMouseMove(MainWindow* win, int x, int y, WPARAM key) {
+    if (!(key & (MK_RBUTTON | MK_MBUTTON)) && MeasurementOnMove(win, Point{x, y})) {
+        return;
+    }
+    if (ReadingBarOnMouseMove(win, x, y)) {
+        return;
+    }
+
     DisplayModel* dm = win->AsFixed();
     // ReportIf(!dm); // can happen if reload fails, we delete DisplayModel
     if (!dm) return;
+
+    if (PageGridDragActive()) {
+        PageGridDragMove(dm, x, y);
+        SetCursorCached(PageGridCursorAxis(dm, x, y, true) == PageGridAxis::Height ? IDC_SIZENS : IDC_SIZEWE);
+        return;
+    }
+
+    if (AnnotationPlacementOnMouseMove(win, Point{x, y}, key)) {
+        return;
+    }
 
     if (win->touchSelDragging != TouchSelHandle::None) {
         DragTouchSelHandle(win, x, y);
@@ -1636,6 +1151,9 @@ static void OnMouseMove(MainWindow* win, int x, int y, WPARAM /*key*/) {
         // a finger that wanders isn't holding still, so it isn't a long press
         int slop = DpiScale(10);
         if (abs(x - win->touchDownPos.x) > slop || abs(y - win->touchDownPos.y) > slop) {
+            // Only kill the timer. Synthesized mouse moves around a touch can
+            // carry a stale position, so this must not mark the contact as a
+            // scroll or a still hold would never select.
             KillTimer(win->hwndCanvas, kTouchLongPressTimerID);
         }
     }
@@ -1654,7 +1172,7 @@ static void OnMouseMove(MainWindow* win, int x, int y, WPARAM /*key*/) {
     }
 
     if (win->InPresentation()) {
-        if (PM_BLACK_SCREEN == win->presentation || PM_WHITE_SCREEN == win->presentation) {
+        if (win->InBlankPresentation()) {
             // logf("OnMouseMove: hiding cursor because black screen or white screen\n");
             SetCursor((HCURSOR) nullptr);
             return;
@@ -1675,8 +1193,8 @@ static void OnMouseMove(MainWindow* win, int x, int y, WPARAM /*key*/) {
                     SendMessageW(win->hwndCanvas, WM_SETCURSOR, 0, 0);
                 }
             }
-            if (win->dragPrevPos.Eq(-2, -3)) {
-                // hack: hide cursor immediately. see EnterFullScreen
+            if (win->hideCursorOnNextMove) {
+                win->hideCursorOnNextMove = false;
                 SetTimer(win->hwndCanvas, kHideCursorTimerID, 1, nullptr);
             } else {
                 // logf("OnMouseMove: starting kHideCursorTimerID\n");
@@ -1691,7 +1209,7 @@ static void OnMouseMove(MainWindow* win, int x, int y, WPARAM /*key*/) {
         dm->GetEngine()->RequestTextExtraction(pageNo);
     }
 
-    NotificationWnd* cursorPosNotif = GetNotificationForGroup(win->hwndCanvas, kNotifCursorPos);
+    NotificationWnd* cursorPosNotif = GetNotificationForGroup(win, kNotifCursorPos);
 
     if (win->textDragPending) {
         if (!IsDragDistance(x, win->dragStart.x, y, win->dragStart.y)) {
@@ -1700,9 +1218,7 @@ static void OnMouseMove(MainWindow* win, int x, int y, WPARAM /*key*/) {
         // threshold met: initiate OLE drag-drop of selected text
         win->textDragPending = false;
         win->dragStartPending = false;
-        if (GetCapture() == win->hwndCanvas) {
-            ReleaseCapture();
-        }
+        CanvasSetCapture(win, false);
         StartTextDragDrop(win);
         return;
     }
@@ -1713,9 +1229,7 @@ static void OnMouseMove(MainWindow* win, int x, int y, WPARAM /*key*/) {
         }
         win->imageDragPending = false;
         win->dragStartPending = false;
-        if (GetCapture() == win->hwndCanvas) {
-            ReleaseCapture();
-        }
+        CanvasSetCapture(win, false);
         StartImageDragDrop(win);
         win->imageDragElement = nullptr;
         win->imageDragPageNo = -1;
@@ -1733,46 +1247,41 @@ static void OnMouseMove(MainWindow* win, int x, int y, WPARAM /*key*/) {
     Point prevPos = win->dragPrevPos;
     switch (win->mouseAction) {
         case MouseAction::None: {
-            Annotation* annot = dm->GetAnnotationAtPos(pos, nullptr);
             Annotation* prev = win->annotationUnderCursor;
+            // no hover effects for anything but the annotation being edited
+            Annotation* locked = AnnotationLockingMouse(win);
+            if (locked) {
+                bool onLocked = dm->GetAnnotationAtPos(pos, locked) == locked;
+                win->annotationUnderCursor = onLocked ? locked : nullptr;
+                if (win->annotationUnderCursor != prev) {
+                    ScheduleRepaint(win, 0);
+                }
+                RemoveNotificationsForGroup(win, kNotifAnnotation);
+                HideAnnotationHoverOverlay(win);
+                break;
+            }
+            // the highlighter only selects text: annotations get no hover
+            bool highlighter = IsPlacingHighlighterAnnotation(win);
+            Annotation* annot = highlighter ? nullptr : dm->GetAnnotationAtPos(pos, nullptr);
+            bool editPdf = win->pdfAnnotationsToolbarEnabled && !highlighter;
             int srcPageNo = -1;
             IPageElement* el = dm->GetElementAtPos(pos, &srcPageNo);
-            if (el && el->Is(kindPageElementDest) && gGlobalPrefs->disableLinks) {
+            if (el && el->Is(kindPageElementDest) && gSettings->disableLinks) {
                 el = nullptr;
             }
-            // the annotation notification below is suppressed in favor of
-            // the citation hover popup, but only when that feature is on
-            int hoverDelayMs = gGlobalPrefs->citationHoverDelay;
-            bool citationHoverEnabled = hoverDelayMs >= 0;
-            bool hasInternalLink = citationHoverEnabled && RefHoverIsInternalLink(el, dm);
+            int hoverDelayMs = gSettings->citationHoverDelay;
             if (annot != prev) {
-#if 0
-                Str name = annot ? AnnotationReadableNameTemp(annot->type) : StrL("none");
-                Str prevName = prev ? AnnotationReadableNameTemp(prev->type) : StrL("none");
-                logf("different annot under cursor. prev: %s, new: %s\n", prevName, name);
-#endif
-                if (gGlobalPrefs->showAnnotationNotification && !hasInternalLink) {
-                    if (annot) {
-                        // auto r = annot->bounds;
-                        // logf("new pos: %d-%d, size: %d-%d\n", (int)r.x, (int)r.y, (int)r.dx, (int)r.dy);
-                        RemoveNotificationsForGroup(win->hwndCanvas, kNotifAnnotation);
-                        NotificationCreateArgs args;
-                        args.hwndParent = win->hwndCanvas;
-                        args.groupId = kNotifAnnotation;
-                        args.timeoutMs = 3000;
-                        args.delayInMs = 1000;
-                        args.noClose = true;
-                        Str name = annot ? AnnotationReadableNameTemp(annot->type) : StrL("none");
-                        Str fmtStr = _TRA("%s annotation. Ctrl+click to edit.");
-                        args.msg = fmt(fmtStr.s, name);
-                        ShowNotification(args);
-                    }
+                if (editPdf) {
+                    ScheduleRepaint(win, 0);
                 }
             }
-            if (!annot || hasInternalLink || !gGlobalPrefs->showAnnotationNotification) {
-                RemoveNotificationsForGroup(win->hwndCanvas, kNotifAnnotation);
-            }
+            RemoveNotificationsForGroup(win, kNotifAnnotation);
             win->annotationUnderCursor = annot;
+            if (editPdf) {
+                UpdateAnnotationHoverOverlay(win);
+            } else {
+                HideAnnotationHoverOverlay(win);
+            }
 
             RefHoverOnCanvasMouseMove(win->refHover, win->hwndCanvas, win->ctrl, win->linkHandler, dm, x, y, el,
                                       srcPageNo, hoverDelayMs);
@@ -1781,8 +1290,9 @@ static void OnMouseMove(MainWindow* win, int x, int y, WPARAM /*key*/) {
 
         case MouseAction::Scrolling: {
             win->annotationUnderCursor = nullptr;
-            win->yScrollSpeed = (float)(y - win->dragStart.y) / SMOOTHSCROLL_SLOW_DOWN_FACTOR;
-            win->xScrollSpeed = (float)(x - win->dragStart.x) / SMOOTHSCROLL_SLOW_DOWN_FACTOR;
+            HideAnnotationHoverOverlay(win);
+            win->yScrollSpeed = (float)(y - win->dragStart.y) / kSelectSmoothScrollSlowDownFactor;
+            win->xScrollSpeed = (float)(x - win->dragStart.x) / kSelectSmoothScrollSlowDownFactor;
             break;
         }
         case MouseAction::SelectingText:
@@ -1792,6 +1302,7 @@ static void OnMouseMove(MainWindow* win, int x, int y, WPARAM /*key*/) {
             [[fallthrough]];
         case MouseAction::Selecting: {
             win->annotationUnderCursor = nullptr;
+            HideAnnotationHoverOverlay(win);
             if (win->selectionDragEdge != SelectionDragEdge::None) {
                 // move / resize existing rectangular selection
                 UpdateRectangularSelectionEdit(win, x, y);
@@ -1813,13 +1324,30 @@ static void OnMouseMove(MainWindow* win, int x, int y, WPARAM /*key*/) {
                     // During resize, calculate and apply new rectangle in real-time
                     win->dragPrevPos = pos;
                     // Keep the resize cursor active during resize
-                    SetCursorCached(GetCursorForResizeHandle((ResizeHandle)win->resizeHandle));
+                    auto handle = (ResizeHandle)win->resizeHandle;
+                    SetCursorCached(GetCursorForResizeHandle(handle));
 
-                    // Calculate and apply the new rectangle based on current mouse position
-                    RectF newRect = CalculateResizedRect(win, x, y);
-                    SetRect(annot, newRect);
-
-                    MainWindowRerender(win);
+                    if (IsLineEndpointHandle(handle) || IsVertexHandle(handle)) {
+                        // Overlay only: leave the PDF page bitmap alone until the drag ends.
+                        UpdateDraggedLineOrVertex(win, dm, x, y, key);
+                        ScheduleRepaint(win, 0);
+                    } else if (win->annotationResizeOutlineOnly) {
+                        // Outline only: writing the annotation re-lays out its
+                        // text and re-renders the page, far too slow to do on
+                        // every mouse move.
+                        win->annotationResizePreviewRect = CalculateResizedRect(win, x, y);
+                        ScheduleRepaint(win, 0);
+                    } else {
+                        RectF newRect = CalculateResizedRect(win, x, y);
+                        SetRect(annot, newRect);
+                        // Keep the bounds indicator tracking the pointer using the
+                        // existing page bitmap. Re-render the PDF only after the
+                        // resize has been idle for a moment.
+                        ScheduleRepaint(win, 0);
+                        win->annotationResizeRerenderTimer = SetTimer(win->hwndCanvas, kAnnotationResizeRerenderTimerID,
+                                                                      kAnnotationResizeRerenderDelayMs, nullptr);
+                        ReportIf(!win->annotationResizeRerenderTimer);
+                    }
                 } else {
                     Size size = win->annotationBeingMovedSize;
                     DrawMovePattern(win, prevPos, size);
@@ -1852,72 +1380,45 @@ static void StartAnnotationDrag(MainWindow* win, Annotation* annot, Point& pt) {
     DrawMovePattern(win, pt, win->annotationBeingMovedSize);
 }
 
-// Helper function to calculate new rectangle during resize
-static RectF CalculateResizedRect(MainWindow* win, int x, int y) {
-    DisplayModel* dm = win->AsFixed();
-    Annotation* annot = win->annotationBeingDragged;
-    int pageNo = PageNo(annot);
-
-    // Convert screen coordinates to page coordinates
-    Rect screenPt{x, y, 1, 1};
-    RectF pagePt = dm->CvtFromScreen(screenPt, pageNo);
-
-    RectF orig = win->annotationOriginalRect;
-    RectF r = orig;
-
-    Point startPt = win->dragStart;
-    Rect startScreen{startPt.x, startPt.y, 1, 1};
-    RectF startPage = dm->CvtFromScreen(startScreen, pageNo);
-
-    float deltaX = pagePt.x - startPage.x;
-    float deltaY = pagePt.y - startPage.y;
-
-    const float minSize = 10.0F;
-    auto handle = (ResizeHandle)win->resizeHandle;
-
-    bool moveLeft =
-        handle == ResizeHandle::TopLeft || handle == ResizeHandle::Left || handle == ResizeHandle::BottomLeft;
-    bool moveRight =
-        handle == ResizeHandle::TopRight || handle == ResizeHandle::Right || handle == ResizeHandle::BottomRight;
-    bool moveTop = handle == ResizeHandle::TopLeft || handle == ResizeHandle::Top || handle == ResizeHandle::TopRight;
-    bool moveBottom =
-        handle == ResizeHandle::BottomLeft || handle == ResizeHandle::Bottom || handle == ResizeHandle::BottomRight;
-
-    if (moveLeft) {
-        r.x = orig.x + deltaX;
-        r.dx = orig.dx - deltaX;
-        if (r.dx < minSize) {
-            r.x = orig.x + orig.dx - minSize;
-            r.dx = minSize;
-        }
-    }
-    if (moveRight) {
-        r.dx = orig.dx + deltaX;
-        r.dx = std::max(r.dx, minSize);
-    }
-    if (moveTop) {
-        r.y = orig.y + deltaY;
-        r.dy = orig.dy - deltaY;
-        if (r.dy < minSize) {
-            r.y = orig.y + orig.dy - minSize;
-            r.dy = minSize;
-        }
-    }
-    if (moveBottom) {
-        r.dy = orig.dy + deltaY;
-        r.dy = std::max(r.dy, minSize);
-    }
-
-    return r;
-}
-
 static void StartAnnotationResize(MainWindow* win, Annotation* annot, Point& pt, ResizeHandle handle) {
+    CancelAnnotationResizeRerender(win);
+    // the drag rewrites the annotation on every mouse move; one undo step
+    BeginPdfEditOperation(win, "Resize annotation");
     win->annotationBeingDragged = annot;
     win->annotationBeingResized = true;
+    // A completed right-click leaves dragRightClick set. This is a new
+    // left-button drag; otherwise its button-up is mistaken for a right drag
+    // and the annotation keeps resizing as the unpressed mouse moves (#5933).
+    win->dragRightClick = false;
     win->resizeHandle = (int)handle;
     win->dragStart = pt;
     RectF r = GetRect(annot);
     win->annotationOriginalRect = r;
+    win->annotationResizePreviewRect = r;
+    // free text lays its text out again on every write; keep the drag to the
+    // outline and write the annotation once, when the drag ends
+    win->annotationResizeOutlineOnly =
+        annot->type == AnnotationType::FreeText && !IsLineEndpointHandle(handle) && !IsVertexHandle(handle);
+    win->annotationOriginalLineStart = {};
+    win->annotationOriginalLineEnd = {};
+    win->annotationLinePreviewStart = {};
+    win->annotationLinePreviewEnd = {};
+    win->annotationResizeVertexIndex = -1;
+    VecReset(win->annotationVertexPreview);
+    if (annot->type == AnnotationType::Line) {
+        GetLinePoints(annot, win->annotationOriginalLineStart, win->annotationOriginalLineEnd);
+        win->annotationLinePreviewStart = win->annotationOriginalLineStart;
+        win->annotationLinePreviewEnd = win->annotationOriginalLineEnd;
+    } else if (IsPolyVertexType(annot->type)) {
+        win->annotationVertexPreview = GetVertices(annot);
+        win->annotationResizeVertexIndex = GetPolyVertexAt(win->AsFixed(), pt, annot);
+    }
+    win->annotationResizeAspectRatio = 0;
+    if (annot->type == AnnotationType::Stamp && r.dx > 0 && r.dy > 0) {
+        // Rubber stamps are regenerated at a fixed aspect ratio by MuPDF;
+        // preserving image-stamp aspect also avoids distortion.
+        win->annotationResizeAspectRatio = r.dx / r.dy;
+    }
     SetCapture(win->hwndCanvas);
     win->mouseAction = MouseAction::Dragging;
     win->dragPrevPos = pt;
@@ -1929,24 +1430,40 @@ static bool StopAnnotationResize(MainWindow* win, bool aborted) {
     }
 
     Annotation* annot = win->annotationBeingDragged;
+    auto handle = (ResizeHandle)win->resizeHandle;
+    PointF lineStart = win->annotationLinePreviewStart;
+    PointF lineEnd = win->annotationLinePreviewEnd;
+    bool outlineOnly = win->annotationResizeOutlineOnly;
+    RectF previewRect = win->annotationResizePreviewRect;
     win->annotationBeingResized = false;
+    win->annotationResizeOutlineOnly = false;
     win->annotationBeingDragged = nullptr;
+    CancelAnnotationResizeRerender(win);
 
     // Release mouse capture and reset cursor
-    if (GetCapture() == win->hwndCanvas) {
-        ReleaseCapture();
-    }
+    CanvasSetCapture(win, false);
     SetCanvasCursor(win, IDC_ARROW);
 
     if (aborted || !annot) {
+        EndPdfEditOperation(win);
+        ScheduleRepaint(win, 0);
         return true;
     }
 
-    // The annotation has already been updated during mouse move,
-    // just notify and update toolbar
-    NotifyAnnotationsChanged(win->CurrentTab()->editAnnotsWindow);
+    if (IsLineEndpointHandle(handle)) {
+        SetLinePoints(annot, lineStart, lineEnd);
+    } else if (IsVertexHandle(handle)) {
+        SetVertices(annot, win->annotationVertexPreview);
+    } else if (outlineOnly) {
+        SetRect(annot, previewRect);
+    }
+
+    // Other rectangle resizes already wrote the annot during mouse move.
+    EndPdfEditOperation(win);
+    NotifyAnnotationsChanged(win->CurrentTab());
     MainWindowRerender(win);
     ToolbarUpdateStateForWindow(win, true);
+    UpdateAnnotFilterToolbar(win);
 
     return true;
 }
@@ -1965,39 +1482,50 @@ static bool IsTripleClick(int x, int y) {
     return dx <= GetSystemMetrics(SM_CXDOUBLECLK) && dy <= GetSystemMetrics(SM_CYDOUBLECLK);
 }
 
-// a full-page image (e.g. a scanned page) shouldn't start an image drag-out:
-// there click-and-drag is expected to pan the page (issue #5754). detect it by
-// comparing the image's area to the page's.
-static bool IsFullPageImage(DisplayModel* dm, IPageElement* el, int pageNo) {
-    // in image documents every page is a full-page image and dragging
-    // it out to another app is the expected behavior
-    Kind k = dm->GetEngine()->kind;
-    if (k == kindEngineImage || k == kindEngineImageDir || k == kindEngineComicBooks) {
-        return false;
+static bool MouseHasCtrl(WPARAM key) {
+    return IsCtrlPressed() || bit::IsMaskSet(key, (WPARAM)MK_CONTROL);
+}
+
+static void OpenOrSelectEditAnnotation(WindowTab* tab, Annotation* annot, Point clickPt) {
+    if (!tab || !annot) {
+        return;
     }
-    if (!dm->ValidPageNo(pageNo)) {
-        return false;
+    DisplayModel* dm = tab->win ? tab->win->AsFixed() : nullptr;
+    if (dm && AnnotationIsTextMarkup(annot->type)) {
+        // the toolbar starts at the click, not at the (maybe multi-line) bounds
+        SetAnnotEditToolbarClickPos(annot, dm->CvtFromScreen(clickPt, PageNo(annot)));
     }
-    RectF pageRc = dm->GetEngine()->PageMediabox(pageNo);
-    float pageArea = pageRc.dx * pageRc.dy;
-    if (pageArea <= 0) {
-        return false;
-    }
-    RectF imgRc = el->GetRect();
-    float imgArea = imgRc.dx * imgRc.dy;
-    return imgArea >= 0.8f * pageArea;
+    SetSelectedAnnotation(tab, annot);
+    HideAnnotationHoverOverlay(tab->win);
 }
 
 static void OnMouseLeftButtonDown(MainWindow* win, int x, int y, WPARAM key) {
+    if (MeasurementOnClick(win, Point{x, y}, (key & MK_CONTROL) != 0)) {
+        return;
+    }
     // lf("Left button clicked on %d %d", x, y);
+    gPressOnlyDeselected = false;
     if (IsRightDragging(win)) {
+        return;
+    }
+
+    HideToolbarHoverDropdown(win);
+
+    if (ReadingBarOnLeftDown(win, x, y)) {
+        return;
+    }
+    if (SigMarksOnLeftDown(win, x, y)) {
+        return;
+    }
+
+    if (AnnotationPlacementOnLeftDown(win, Point{x, y}, key)) {
         return;
     }
 
     RefHoverOnCanvasLeftButtonDown(win->refHover, win->hwndCanvas);
 
     if (MouseAction::Scrolling == win->mouseAction) {
-        win->mouseAction = MouseAction::None;
+        StopAutoScroll(win);
         return;
     }
 
@@ -2015,6 +1543,44 @@ static void OnMouseLeftButtonDown(MainWindow* win, int x, int y, WPARAM key) {
     ReportIf(!dm);
     Point pt{x, y};
 
+    // placing a new signature: the next drag draws the box, a click puts a
+    // default-size one at the pointer (issue #5967). Consume the press so it
+    // doesn't toggle a form field or start a text selection.
+    if (IsPlacingSignature(win)) {
+        win->dragStartPending = true;
+        win->dragStart = pt;
+        OnSelectionStart(win, x, y, key, true);
+        return;
+    }
+
+    // Configure Page Grid is open, or Alt is held: a press on a grid line
+    // resizes that cell instead of selecting text.
+    if ((IsPageGridDialogOpen() || IsAltPressed()) && PageGridDragStart(dm, x, y)) {
+        SetCapture(win->hwndCanvas);
+        return;
+    }
+
+    // Edit PDF with an annotation selected: a press anywhere but on that
+    // annotation or its resize handles only deselects it
+    Annotation* locked = AnnotationLockingMouse(win);
+    if (locked) {
+        bool onHandle =
+            AnnotationCanBeResized(locked->type) && GetResizeHandleAt(win, pt, locked) != ResizeHandle::None;
+        bool onLocked = dm->GetAnnotationAtPos(pt, locked) == locked;
+        if (!onHandle && !onLocked) {
+            if (!AnnotContentsEditJustEnded()) {
+                SetSelectedAnnotation(win->CurrentTab(), nullptr);
+            }
+            gPressOnlyDeselected = true;
+            return;
+        }
+        // one that can't be moved has nothing to drag. Text markup is the
+        // exception: a press on it still selects the text under it (#6166)
+        if (!onHandle && !AnnotationCanBeMoved(locked->type) && !AnnotationIsTextMarkup(locked->type)) {
+            return;
+        }
+    }
+
     // remember how this sequence started: WM_CONTEXTMENU, which a long press
     // turns into, doesn't say whether a finger or a mouse produced it
     win->lastInputWasTouch = IsMouseMessageFromTouch();
@@ -2024,13 +1590,18 @@ static void OnMouseLeftButtonDown(MainWindow* win, int x, int y, WPARAM key) {
         logf("touch: down at %d,%d, handles=%d, mouseAction=%d\n", x, y, (int)win->touchSelHandles,
              (int)win->mouseAction);
         // when touch arrives as mouse messages rather than gestures, this is
-        // what turns a held finger into a long press (issue #538)
-        SetTimer(win->hwndCanvas, kTouchLongPressTimerID, kTouchLongPressMs, nullptr);
+        // what turns a held finger into a long press (issue #538). Skip if
+        // WM_POINTER is already timing this contact -- a late synthesized
+        // mouse-down must not restart the hold or un-mark a scroll.
+        if (win->touchPointerId < 0) {
+            ResetTouchLongPress(win);
+            SetTimer(win->hwndCanvas, kTouchLongPressTimerID, kTouchLongPressMs, nullptr);
+        }
     }
 
     // grabbing a touch selection handle drags that end of the selection rather
     // than starting a new one (issue #538)
-    TouchSelHandle handle = HitTestTouchSelHandle(win, x, y);
+    TouchSelHandle handle = locked ? TouchSelHandle::None : HitTestTouchSelHandle(win, x, y);
     if (handle != TouchSelHandle::None) {
         logf("touch: grabbed %s handle at %d,%d\n", TouchSelHandleName(handle), x, y);
         win->touchSelDragging = handle;
@@ -2044,13 +1615,19 @@ static void OnMouseLeftButtonDown(MainWindow* win, int x, int y, WPARAM key) {
     // text or choice field starts in-place editing. Widgets are hit-tested on
     // their own list (GetWidgetAtPos), separate from markup annotations. Consume
     // the click in either case so it doesn't start a drag/selection.
-    Annotation* widget = dm->GetWidgetAtPos(pt);
+    Annotation* widget = locked ? nullptr : dm->GetWidgetAtPos(pt);
     if (ToggleFormButton(widget)) {
         MainWindowRerender(win);
         win->mouseAction = MouseAction::None;
         return;
     }
     if (StartFormFieldEdit(win, widget)) {
+        win->mouseAction = MouseAction::None;
+        return;
+    }
+    // an unsigned signature field is there to be signed: open Sign Document on
+    // it rather than making the user find the command in a menu (issue #5964)
+    if (StartSignatureFieldSigning(win, widget)) {
         win->mouseAction = MouseAction::None;
         return;
     }
@@ -2070,30 +1647,62 @@ static void OnMouseLeftButtonDown(MainWindow* win, int x, int y, WPARAM key) {
         return;
     }
 
-    Annotation* annot = dm->GetAnnotationAtPos(pt, tab->selectedAnnotation);
-    bool isMoveableAnnot = annot && AnnotationCanBeMoved(annot->type);
-    if (isMoveableAnnot) {
-        if (annot == tab->selectedAnnotation) {
-            // dragging the selected annotation. do nothing here, just start dragging in mouse move
-        } else if (annot->type == AnnotationType::Widget) {
-            // a form field is not something to move around by clicking it
-            isMoveableAnnot = false;
-        } else {
-            // clicking a shape annotation selects it, so it can be moved /
-            // resized right away. Only these: the text markup annotations
-            // (highlight and friends) lie on top of text, where a click has to
-            // stay a click on the text
-            SetSelectedAnnotation(tab, annot);
+    // the highlighter only selects text: a click never picks an annotation
+    Annotation* annot =
+        IsPlacingHighlighterAnnotation(win) ? nullptr : dm->GetAnnotationAtPos(pt, tab->selectedAnnotation);
+    if (MouseHasCtrl(key) && annot && tab) {
+        EnablePdfAnnotationsToolbar(win);
+    }
+    bool editPdf = win->pdfAnnotationsToolbarEnabled;
+    if (editPdf && annot && !AnnotationCanBeMoved(annot->type)) {
+        // highlight / underline / squiggly / strike-out sit on text. A plain
+        // click starts a selection (issue #6166); Ctrl+click still selects.
+        bool clickThrough = AnnotationIsTextMarkup(annot->type) && !MouseHasCtrl(key);
+        if (!clickThrough) {
+            OpenOrSelectEditAnnotation(tab, annot, pt);
+            win->textDragPending = false;
+            return;
         }
+    }
+    bool isMoveableAnnot = annot && AnnotationCanBeMoved(annot->type) && annot->type != AnnotationType::Widget;
+    // Selecting / dragging an annotation is Edit PDF (Ctrl+click turns that
+    // on above). A click outside that mode must stay a page click. An
+    // annotation already selected (just created) can still be dragged.
+    if (isMoveableAnnot && !editPdf && annot != tab->selectedAnnotation) {
+        isMoveableAnnot = false;
+    }
+    if (isMoveableAnnot && annot != tab->selectedAnnotation) {
+        // clicking a shape annotation selects it, so it can be moved /
+        // resized right away. Only these: the text markup annotations
+        // (highlight and friends) lie on top of text, where a click has to
+        // stay a click on the text
+        SetSelectedAnnotation(tab, annot);
     }
 
     if (isMoveableAnnot) {
         StartAnnotationDrag(win, annot, pt);
     } else {
+        // Clicking empty page while a shape is in size-edit must leave that
+        // mode on mouse-down. Mouse-up used to skip deselect when the press
+        // moved past SM_CXDRAG and became a page pan (issue #5933).
+        if (tab && tab->selectedAnnotation) {
+            // a click that ended a contents edit is spent on ending it; the
+            // annotation the text was written to stays selected
+            bool keepSelected = AnnotContentsEditJustEnded();
+            if (!keepSelected) {
+                SetSelectedAnnotation(tab, nullptr);
+            }
+            // over text, keep going so the press can start a selection even
+            // if a highlight was selected (issue #6166)
+            if (keepSelected || !dm->IsOverText(pt)) {
+                return;
+            }
+        }
         ReportIf(win->linkOnLastButtonDown);
         IPageElement* pageEl = dm->GetElementAtPos(pt, nullptr);
-        if (pageEl && pageEl->Is(kindPageElementDest) && !gGlobalPrefs->disableLinks) {
+        if (pageEl && pageEl->Is(kindPageElementDest) && !gSettings->disableLinks) {
             win->linkOnLastButtonDown = pageEl;
+            win->linkOnLastButtonDownGen = ElementsGen(dm);
         }
     }
 
@@ -2127,7 +1736,7 @@ static void OnMouseLeftButtonDown(MainWindow* win, int x, int y, WPARAM key) {
             win->mouseAction = MouseAction::SelectingText;
             win->dragStartPending = false;
             SetCapture(win->hwndCanvas);
-            SetTimer(win->hwndCanvas, SMOOTHSCROLL_TIMER_ID, SMOOTHSCROLL_DELAY_IN_MS, nullptr);
+            SetTimer(win->hwndCanvas, kSelectSmoothScrollTimerID, kSelectSmoothScrollDelayInMs, nullptr);
             ScheduleRepaint(win, 0);
             gLastWordSelectTime = 0; // so a 4th click doesn't re-trigger
         }
@@ -2165,6 +1774,7 @@ static void OnMouseLeftButtonDown(MainWindow* win, int x, int y, WPARAM key) {
         if (pageEl && pageEl->Is(kindPageElementImage) && !IsFullPageImage(dm, pageEl, elPageNo)) {
             win->imageDragPending = true;
             win->imageDragElement = pageEl;
+            win->imageDragElementGen = ElementsGen(dm);
             win->imageDragPageNo = elPageNo;
             win->linkOnLastButtonDown = nullptr;
             SetCapture(win->hwndCanvas);
@@ -2175,8 +1785,10 @@ static void OnMouseLeftButtonDown(MainWindow* win, int x, int y, WPARAM key) {
     // A finger doesn't rubber-band: dragging pans the page and a long press
     // selects, so letting touch start a selection here only flashes a
     // rectangle before the gesture takes over (issue #538).
+    // DisableLeftDragPan: where there's no text, a drag selects instead of panning (#6444)
+    bool panOffText = !gSettings->disableLeftDragPan;
     bool startDrag = resizeHandle != ResizeHandle::None || isMoveableAnnot || !canCopy || win->lastInputWasTouch ||
-                     (isShift || !isOverText) && !isCtrl;
+                     (isShift || (!isOverText && panOffText)) && !isCtrl;
     if (startDrag) {
         StartMouseDrag(win, x, y);
     } else {
@@ -2185,8 +1797,26 @@ static void OnMouseLeftButtonDown(MainWindow* win, int x, int y, WPARAM key) {
 }
 
 static void OnMouseLeftButtonUp(MainWindow* win, int x, int y, WPARAM key) {
+    if (win->measurementToolbar) {
+        return;
+    }
+    if (ReadingBarOnLeftUp(win)) {
+        return;
+    }
+
     DisplayModel* dm = win->AsFixed();
     ReportIf(!dm);
+
+    if (PageGridDragActive()) {
+        PageGridDragMove(dm, x, y);
+        PageGridDragEnd();
+        CanvasSetCapture(win, false);
+        return;
+    }
+
+    if (AnnotationPlacementOnLeftUp(win, Point{x, y}, key)) {
+        return;
+    }
 
     if (win->lastInputWasTouch) {
         DWORD heldMs = (DWORD)GetMessageTime() - win->touchDownTime;
@@ -2198,9 +1828,7 @@ static void OnMouseLeftButtonUp(MainWindow* win, int x, int y, WPARAM key) {
     // can be adjusted again (issue #538)
     if (win->touchSelDragging != TouchSelHandle::None) {
         win->touchSelDragging = TouchSelHandle::None;
-        if (GetCapture() == win->hwndCanvas) {
-            ReleaseCapture();
-        }
+        CanvasSetCapture(win, false);
         return;
     }
 
@@ -2208,9 +1836,7 @@ static void OnMouseLeftButtonUp(MainWindow* win, int x, int y, WPARAM key) {
     if (win->textDragPending) {
         win->textDragPending = false;
         win->dragStartPending = false;
-        if (GetCapture() == win->hwndCanvas) {
-            ReleaseCapture();
-        }
+        CanvasSetCapture(win, false);
         DeleteOldSelectionInfo(win, true);
         return;
     }
@@ -2221,9 +1847,7 @@ static void OnMouseLeftButtonUp(MainWindow* win, int x, int y, WPARAM key) {
         win->imageDragElement = nullptr;
         win->imageDragPageNo = -1;
         win->dragStartPending = false;
-        if (GetCapture() == win->hwndCanvas) {
-            ReleaseCapture();
-        }
+        CanvasSetCapture(win, false);
         return;
     }
 
@@ -2236,13 +1860,7 @@ static void OnMouseLeftButtonUp(MainWindow* win, int x, int y, WPARAM key) {
     // Also covers the crash-report case of a left-up after the down was lost
     // (different hwnd, focus change, etc.) — just reset cleanly.
     if (MouseAction::Scrolling == ma) {
-        win->mouseAction = MouseAction::None;
-        win->xScrollSpeed = 0;
-        win->yScrollSpeed = 0;
-        win->xScrollAccum = 0;
-        win->yScrollAccum = 0;
-        KillTimer(win->hwndCanvas, kAutoScrollTimerID);
-        SetCanvasCursor(win, IDC_ARROW);
+        StopAutoScroll(win);
         return;
     }
 
@@ -2250,6 +1868,9 @@ static void OnMouseLeftButtonUp(MainWindow* win, int x, int y, WPARAM key) {
     bool didDragMouse = !win->dragStartPending || IsDragDistance(x, win->dragStart.x, y, win->dragStart.y);
     if (MouseAction::Dragging == ma) {
         if (win->annotationBeingResized) {
+            if (didDragMouse) {
+                UpdateDraggedLineOrVertex(win, dm, x, y, key);
+            }
             StopAnnotationResize(win, !didDragMouse);
             // Trigger cursor update after resize
             SendMessageW(win->hwndCanvas, WM_SETCURSOR, 0, 0);
@@ -2261,6 +1882,11 @@ static void OnMouseLeftButtonUp(MainWindow* win, int x, int y, WPARAM key) {
         if (MouseAction::Selecting == ma && win->showSelection) {
             win->selectionMeasure = dm->CvtFromScreen(win->selectionRect).Size();
         }
+        AnnotationPlacementOnSelectionStop(win);
+        if (FinishSignaturePlacement(win, x, y, !didDragMouse)) {
+            win->mouseAction = MouseAction::None;
+            return;
+        }
     }
 
     win->mouseAction = MouseAction::None;
@@ -2269,8 +1895,10 @@ static void OnMouseLeftButtonUp(MainWindow* win, int x, int y, WPARAM key) {
     int pageNo = dm->GetPageNoByPoint(pt);
     PointF ptPage = dm->CvtFromScreen(pt, pageNo);
 
-    // TODO: win->linkHandler->GotoLink might spin the event loop
     IPageElement* link = win->linkOnLastButtonDown;
+    if (win->linkOnLastButtonDownGen != ElementsGen(dm)) {
+        link = nullptr;
+    }
     win->linkOnLastButtonDown = nullptr;
 
     WindowTab* tab = win->CurrentTab();
@@ -2279,38 +1907,62 @@ static void OnMouseLeftButtonUp(MainWindow* win, int x, int y, WPARAM key) {
         return;
     }
 
-    if (PM_BLACK_SCREEN == win->presentation || PM_WHITE_SCREEN == win->presentation) {
+    if (win->InBlankPresentation()) {
         /* return from white/black screens in presentation mode */
-        win->ChangePresentationMode(PM_ENABLED);
+        win->ChangePresentationMode(WindowMode::Presentation);
         return;
     }
 
-    if (IsCtrlPressed() && win->annotationUnderCursor) {
-        ShowEditAnnotationsWindow(tab, win->annotationUnderCursor);
+    // Hit-test the click, not annotationUnderCursor: that is last-move hover
+    // and is stale when WM_MOUSEMOVE did not run (or returned early because
+    // dragStartPending was still set from the create gesture). Using it
+    // re-selected the new stamp when clicking empty page (issue #5933).
+    // the highlighter only selects text: a click never picks an annotation
+    Annotation* clickedAnnot = IsPlacingHighlighterAnnotation(win)
+                                   ? nullptr
+                                   : dm->GetAnnotationAtPos(pt, tab ? tab->selectedAnnotation : nullptr);
+    if (MouseHasCtrl(key) && clickedAnnot && tab) {
+        EnablePdfAnnotationsToolbar(win);
+    }
+    bool editPdf = win->pdfAnnotationsToolbarEnabled;
+
+    // In Edit PDF mode a click selects the annotation and shows its toolbar.
+    // Text markup clicks through on button-down so that a drag still selects
+    // the glyphs underneath (issue #6166), but a plain click ends up here.
+    if (clickedAnnot && tab && editPdf) {
+        OpenOrSelectEditAnnotation(tab, clickedAnnot, pt);
         return;
     }
 
-    if (win->annotationUnderCursor && (tab->selectedAnnotation || tab->editAnnotsWindow)) {
-        SetSelectedAnnotation(tab, win->annotationUnderCursor);
+    IPageDestination* dest = link ? link->AsLink() : nullptr;
+    Kind destKind = dest ? dest->GetKind() : nullptr;
+    // FileAttachment is also a dest; open it instead of the #4790 comment card.
+    bool openEmbedded = destKind == kindDestinationLaunchEmbedded;
+
+    // Outside Edit PDF mode a click on an annotation did nothing. Show its
+    // text, so a long comment can be read without the editing UI (issue #4790)
+    if (!openEmbedded && clickedAnnot && tab && !MouseHasCtrl(key) && AnnotationHasText(clickedAnnot)) {
+        if (ShowAnnotationTextPopup(win, clickedAnnot)) {
+            return;
+        }
+    }
+
+    if (clickedAnnot && tab && clickedAnnot == tab->selectedAnnotation) {
         return;
     }
 
     // clicking next to a selected annotation deselects it. Without this the
     // resize handles stayed up and the only ways out of "editing its size"
     // were Esc or a right click (issue #5933)
-    if (tab && tab->selectedAnnotation) {
+    if (tab && tab->selectedAnnotation && !AnnotContentsEditJustEnded()) {
         SetSelectedAnnotation(tab, nullptr);
     }
 
     if (link && link->GetRect().Contains(ptPage)) {
         /* follow an active link */
-        IPageDestination* dest = link->AsLink();
         // highlight the clicked link (as a reminder of the last action once the user returns)
-        Kind kind = nullptr;
-        if (dest) {
-            kind = dest->GetKind();
-        }
-        if ((kindDestinationLaunchURL == kind || kindDestinationLaunchFile == kind)) {
+        Kind kind = destKind;
+        if (IsLaunchLinkKind(kind)) {
             DeleteOldSelectionInfo(win, true);
             tab->selectionOnPage = SelectionOnPage::FromRectangle(dm, dm->CvtToScreen(pageNo, link->GetRect()));
             win->showSelection = tab->selectionOnPage != nullptr;
@@ -2319,7 +1971,7 @@ static void OnMouseLeftButtonUp(MainWindow* win, int x, int y, WPARAM key) {
         SetCanvasCursor(win, IDC_ARROW);
 
         // Ctrl+click on internal link: open in new tab and navigate there
-        bool isInternal = (kindDestinationLaunchURL != kind && kindDestinationLaunchFile != kind);
+        bool isInternal = !IsLaunchLinkKind(kind) && kindDestinationJsMenu != kind;
         if (IsCtrlPressed() && dest && isInternal && tab->filePath) {
             LoadArgs args(tab->filePath, win);
             args.showWin = true;
@@ -2329,6 +1981,12 @@ static void OnMouseLeftButtonUp(MainWindow* win, int x, int y, WPARAM key) {
             if (newWin && newWin->IsDocLoaded()) {
                 newWin->linkHandler->ScrollTo(dest);
             }
+            return;
+        }
+
+        // an EPUB footnote link shows the note in a popup instead of jumping to it
+        if (dest && dest->isNoteRef &&
+            RefHoverShowNoteRef(win->refHover, win->hwndCanvas, win->ctrl, win->linkHandler, dm, x, y, link)) {
             return;
         }
 
@@ -2348,7 +2006,7 @@ static void OnMouseLeftButtonUp(MainWindow* win, int x, int y, WPARAM key) {
         return;
     }
 
-    if (win->fwdSearchMark.show && gGlobalPrefs->forwardSearch.highlightPermanent) {
+    if (win->fwdSearchMark.show && gSettings->forwardSearch.highlightPermanent) {
         /* if there's a permanent forward search mark, hide it */
         win->fwdSearchMark.show = false;
         ScheduleRepaint(win, 0);
@@ -2358,7 +2016,8 @@ static void OnMouseLeftButtonUp(MainWindow* win, int x, int y, WPARAM key) {
     // Click the left/right fifth of the canvas to turn the page (issue #1203).
     // Presentation mode has its own click-to-turn below. Manga (R2L) reverses
     // the sides so left still advances.
-    if (gGlobalPrefs && gGlobalPrefs->clickEdgeToTurnPage && tab && tab->ctrl && PM_ENABLED != win->presentation) {
+    if (gSettings && gSettings->clickEdgeToTurnPage && tab && tab->ctrl &&
+        win->windowMode != WindowMode::Presentation) {
         Rect rc = HwndClientRect(win->hwndCanvas);
         if (rc.dx > 0) {
             int edgeDx = rc.dx / 5;
@@ -2382,7 +2041,7 @@ static void OnMouseLeftButtonUp(MainWindow* win, int x, int y, WPARAM key) {
         }
     }
 
-    if (PM_ENABLED == win->presentation) {
+    if (win->windowMode == WindowMode::Presentation) {
         /* in presentation mode, change pages on left/right-clicks */
         if ((key & MK_SHIFT)) {
             tab->ctrl->GoToPrevPage();
@@ -2394,12 +2053,39 @@ static void OnMouseLeftButtonUp(MainWindow* win, int x, int y, WPARAM key) {
     }
 }
 
-bool gDisableInteractiveInverseSearch = false;
-
 static void OnMouseLeftButtonDblClk(MainWindow* win, int x, int y, WPARAM key) {
+    if (MeasurementOnClick(win, Point{x, y}, (key & MK_CONTROL) != 0)) {
+        return;
+    }
     // lf("Left button clicked on %d %d", x, y);
+    if (AnnotationPlacementOnLeftDblClk(win, Point{x, y})) {
+        return;
+    }
+    if (gPressOnlyDeselected) {
+        // the first click deselected another annotation; free text still edits (#6387)
+        gPressOnlyDeselected = false;
+        if (!IsPlacingHighlighterAnnotation(win)) {
+            StartFreeTextInPlaceEditAt(win, Point{x, y});
+        }
+        return;
+    }
+    // while an annotation is selected, double-clicking it (to edit free text in
+    // place) is the only double-click there is
+    Annotation* locked = AnnotationLockingMouse(win);
+    if (locked) {
+        DisplayModel* dmLocked = win->AsFixed();
+        bool onLocked = dmLocked && dmLocked->GetAnnotationAtPos(Point{x, y}, locked) == locked;
+        if (onLocked && Type(locked) == AnnotationType::FreeText) {
+            StartFreeTextInPlaceEdit(win, locked);
+        }
+        return;
+    }
+    // a double-click on free text edits its text where it sits on the page
+    if (!IsPlacingHighlighterAnnotation(win) && StartFreeTextInPlaceEditAt(win, Point{x, y})) {
+        return;
+    }
     auto isLeft = bit::IsMaskSet(key, (WPARAM)MK_LBUTTON);
-    if (gGlobalPrefs->enableTeXEnhancements && !gDisableInteractiveInverseSearch && isLeft) {
+    if (gSettings->enableTeXEnhancements && !gDisableInteractiveInverseSearch && isLeft) {
         bool dontSelect = OnInverseSearch(win, x, y);
         if (dontSelect) {
             return;
@@ -2412,7 +2098,7 @@ static void OnMouseLeftButtonDblClk(MainWindow* win, int x, int y, WPARAM key) {
     Point mousePos = Point(x, y);
     bool isOverText = dm->IsOverText(mousePos);
 
-    if (isLeft && (win->presentation || win->isFullScreen)) {
+    if (isLeft && (win->IsFullScreenOrPresentation())) {
         // in fullscreen we allow to exit by tapping in upper right corner
         constexpr int kCornerSize = 64;
         Rect r = HwndClientRect(win->hwndCanvas);
@@ -2443,7 +2129,7 @@ static void OnMouseLeftButtonDblClk(MainWindow* win, int x, int y, WPARAM key) {
             win->mouseAction = MouseAction::SelectingText;
             win->dragStartPending = false;
             SetCapture(win->hwndCanvas);
-            SetTimer(win->hwndCanvas, SMOOTHSCROLL_TIMER_ID, SMOOTHSCROLL_DELAY_IN_MS, nullptr);
+            SetTimer(win->hwndCanvas, kSelectSmoothScrollTimerID, kSelectSmoothScrollDelayInMs, nullptr);
             ScheduleRepaint(win, 0);
         }
         return;
@@ -2453,7 +2139,7 @@ static void OnMouseLeftButtonDblClk(MainWindow* win, int x, int y, WPARAM key) {
         return;
     }
     if (pageEl->Is(kindPageElementDest)) {
-        if (gGlobalPrefs->disableLinks) {
+        if (gSettings->disableLinks) {
             return;
         }
         // speed up navigation in a file where navigation links are in a fixed position
@@ -2469,6 +2155,18 @@ static void OnMouseLeftButtonDblClk(MainWindow* win, int x, int y, WPARAM key) {
     }
 }
 
+// every way out of middle-click auto-scroll: the speeds, the timer and the
+// cursor go with the mode, or a quick restart scrolls at the old speed
+static void StopAutoScroll(MainWindow* win) {
+    win->mouseAction = MouseAction::None;
+    win->xScrollSpeed = 0;
+    win->yScrollSpeed = 0;
+    win->xScrollAccum = 0;
+    win->yScrollAccum = 0;
+    KillTimer(win->hwndCanvas, kAutoScrollTimerID);
+    SetCanvasCursor(win, IDC_ARROW);
+}
+
 static void OnMouseMiddleButtonDown(MainWindow* win, int x, int y, WPARAM /*key*/) {
     // Handle message by recording placement then moving document as mouse moves.
 
@@ -2481,7 +2179,7 @@ static void OnMouseMiddleButtonDown(MainWindow* win, int x, int y, WPARAM /*key*
         win->dragStart = Point(x, y);
         SetCanvasCursor(win, IDC_SIZEALL);
     } else if (win->mouseAction == MouseAction::Scrolling) {
-        win->mouseAction = MouseAction::None;
+        StopAutoScroll(win);
     }
 }
 
@@ -2502,6 +2200,7 @@ void StartAutoScrollAtCursor(MainWindow* win) {
     if (!win || !win->AsFixed()) {
         return;
     }
+    ReadingAutoScrollStop(win);
     Point pt = HwndGetCursorPos(win->hwndCanvas);
     ToggleAutoScroll(win, pt.x, pt.y);
 }
@@ -2511,19 +2210,28 @@ static void OnMouseMiddleButtonUp(MainWindow* win, WPARAM /*key*/) {
     // releasing it ends the scroll; releasing without moving leaves auto-scroll
     // latched on, which is what dragStartPending still being set means
     if (win->mouseAction == MouseAction::Scrolling && !win->dragStartPending) {
-        win->mouseAction = MouseAction::None;
-        SetCanvasCursor(win, IDC_ARROW);
+        StopAutoScroll(win);
     }
 }
 
 static void OnMouseRightButtonDown(MainWindow* win, int x, int y) {
     // lf("Right button clicked on %d %d", x, y);
+    if (AnnotationPlacementOnRightDown(win)) {
+        return;
+    }
+    // while an annotation is selected, only it has a context menu
+    Annotation* locked = AnnotationLockingMouse(win);
+    if (locked && win->AsFixed() && win->AsFixed()->GetAnnotationAtPos(Point{x, y}, locked) != locked) {
+        return;
+    }
     if (MouseAction::Scrolling == win->mouseAction) {
-        win->mouseAction = MouseAction::None;
+        StopAutoScroll(win);
     } else if (win->mouseAction != MouseAction::None) {
         return;
     }
-    ReportIf(!win->AsFixed());
+    if (ReportIf(!win->AsFixed())) {
+        return;
+    }
 
     HwndSetFocus(win->hwndFrame);
 
@@ -2534,9 +2242,9 @@ static void OnMouseRightButtonDown(MainWindow* win, int x, int y) {
 }
 
 static void OnMouseRightButtonUp(MainWindow* win, int x, int y, WPARAM key) {
-    ReportIf(!win->AsFixed());
-    logf("touch: right button up at %d,%d, fromTouch=%d, suppressMenu=%d, rightDragging=%d\n", x, y,
-         (int)IsMouseMessageFromTouch(), (int)win->touchSuppressContextMenu, (int)IsRightDragging(win));
+    if (ReportIf(!win->AsFixed())) {
+        return;
+    }
     // A held finger is delivered as a right-click, which would open the context
     // menu on top of the word the hold just selected (issue #538)
     if (win->touchSuppressContextMenu) {
@@ -2560,7 +2268,7 @@ static void OnMouseRightButtonUp(MainWindow* win, int x, int y, WPARAM key) {
 
     if (didDragMouse) {
         /* pass */;
-    } else if (PM_ENABLED == win->presentation) {
+    } else if (win->windowMode == WindowMode::Presentation) {
         if ((key & MK_CONTROL)) {
             OnWindowContextMenu(win, x, y);
         } else if ((key & MK_SHIFT)) {
@@ -2571,15 +2279,15 @@ static void OnMouseRightButtonUp(MainWindow* win, int x, int y, WPARAM key) {
         ReadAloudOnUserViewChanged(win);
     }
     /* return from white/black screens in presentation mode */
-    else if (PM_BLACK_SCREEN == win->presentation || PM_WHITE_SCREEN == win->presentation) {
-        win->ChangePresentationMode(PM_ENABLED);
+    else if (win->InBlankPresentation()) {
+        win->ChangePresentationMode(WindowMode::Presentation);
     } else {
         OnWindowContextMenu(win, x, y);
     }
 }
 
 static void OnMouseRightButtonDblClick(MainWindow* win, int x, int y, WPARAM key) {
-    if (win->presentation && !(key & ~MK_RBUTTON)) {
+    if (win->InPresentation() && !(key & ~MK_RBUTTON)) {
         // in presentation mode, right clicks turn the page,
         // make two quick right clicks (AKA one double-click) turn two pages
         OnMouseRightButtonDown(win, x, y);
@@ -2588,37 +2296,39 @@ static void OnMouseRightButtonDblClick(MainWindow* win, int x, int y, WPARAM key
 }
 
 #ifdef DRAW_PAGE_SHADOWS
-#define BORDER_SIZE 1
-#define SHADOW_OFFSET 4
+constexpr int kBorderSize = 1;
+constexpr int kShadowOffset = 4;
+constexpr COLORREF kColPageShadow = RGB(0x40, 0x40, 0x40);
+constexpr COLORREF kColPageFrame = RGB(0x88, 0x88, 0x88);
 static void PaintPageFrameAndShadow(HDC hdc, Rect& bounds, Rect& pageRect, bool presentation, Color /*bgCol*/) {
     // Frame info
     Rect frame = bounds;
-    frame.Inflate(BORDER_SIZE, BORDER_SIZE);
+    frame.Inflate(kBorderSize, kBorderSize);
 
     // Shadow info
     Rect shadow = frame;
-    shadow.Offset(SHADOW_OFFSET, SHADOW_OFFSET);
+    shadow.Offset(kShadowOffset, kShadowOffset);
     if (frame.x < 0) {
         // the left of the page isn't visible, so start the shadow at the left
-        int diff = std::min(-pageRect.x, SHADOW_OFFSET);
+        int diff = std::min(-pageRect.x, kShadowOffset);
         shadow.x -= diff;
         shadow.dx += diff;
     }
     if (frame.y < 0) {
         // the top of the page isn't visible, so start the shadow at the top
-        int diff = std::min(-pageRect.y, SHADOW_OFFSET);
+        int diff = std::min(-pageRect.y, kShadowOffset);
         shadow.y -= diff;
         shadow.dy += diff;
     }
 
     // Draw shadow
     if (!presentation) {
-        AutoDeleteBrush brush = CreateSolidBrush(COL_PAGE_SHADOW);
+        AutoDeleteBrush brush = CreateSolidBrush(kColPageShadow);
         HdcFillRect(hdc, shadow, brush);
     }
 
     // Draw frame
-    ScopedGdiObj<HPEN> pe(CreatePen(PS_SOLID, 1, presentation ? TRANSPARENT : COL_PAGE_FRAME));
+    AutoDeleteGdiObj<HPEN> pe(CreatePen(PS_SOLID, 1, presentation ? TRANSPARENT : kColPageFrame));
     AutoDeleteBrush brush = CreateSolidBrush(gCurrentTheme->window.backgroundColor);
     SelectObject(hdc, pe);
     SelectObject(hdc, brush);
@@ -2628,33 +2338,37 @@ static void PaintPageFrameAndShadow(HDC hdc, Rect& bounds, Rect& pageRect, bool 
 static void PaintPageFrameAndShadow(HDC hdc, Rect& bounds, Rect& /*pageRect*/, bool /*presentation*/, Color bgCol) {
     AutoDeletePen pen(CreatePen(PS_NULL, 0, 0));
     AutoDeleteBrush brush(CreateSolidBrush(bgCol));
-    ScopedSelectPen restorePen(hdc, pen);
-    ScopedSelectObject restoreBrush(hdc, brush);
+    AutoRestorePen restorePen(hdc, pen);
+    AutoRestoreGdiObject restoreBrush(hdc, brush);
     Rectangle(hdc, bounds.x, bounds.y, bounds.x + bounds.dx + 1, bounds.y + bounds.dy + 1);
 }
 #endif
 
-// CmdToggleImages. Like showLinks this is a debug aid (both live in the debug
-// menu, so both are debug / pre-release only), and like it the outlines are
-// only drawn, never saved - see CmdToggleImages in FrameOnCommand
-static bool gShowImages = false;
+// CmdTogglePageGrid: dotted graph paper on the page (issue #4398).
+// Session-only, not saved. Overlay on top of the page bitmap (normal PDFs
+// are opaque, so this cannot sit under glyphs). Fixed-page documents only.
+static bool gShowPageGrid = false;
 
-// CmdToggleImages: outline images the way showLinks outlines links (debug aid)
-bool ShowImageOutlines() {
-    return gShowImages;
+bool ShowPageGrid() {
+    return gShowPageGrid;
 }
 
-void ToggleShowImageOutlines() {
-    gShowImages = !gShowImages;
+void TogglePageGrid() {
+    gShowPageGrid = !gShowPageGrid;
+}
+
+void SetShowPageGrid(bool on) {
+    gShowPageGrid = on;
 }
 
 /* debug code to visualize links and images (can block while rendering) */
 static void DebugOutlinePageElements(DisplayModel* dm, HDC hdc, bool images) {
     Rect viewPortRect(Point(), dm->GetViewPort().Size());
+    Kind elementKind = images ? kindPageElementImage : kindPageElementDest;
 
     // blue for links, green for images, so both can be on at once
     Color col = images ? MkRgb(0x00, 0xa0, 0x00) : kColBlue;
-    ScopedSelectObject autoPen(hdc, CreatePen(PS_SOLID, 1, col), true);
+    AutoRestoreGdiObject autoPen(hdc, CreatePen(PS_SOLID, 1, col), true);
 
     for (int pageNo = dm->PageCount(); pageNo >= 1; --pageNo) {
         PageInfo* pi = dm->GetPageInfo(pageNo);
@@ -2668,7 +2382,7 @@ static void DebugOutlinePageElements(DisplayModel* dm, HDC hdc, bool images) {
         dm->GetEngine()->TryGetElements(pageNo, &els);
 
         for (auto& el : els) {
-            if (el->Is(kindPageElementImage) != images) {
+            if (!el->Is(elementKind)) {
                 continue;
             }
             Rect rect = dm->CvtToScreen(pageNo, el->GetRect());
@@ -2685,33 +2399,296 @@ static void DebugShowLinks(DisplayModel* dm, HDC hdc) {
     if (gShowImages) {
         DebugOutlinePageElements(dm, hdc, true);
     }
-    if (!gGlobalPrefs->showLinks) {
+    if (!gSettings->showLinks) {
         return;
     }
     DebugOutlinePageElements(dm, hdc, false);
 }
 
-// CmdDebugShowFitContentArea. Like gShowImages, a debug-only visualization that
-// is drawn but never saved to settings
-static bool gShowFitContentArea = false;
-
-void ToggleShowFitContentArea() {
-    gShowFitContentArea = !gShowFitContentArea;
-}
-
-bool ShowFitContentArea() {
-    return gShowFitContentArea;
-}
-
 /* debug code to visualize the area "Fit Content" zoom would fit to, without
    actually switching the zoom. When no content box is detected we outline the
    whole page, which is the same fallback PageSizeAfterRotation() uses */
+
+static uint PdfPageBoxLabelFormat(PdfPageBoxKind kind) {
+    switch (kind) {
+        case PdfPageBoxKind::Crop:
+            return DT_RIGHT | DT_TOP | DT_SINGLELINE;
+        case PdfPageBoxKind::Trim:
+            return DT_RIGHT | DT_BOTTOM | DT_SINGLELINE;
+        case PdfPageBoxKind::Bleed:
+            return DT_LEFT | DT_BOTTOM | DT_SINGLELINE;
+        case PdfPageBoxKind::Art:
+            return DT_CENTER | DT_TOP | DT_SINGLELINE;
+        case PdfPageBoxKind::Media:
+        default:
+            return DT_LEFT | DT_TOP | DT_SINGLELINE;
+    }
+}
+
+static Rect PdfPageBoxLabelRect(const Rect& box, PdfPageBoxKind kind) {
+    Point p = PdfPageBoxLabelPos(box, kind);
+    constexpr int kW = 44;
+    constexpr int kH = 14;
+    switch (kind) {
+        case PdfPageBoxKind::Crop:
+            return Rect(p.x - kW, p.y, kW, kH);
+        case PdfPageBoxKind::Trim:
+            // Bottom-right, above p (like Bleed). Drawing below the box clips
+            // "trim" off the last/only page (#6005).
+            return Rect(p.x - kW, p.y - kH, kW, kH);
+        case PdfPageBoxKind::Bleed:
+            return Rect(p.x, p.y - kH, kW, kH);
+        case PdfPageBoxKind::Art:
+            return Rect(p.x - (kW / 2), p.y, kW, kH);
+        case PdfPageBoxKind::Media:
+        default:
+            return Rect(p.x, p.y, kW, kH);
+    }
+}
+
+// Keep the label fully inside bounds so a box flush with the viewport
+// does not clip the last few letters.
+static Rect ClampRectTo(const Rect& r, const Rect& bounds) {
+    Rect o = r;
+    if (o.dx > bounds.dx) {
+        o.dx = bounds.dx;
+    }
+    if (o.dy > bounds.dy) {
+        o.dy = bounds.dy;
+    }
+    if (o.x < bounds.x) {
+        o.x = bounds.x;
+    }
+    if (o.y < bounds.y) {
+        o.y = bounds.y;
+    }
+    if (o.Right() > bounds.Right()) {
+        o.x = bounds.Right() - o.dx;
+    }
+    if (o.Bottom() > bounds.Bottom()) {
+        o.y = bounds.Bottom() - o.dy;
+    }
+    return o;
+}
+
+// Drawing limits. Appearance (spacing, color, style) lives in
+// FixedPageUI.PageGrid; showing the overlay is session-only.
+constexpr int kPageGridMinMinorPx = 6;
+constexpr int kPageGridMinMajorPx = 4;
+constexpr int kPageGridMaxDots = 8000;
+constexpr int kPageGridMaxLines = 800;
+
+static int PageGridScreenDist(Point a, Point b) {
+    int dx = a.x - b.x;
+    int dy = a.y - b.y;
+    if (dx < 0) {
+        dx = -dx;
+    }
+    if (dy < 0) {
+        dy = -dy;
+    }
+    return dx > dy ? dx : dy;
+}
+
+static void PageGridStroke(HDC hdc, DisplayModel* dm, int pageNo, PointF a, PointF b) {
+    Point sa = dm->CvtToScreen(pageNo, a);
+    Point sb = dm->CvtToScreen(pageNo, b);
+    MoveToEx(hdc, sa.x, sa.y, nullptr);
+    LineTo(hdc, sb.x, sb.y);
+}
+
+static void PaintPageGridSlanted(DisplayModel* dm, HDC hdc, int pageNo, const Rect& bounds, const RectF& vis,
+                                 const RectF& box, const PageGridDraw& g, HBRUSH br, HPEN penMinor, HPEN penMajor) {
+    bool drawMinor = false;
+    if (!PageGridSlantVisible(dm, pageNo, g, box, drawMinor)) {
+        return;
+    }
+    Vec<PageGridSeg> segs;
+    PageGridSlantedSegs(g, box, vis, drawMinor, segs);
+    int saved = SaveDC(hdc);
+    IntersectClipRect(hdc, bounds.x, bounds.y, bounds.x + bounds.dx, bounds.y + bounds.dy);
+    SetBkMode(hdc, TRANSPARENT);
+    for (PageGridSeg& s : segs) {
+        if (s.dot) {
+            Point pt = dm->CvtToScreen(pageNo, PointF(s.x0, s.y0));
+            int sz = s.major ? 3 : 1;
+            int o = sz / 2;
+            RECT rc = {pt.x - o, pt.y - o, pt.x - o + sz, pt.y - o + sz};
+            FillRect(hdc, &rc, br);
+            continue;
+        }
+        SelectObject(hdc, s.major ? penMajor : penMinor);
+        PageGridStroke(hdc, dm, pageNo, PointF(s.x0, s.y0), PointF(s.x1, s.y1));
+    }
+    RestoreDC(hdc, saved);
+}
+
+// Graph-paper overlay in page space, clipped to the visible page.
+// Style "dots": 1px minor / 3px major at intersections.
+// Style "dotted" / "solid": H/V lines (major heavier). Skips comics.
+static void PaintPageGrid(DisplayModel* dm, HDC hdc) {
+    EngineBase* engine = dm->GetEngine();
+    if (!engine || engine->isImageCollection) {
+        return;
+    }
+    PageGridDraw g = GetPageGridDraw();
+    float minorX = g.widthPt / (float)g.subdiv;
+    float minorY = g.heightPt / (float)g.subdiv;
+    if (minorX <= 0.f || minorY <= 0.f) {
+        return;
+    }
+    Rect viewPort(Point(), dm->GetViewPort().Size());
+    HBRUSH br = CreateSolidBrush(g.color);
+    if (!br) {
+        return;
+    }
+    HPEN penMinor = CreatePen(g.style == PageGridStyleKind::Solid ? PS_SOLID : PS_DOT, 1, g.color);
+    int majorWidth = g.style == PageGridStyleKind::Solid ? 2 : 1;
+    HPEN penMajor = CreatePen(PS_SOLID, majorWidth, g.color);
+
+    for (int pageNo = 1; pageNo <= dm->PageCount(); pageNo++) {
+        PageInfo* pi = dm->GetPageInfo(pageNo);
+        if (!pi || !pi->isShown || 0.0 == pi->visibleRatio) {
+            continue;
+        }
+        Rect bounds = pi->pageOnScreen.Intersect(viewPort);
+        if (bounds.IsEmpty()) {
+            continue;
+        }
+        RectF box = engine->PageMediabox(pageNo);
+        if (box.IsEmpty()) {
+            continue;
+        }
+        RectF vis = dm->CvtFromScreen(bounds, pageNo).Intersect(box);
+        if (vis.IsEmpty()) {
+            continue;
+        }
+
+        float ox = box.x + g.offsetXPt;
+        float oy = box.y + g.offsetYPt;
+        if (!PageGridIsUpright(g.slantDeg)) {
+            PaintPageGridSlanted(dm, hdc, pageNo, bounds, vis, box, g, br, penMinor, penMajor);
+            continue;
+        }
+        Point p0 = dm->CvtToScreen(pageNo, PointF(ox, oy));
+        Point px = dm->CvtToScreen(pageNo, PointF(ox + minorX, oy));
+        Point py = dm->CvtToScreen(pageNo, PointF(ox, oy + minorY));
+        int cell = std::min(PageGridScreenDist(p0, px), PageGridScreenDist(p0, py));
+        if (cell * g.subdiv < kPageGridMinMajorPx) {
+            continue;
+        }
+        bool drawMinor = cell >= kPageGridMinMinorPx;
+        float stepX = drawMinor ? minorX : g.widthPt;
+        float stepY = drawMinor ? minorY : g.heightPt;
+
+        float x0 = PageGridAlignDown(vis.x, ox, stepX);
+        float y0 = PageGridAlignDown(vis.y, oy, stepY);
+        float x1 = vis.x + vis.dx;
+        float y1 = vis.y + vis.dy;
+        int nx = (int)((x1 - x0) / stepX) + 2;
+        int ny = (int)((y1 - y0) / stepY) + 2;
+        if (drawMinor) {
+            bool tooMany = g.style == PageGridStyleKind::Dots ? (nx > 0 && ny > 0 && nx * ny > kPageGridMaxDots)
+                                                              : (nx + ny > kPageGridMaxLines);
+            if (tooMany) {
+                drawMinor = false;
+                stepX = g.widthPt;
+                stepY = g.heightPt;
+                x0 = PageGridAlignDown(vis.x, ox, stepX);
+                y0 = PageGridAlignDown(vis.y, oy, stepY);
+                nx = (int)((x1 - x0) / stepX) + 2;
+                ny = (int)((y1 - y0) / stepY) + 2;
+            }
+        }
+
+        int saved = SaveDC(hdc);
+        IntersectClipRect(hdc, bounds.x, bounds.y, bounds.x + bounds.dx, bounds.y + bounds.dy);
+        SetBkMode(hdc, TRANSPARENT);
+        if (g.style == PageGridStyleKind::Dots) {
+            for (float y = y0; y <= y1 + 0.01f; y += stepY) {
+                bool yMajor = !drawMinor || PageGridIsMajor(y, oy, minorY, g.subdiv);
+                for (float x = x0; x <= x1 + 0.01f; x += stepX) {
+                    Point pt = dm->CvtToScreen(pageNo, PointF(x, y));
+                    bool major = !drawMinor || (yMajor && PageGridIsMajor(x, ox, minorX, g.subdiv));
+                    int sz = major ? 3 : 1;
+                    int o = sz / 2;
+                    RECT rc = {pt.x - o, pt.y - o, pt.x - o + sz, pt.y - o + sz};
+                    FillRect(hdc, &rc, br);
+                }
+            }
+        } else {
+            for (float x = x0; x <= x1 + 0.01f; x += stepX) {
+                bool major = !drawMinor || PageGridIsMajor(x, ox, minorX, g.subdiv);
+                SelectObject(hdc, major ? penMajor : penMinor);
+                PageGridStroke(hdc, dm, pageNo, PointF(x, vis.y), PointF(x, y1));
+            }
+            for (float y = y0; y <= y1 + 0.01f; y += stepY) {
+                bool major = !drawMinor || PageGridIsMajor(y, oy, minorY, g.subdiv);
+                SelectObject(hdc, major ? penMajor : penMinor);
+                PageGridStroke(hdc, dm, pageNo, PointF(vis.x, y), PointF(x1, y));
+            }
+        }
+        RestoreDC(hdc, saved);
+    }
+    DeleteObject(penMinor);
+    DeleteObject(penMajor);
+    DeleteObject(br);
+}
+
+// CmdTogglePageBoxes: outline the PDF boxes this page actually declares
+// (MediaBox / CropBox / BleedBox / TrimBox / ArtBox) and label them.
+static void PaintPdfPageBoxes(DisplayModel* dm, HDC hdc) {
+    EngineBase* engine = dm->GetEngine();
+    if (!engine) {
+        return;
+    }
+    Rect viewPortRect(Point(), dm->GetViewPort().Size());
+    PlatformFont* font = GetDefaultGuiFont(true, false);
+    HFONT hfont = font ? font->GetHFont() : nullptr;
+
+    Vec<PdfPageBox> boxes;
+    for (int pageNo = 1; pageNo <= dm->PageCount(); pageNo++) {
+        PageInfo* pi = dm->GetPageInfo(pageNo);
+        if (!pi || !pi->isShown || 0.0 == pi->visibleRatio) {
+            continue;
+        }
+        engine->GetPdfPageBoxes(pageNo, boxes);
+        int n = len(boxes);
+        for (int i = 0; i < n; i++) {
+            const PdfPageBox& box = boxes[i];
+            Rect rect = dm->CvtToScreen(pageNo, box.rect);
+            // coincident boxes (crop == media) would paint on top of each
+            // other; inset later kinds so every outline stays visible
+            rect.Inflate(-(int)box.kind, -(int)box.kind);
+            if (rect.dx < 2 || rect.dy < 2) {
+                continue;
+            }
+            Rect vis = viewPortRect.Intersect(rect);
+            if (vis.IsEmpty()) {
+                continue;
+            }
+            Color col = ColorForPdfPageBox(box.kind);
+            AutoRestoreGdiObject autoPen(hdc, CreatePen(PS_SOLID, 1, col), true);
+            HdcDrawRect(hdc, rect);
+
+            Str name = Str(PdfPageBoxName(box.kind));
+            // MediaBox often extends past CropBox (the drawn page); pin the
+            // label to the on-screen part so it isn't clipped off-canvas
+            Rect labelRc = ClampRectTo(PdfPageBoxLabelRect(vis, box.kind), viewPortRect);
+            SetBkColor(hdc, RGB(255, 255, 255));
+            SetBkMode(hdc, OPAQUE);
+            SetTextColor(hdc, col);
+            HdcDrawText(hdc, name, labelRc, PdfPageBoxLabelFormat(box.kind), hfont);
+        }
+    }
+}
+
 static void DebugShowFitContentArea(DisplayModel* dm, HDC hdc) {
     if (!gShowFitContentArea) {
         return;
     }
     Rect viewPortRect(Point(), dm->GetViewPort().Size());
-    ScopedSelectObject autoPen(hdc, CreatePen(PS_SOLID, 2, kColRed), true);
+    AutoRestoreGdiObject autoPen(hdc, CreatePen(PS_SOLID, 2, kColRed), true);
 
     for (int pageNo = dm->PageCount(); pageNo >= 1; --pageNo) {
         PageInfo* pi = dm->GetPageInfo(pageNo);
@@ -2749,6 +2726,25 @@ static void GetGradientColor(Color a, Color b, float perc, TRIVERTEX* tv) {
 // Draw a border around selected annotation
 static bool gDrawOldStyleAnnotationRect = false;
 
+static void PaintHoveredAnnotationMark(MainWindow* win, HDC hdc, DisplayModel* dm) {
+    WindowTab* tab = win ? win->CurrentTab() : nullptr;
+    Annotation* annot = win ? win->annotationUnderCursor : nullptr;
+    if (!win || !win->pdfAnnotationsToolbarEnabled || !tab || !annot || annot == tab->selectedAnnotation) {
+        return;
+    }
+    int pageNo = annot->pageNo;
+    if (!dm->PageVisible(pageNo)) {
+        return;
+    }
+    Rect rect = dm->CvtToScreen(pageNo, GetRect(annot));
+    rect.Inflate(DisplayModel::kAnnotMarkPadding, DisplayModel::kAnnotMarkPadding);
+    Gdiplus::Graphics gs(hdc);
+    Gdiplus::Color blue(200, 0, 80, 200);
+    Gdiplus::Pen pen(blue, 2);
+    pen.SetDashStyle(Gdiplus::DashStyleDot);
+    gs.DrawRectangle(&pen, rect.x, rect.y, rect.dx, rect.dy);
+}
+
 NO_INLINE static void PaintCurrentEditAnnotationMark(WindowTab* tab, HDC hdc, DisplayModel* dm) {
     if (!tab) {
         return;
@@ -2764,15 +2760,80 @@ NO_INLINE static void PaintCurrentEditAnnotationMark(WindowTab* tab, HDC hdc, Di
         return;
     }
     bool canResize = AnnotationCanBeResized(annot->type);
+    MainWindow* win = tab->win;
+    bool draggingLine = win && win->annotationBeingResized && IsLineEndpointHandle((ResizeHandle)win->resizeHandle) &&
+                        annot->type == AnnotationType::Line;
+    bool draggingVertices = win && win->annotationBeingResized && IsVertexHandle((ResizeHandle)win->resizeHandle) &&
+                            IsPolyVertexType(annot->type);
+    // an outline-only resize hasn't touched the annotation yet, so the marker
+    // and its handles come from the preview rect instead
+    bool draggingOutline =
+        win && win->annotationBeingResized && win->annotationResizeOutlineOnly && win->annotationBeingDragged == annot;
 
-    Rect rect = dm->CvtToScreen(pageNo, GetRect(annot));
+    Rect rect = dm->CvtToScreen(pageNo, draggingOutline ? win->annotationResizePreviewRect : GetRect(annot));
     if (!tab->didScrollToSelectedAnnotation) {
         dm->ScrollScreenToRect(pageNo, rect);
         tab->didScrollToSelectedAnnotation = true;
     }
-    rect.Inflate(4, 4);
+    rect.Inflate(DisplayModel::kAnnotMarkPadding, DisplayModel::kAnnotMarkPadding);
 
     Gdiplus::Graphics gs(hdc);
+
+    Gdiplus::SolidBrush handleBrush(Gdiplus::Color(255, 255, 255, 255)); // White
+    Gdiplus::Pen handlePen(Gdiplus::Color(255, 0, 0, 0), 1);             // Black
+    int hs = 6;                                                          // handle size
+    int hh = hs / 2;                                                     // half handle
+
+    auto drawHandle = [&](int x, int y) {
+        gs.FillRectangle(&handleBrush, x, y, hs, hs);
+        gs.DrawRectangle(&handlePen, x, y, hs, hs);
+    };
+
+    auto drawVertexHandles = [&](const Vec<PointF>& pts) {
+        for (int i = 0; i < len(pts); i++) {
+            Point p = dm->CvtToScreen(pageNo, pts[i]);
+            drawHandle(p.x - hh, p.y - hh);
+        }
+    };
+
+    auto drawVertexPath = [&](const Vec<PointF>& pts, bool closed) {
+        int n = len(pts);
+        if (n == 0) {
+            return;
+        }
+        gs.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+        Gdiplus::Color blue(255, 0, 80, 200);
+        Gdiplus::Pen pen(blue, (Gdiplus::REAL)std::max(DpiScale(2), 1));
+        Point prev = dm->CvtToScreen(pageNo, pts[0]);
+        for (int i = 1; i < n; i++) {
+            Point cur = dm->CvtToScreen(pageNo, pts[i]);
+            gs.DrawLine(&pen, prev.x, prev.y, cur.x, cur.y);
+            prev = cur;
+        }
+        if (closed && n >= 2) {
+            Point first = dm->CvtToScreen(pageNo, pts[0]);
+            gs.DrawLine(&pen, prev.x, prev.y, first.x, first.y);
+        }
+    };
+
+    if (draggingLine) {
+        Point startPt = dm->CvtToScreen(pageNo, win->annotationLinePreviewStart);
+        Point endPt = dm->CvtToScreen(pageNo, win->annotationLinePreviewEnd);
+        gs.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+        Gdiplus::Color blue(255, 0, 80, 200);
+        Gdiplus::Pen pen(blue, (Gdiplus::REAL)std::max(DpiScale(2), 1));
+        gs.DrawLine(&pen, startPt.x, startPt.y, endPt.x, endPt.y);
+        drawHandle(startPt.x - hh, startPt.y - hh);
+        drawHandle(endPt.x - hh, endPt.y - hh);
+        return;
+    }
+
+    if (draggingVertices) {
+        bool closed = annot->type == AnnotationType::Polygon;
+        drawVertexPath(win->annotationVertexPreview, closed);
+        drawVertexHandles(win->annotationVertexPreview);
+        return;
+    }
 
     if (gDrawOldStyleAnnotationRect) {
         Gdiplus::Color col = GdiRgbFromColor(0xff3333); // blue
@@ -2791,11 +2852,23 @@ NO_INLINE static void PaintCurrentEditAnnotationMark(WindowTab* tab, HDC hdc, Di
         return;
     }
 
-    // Draw resize handles
-    Gdiplus::SolidBrush handleBrush(Gdiplus::Color(255, 255, 255, 255)); // White
-    Gdiplus::Pen handlePen(Gdiplus::Color(255, 0, 0, 0), 1);             // Black
-    int hs = 6;                                                          // handle size
-    int hh = hs / 2;                                                     // half handle
+    PointF lineStart, lineEnd;
+    if (annot->type == AnnotationType::Line && GetLinePoints(annot, lineStart, lineEnd)) {
+        Point startPt = dm->CvtToScreen(pageNo, lineStart);
+        Point endPt = dm->CvtToScreen(pageNo, lineEnd);
+        drawHandle(startPt.x - hh, startPt.y - hh);
+        drawHandle(endPt.x - hh, endPt.y - hh);
+        return;
+    }
+
+    if (IsPolyVertexType(annot->type)) {
+        drawVertexHandles(GetVertices(annot));
+        return;
+    }
+
+    if (annot->type == AnnotationType::Redact && len(GetQuadPointsAsRect(annot)) > 0) {
+        return;
+    }
 
     int left = rect.x - hh;
     int midX = rect.x + (rect.dx / 2) - hh;
@@ -2803,11 +2876,6 @@ NO_INLINE static void PaintCurrentEditAnnotationMark(WindowTab* tab, HDC hdc, Di
     int top = rect.y - hh;
     int midY = rect.y + (rect.dy / 2) - hh;
     int bottom = rect.y + rect.dy - hh;
-
-    auto drawHandle = [&](int x, int y) {
-        gs.FillRectangle(&handleBrush, x, y, hs, hs);
-        gs.DrawRectangle(&handlePen, x, y, hs, hs);
-    };
 
     // corners
     drawHandle(left, top);
@@ -2821,19 +2889,49 @@ NO_INLINE static void PaintCurrentEditAnnotationMark(WindowTab* tab, HDC hdc, Di
     drawHandle(left, midY);
 }
 
+// CmdToggleMirror (#6221): the part of the page that shows in bounds once
+// flipped is painted as usual into a bitmap, then copied in mirrored. What is
+// already there (the page background, for transparent pages) goes into the
+// bitmap first, so compositing sees it
+static int PaintPageBitmap(HDC hdc, Rect bounds, DisplayModel* dm, int pageNo, PageInfo* pi, bool* outOfDateCue) {
+    if (!dm->GetMirror() || bounds.IsEmpty()) {
+        return gRenderCache->Paint(hdc, bounds, dm, pageNo, pi, outOfDateCue);
+    }
+    Rect page = pi->pageOnScreen;
+    Rect src = bounds;
+    src.x = (2 * page.x) + page.dx - (bounds.x + bounds.dx);
+
+    HDC memDC = CreateCompatibleDC(hdc);
+    HBITMAP bmp = CreateCompatibleBitmap(hdc, src.dx, src.dy);
+    if (!memDC || !bmp) {
+        DeleteObject(bmp);
+        DeleteDC(memDC);
+        return gRenderCache->Paint(hdc, bounds, dm, pageNo, pi, outOfDateCue);
+    }
+    HGDIOBJ prevBmp = SelectObject(memDC, bmp);
+    StretchBlt(memDC, src.dx - 1, 0, -src.dx, src.dy, hdc, bounds.x, bounds.y, bounds.dx, bounds.dy, SRCCOPY);
+    SetViewportOrgEx(memDC, -src.x, -src.y, nullptr);
+    int res = gRenderCache->Paint(memDC, src, dm, pageNo, pi, outOfDateCue);
+    SetViewportOrgEx(memDC, 0, 0, nullptr);
+    StretchBlt(hdc, bounds.x + bounds.dx - 1, bounds.y, -bounds.dx, bounds.dy, memDC, 0, 0, src.dx, src.dy, SRCCOPY);
+    SelectObject(memDC, prevBmp);
+    DeleteObject(bmp);
+    DeleteDC(memDC);
+    return res;
+}
+
 static bool DrawDocument(MainWindow* win, HDC hdc, Rect rcArea) {
-    ReportIf(!win->AsFixed());
-    if (!win->AsFixed()) {
+    if (ReportIf(!win->AsFixed())) {
         return false;
     }
     DisplayModel* dm = win->AsFixed();
     // logf("DrawDocument RenderCache:\n");
 
     auto* engine = dm->GetEngine();
-    bool isImage = engine->IsImageCollection();
+    bool isImage = engine->isImageCollection;
     // draw comic books and single images on a black background
     // (without frame and shadow)
-    bool paintOnBlackWithoutShadow = win->presentation || isImage;
+    bool paintOnBlackWithoutShadow = win->InPresentation() || isImage;
     bool isEbook = engine->kind == kindEngineMupdf && !str::EqI(engine->defaultExt, StrL(".pdf"));
     bool isPdf = engine->kind == kindEngineMupdf && str::EqI(engine->defaultExt, StrL(".pdf"));
     Color colDocBg;
@@ -2844,20 +2942,20 @@ static bool DrawDocument(MainWindow* win, HDC hdc, Rect rcArea) {
         // allow ComicBookUI/ImageUI WindowBgCol to override the default black
         ParsedColor* bgOverride = nullptr;
         if (engine->kind == kindEngineComicBooks) {
-            bgOverride = GetPrefsColor(gGlobalPrefs->comicBookUI.windowBgCol);
+            bgOverride = GetPrefsColor(gSettings->comicBookUI.windowBgCol);
         } else {
-            bgOverride = GetPrefsColor(gGlobalPrefs->imageUI.windowBgCol);
+            bgOverride = GetPrefsColor(gSettings->imageUI.windowBgCol);
         }
         if (bgOverride->parsedOk) {
             colDocBg = bgOverride->col;
         }
     } else if (isEbook) {
-        ParsedColor* bgOverride = GetPrefsColor(gGlobalPrefs->eBookUI.windowBgCol);
+        ParsedColor* bgOverride = GetPrefsColor(gSettings->eBookUI.windowBgCol);
         if (bgOverride->parsedOk) {
             colDocBg = bgOverride->col;
         }
     } else if (isPdf) {
-        ParsedColor* bgOverride = GetPrefsColor(gGlobalPrefs->fixedPageUI.windowBgCol);
+        ParsedColor* bgOverride = GetPrefsColor(gSettings->fixedPageUI.windowBgCol);
         if (bgOverride->parsedOk) {
             colDocBg = bgOverride->col;
         }
@@ -2888,7 +2986,7 @@ static bool DrawDocument(MainWindow* win, HDC hdc, Rect rcArea) {
     }
 
     bool shouldPaint = false;
-    auto* gcols = gGlobalPrefs->fixedPageUI.gradientColors;
+    auto* gcols = gSettings->fixedPageUI.gradientColors;
     auto nGCols = len(*gcols);
     auto paintBgOrCheckerboard = [&](Color col, Rect rc) {
         if (col == kColorUnset) {
@@ -2898,6 +2996,23 @@ static bool DrawDocument(MainWindow* win, HDC hdc, Rect rcArea) {
             HdcFillRect(hdc, rc, brush);
         }
     };
+
+    // every visible page paints its own rect (placeholder, then bitmap), so the
+    // background only needs the space around them; an image collection has no
+    // placeholder under a page not rendered yet
+    int savedDC = 0;
+    if (!isImage) {
+        savedDC = SaveDC(hdc);
+        Rect visible(Point(), dm->GetViewPort().Size());
+        for (int pageNo = 1; pageNo <= dm->PageCount(); ++pageNo) {
+            PageInfo* pi = dm->GetPageInfo(pageNo);
+            if (!pi || 0.0F == pi->visibleRatio || !pi->isShown) {
+                continue;
+            }
+            Rect b = pi->pageOnScreen.Intersect(visible);
+            ExcludeClipRect(hdc, b.x, b.y, b.x + b.dx, b.y + b.dy);
+        }
+    }
 
     if (paintOnBlackWithoutShadow || colDocBg == kColorUnset) {
         paintBgOrCheckerboard(colDocBg, rcArea);
@@ -2954,16 +3069,19 @@ static bool DrawDocument(MainWindow* win, HDC hdc, Rect rcArea) {
         } else {
             gr[0].LowerRight = 3;
         }
-        // TODO: disable for less than about two screen heights?
         ULONG nMesh = 1;
         if (needCenter) {
             nMesh = 2;
         }
         GradientFill(hdc, tv, dimof(tv), gr, nMesh, GRADIENT_FILL_RECT_V);
     }
+    if (savedDC) {
+        RestoreDC(hdc, savedDC);
+    }
 
     bool rendering = false;
     Rect screen(Point(), dm->GetViewPort().Size());
+    bool anyPageVisible = false;
 
     bool isRtl = IsUIRtl();
     for (int pageNo = 1; pageNo <= dm->PageCount(); ++pageNo) {
@@ -2971,6 +3089,7 @@ static bool DrawDocument(MainWindow* win, HDC hdc, Rect rcArea) {
         if (!pi || 0.0F == pi->visibleRatio) {
             continue;
         }
+        anyPageVisible = true;
         ReportIf(!pi->isShown);
         if (!pi->isShown) {
             continue;
@@ -2978,19 +3097,23 @@ static bool DrawDocument(MainWindow* win, HDC hdc, Rect rcArea) {
 
         Rect bounds = pi->pageOnScreen.Intersect(screen);
         // don't paint the frame background for images
-        if (!dm->GetEngine()->IsImageCollection()) {
-            Rect r = pi->pageOnScreen;
-            auto presMode = win->presentation;
-            PaintPageFrameAndShadow(hdc, bounds, r, presMode, colPlaceholder);
+        if (!dm->GetEngine()->isImageCollection) {
+            if (ShowTransparencyGrid()) {
+                HdcPaintCheckerboard(hdc, bounds.x, bounds.y, bounds.dx, bounds.dy);
+            } else {
+                Rect r = pi->pageOnScreen;
+                auto presMode = win->InPresentation();
+                PaintPageFrameAndShadow(hdc, bounds, r, presMode, colPlaceholder);
+            }
         }
 
         // check if this page is known to have failed rendering
         if (pi->failedToRender) {
             shouldPaint = true;
-            PlatformFont* fontRightTxt = HdcCreateSimpleFont(hdc, "MS Shell Dlg", 14);
+            PlatformFont* fontRightTxt = HdcCreateSimpleFont(hdc, StrL("MS Shell Dlg"), 14);
             HGDIOBJ hPrevFont = SelectObject(hdc, fontRightTxt->GetHFont());
             auto prevCol = SetTextColor(hdc, colDocTxt);
-            TempStr msg = fmt(_TRA("Couldn't render page %d").s, pageNo);
+            TempStr msg = fmt(Tr("Couldn't render page %d").s, pageNo);
             HdcDrawCenteredText(hdc, bounds, msg, isRtl);
             SetTextColor(hdc, prevCol);
             SelectObject(hdc, hPrevFont);
@@ -2998,7 +3121,7 @@ static bool DrawDocument(MainWindow* win, HDC hdc, Rect rcArea) {
         }
 
         bool renderOutOfDateCue = false;
-        int renderDelay = gRenderCache->Paint(hdc, bounds, dm, pageNo, pi, &renderOutOfDateCue);
+        int renderDelay = PaintPageBitmap(hdc, bounds, dm, pageNo, pi, &renderOutOfDateCue);
         if (renderDelay == 0) {
             shouldPaint = true;
             if (curTab) {
@@ -3006,9 +3129,9 @@ static bool DrawDocument(MainWindow* win, HDC hdc, Rect rcArea) {
             }
         }
         if (renderDelay != 0) {
-            PlatformFont* fontRightTxt = HdcCreateSimpleFont(hdc, "MS Shell Dlg", 14);
+            PlatformFont* fontRightTxt = HdcCreateSimpleFont(hdc, StrL("MS Shell Dlg"), 14);
             HGDIOBJ hPrevFont = SelectObject(hdc, fontRightTxt->GetHFont());
-            if (renderDelay != RENDER_DELAY_FAILED) {
+            if (renderDelay != kRenderDelayFailed) {
                 if (renderDelay < kRenderDelayShowNotif) {
                     ScheduleRepaint(win, kRenderDelayShowNotif - renderDelay);
                 } else {
@@ -3019,14 +3142,14 @@ static bool DrawDocument(MainWindow* win, HDC hdc, Rect rcArea) {
                     // set shouldPaint and gNoFlickerRender skips flushing the buffer.
                     shouldPaint = true;
                     SetTextColor(hdc, colDocTxt);
-                    TempStr msg = fmt(_TRA("Rendering page %d...").s, pageNo);
+                    TempStr msg = fmt(Tr("Rendering page %d...").s, pageNo);
                     HdcDrawCenteredText(hdc, bounds, msg, isRtl);
                 }
                 rendering = true;
             } else {
                 shouldPaint = true;
                 auto prevCol = SetTextColor(hdc, colDocTxt);
-                TempStr msg = fmt(_TRA("Couldn't render page %d").s, pageNo);
+                TempStr msg = fmt(Tr("Couldn't render page %d").s, pageNo);
                 HdcDrawCenteredText(hdc, bounds, msg, isRtl);
                 SetTextColor(hdc, prevCol);
             }
@@ -3042,7 +3165,7 @@ static bool DrawDocument(MainWindow* win, HDC hdc, Rect rcArea) {
         if (!bmpDC) {
             continue;
         }
-        SelectObject(bmpDC, gBitmapReloadingCue);
+        HGDIOBJ prevBmp = SelectObject(bmpDC, gBitmapReloadingCue);
         int size = DpiScale(16);
         int cx = std::min(bounds.dx, 2 * size);
         int cy = std::min(bounds.dy, 2 * size);
@@ -3051,12 +3174,25 @@ static bool DrawDocument(MainWindow* win, HDC hdc, Rect rcArea) {
         int dxDest = std::min(cx, size);
         int dyDest = std::min(cy, size);
         StretchBlt(hdc, x, y, dxDest, dyDest, bmpDC, 0, 0, 16, 16, SRCCOPY);
+        SelectObject(bmpDC, prevBmp);
         DeleteDC(bmpDC);
     }
 
     WindowTab* tab = win->CurrentTab();
+    PaintAnnotationPlacement(win, hdc, dm);
+    PaintHoveredAnnotationMark(win, hdc, dm);
+    RepositionAnnotationHoverOverlay(win);
+    RepositionAnnotationTextPopup(win);
+    RepositionAnnotEditToolbar(win);
+    RepositionFreeTextInPlaceEdit(win);
     PaintCurrentEditAnnotationMark(tab, hdc, dm);
+    if (ShowPageGrid() && !win->InPresentation()) {
+        PaintPageGrid(dm, hdc);
+    }
     GfxHdc gfx(hdc);
+
+    // empty form fields, under find/selection so those stay visible
+    PaintFormFieldHighlights(win, &gfx);
 
     // draw highlight rectangle around element under cursor during context menu
     if (win->contextMenuHighlightPageNo > 0 && dm->PageVisible(win->contextMenuHighlightPageNo)) {
@@ -3081,6 +3217,9 @@ static bool DrawDocument(MainWindow* win, HDC hdc, Rect rcArea) {
     UpdateSelectionToolbarPosition(win);
 
     PaintReadAloudHighlight(win, &gfx);
+    ReadingBarPaint(win, &gfx);
+    PaintSignatureMarks(win, &gfx);
+    PaintMeasurement(win, &gfx);
 
     if (win->fwdSearchMark.show) {
         PaintForwardSearchMark(win, &gfx);
@@ -3092,6 +3231,14 @@ static bool DrawDocument(MainWindow* win, HDC hdc, Rect rcArea) {
     if (!rendering) {
         DebugShowLinks(dm, hdc);
         DebugShowFitContentArea(dm, hdc);
+        if (win->showPageBoxes) {
+            PaintPdfPageBoxes(dm, hdc);
+        }
+    }
+    // Empty viewport (narrow page on a canvas sized by a wider one): the last
+    // frame is stale after a reload or jump. Flush the background. Issue #6136.
+    if (!anyPageVisible) {
+        shouldPaint = true;
     }
     return shouldPaint;
 }
@@ -3104,10 +3251,10 @@ static bool CanvasShouldShowKeyboardFocus(MainWindow* win) {
     if (!win || !win->hwndFrame || !win->hwndCanvas) {
         return false;
     }
-    if (!gGlobalPrefs || !gGlobalPrefs->showDocumentFocusIndicator) {
+    if (!gSettings || !gSettings->showDocumentFocusIndicator) {
         return false;
     }
-    if (win->presentation || win->isFullScreen) {
+    if (win->IsFullScreenOrPresentation()) {
         return false;
     }
     return GetFocus() == win->hwndFrame;
@@ -3135,7 +3282,7 @@ void InvalidateCanvasKeyboardFocus(MainWindow* win) {
     }
     // Still invalidate when the setting is on so the ring appears/disappears
     // with focus; when off, skip the repaint cost.
-    if (!gGlobalPrefs || !gGlobalPrefs->showDocumentFocusIndicator) {
+    if (!gSettings || !gSettings->showDocumentFocusIndicator) {
         return;
     }
     HwndInvalidate(win->hwndCanvas);
@@ -3145,10 +3292,12 @@ static void OnPaintDocument(MainWindow* win) {
     auto t = TimeGet();
     PAINTSTRUCT ps;
     HDC hdc = BeginPaint(win->hwndCanvas, &ps);
+    // page is never mirrored, even when the frame is RTL (issue #5326)
+    SetLayout(hdc, 0);
 
-    if (win->presentation == PM_BLACK_SCREEN) {
+    if (win->windowMode == WindowMode::PresentationBlack) {
         HdcFillRect(hdc, ToRect(ps.rcPaint), GetStockBrush(BLACK_BRUSH));
-    } else if (win->presentation == PM_WHITE_SCREEN) {
+    } else if (win->windowMode == WindowMode::PresentationWhite) {
         HdcFillRect(hdc, ToRect(ps.rcPaint), GetStockBrush(WHITE_BRUSH));
     } else {
         bool shouldPaint = DrawDocument(win, win->buffer->GetDC(), ToRect(ps.rcPaint));
@@ -3181,7 +3330,7 @@ static LRESULT OnSetCursorMouseNone(MainWindow* win, HWND hwnd) {
         win->DeleteToolTip();
         return FALSE;
     }
-    if (GetNotificationForGroup(win->hwndCanvas, kNotifCursorPos)) {
+    if (GetNotificationForGroup(win, kNotifCursorPos)) {
         SetCursorCached(IDC_CROSS);
         return TRUE;
     }
@@ -3198,6 +3347,14 @@ static LRESULT OnSetCursorMouseNone(MainWindow* win, HWND hwnd) {
         }
     }
 
+    // an annotation being edited: no hover cursors or tooltips for anything else
+    if (AnnotationLockingMouse(win)) {
+        win->DeleteToolTip();
+        bool onSelected = dm->GetAnnotationAtPos(pt, selected) == selected;
+        SetCursorCached(onSelected ? IDC_HAND : IDC_ARROW);
+        return TRUE;
+    }
+
     // PDF form fields: I-beam over text/choice, hand over checkbox/radio
     {
         WidgetCursorKind kind = GetWidgetCursorKind(dm->GetWidgetAtPos(pt));
@@ -3211,12 +3368,12 @@ static LRESULT OnSetCursorMouseNone(MainWindow* win, HWND hwnd) {
         }
     }
 
-    Annotation* annot = dm->GetAnnotationAtPos(pt, selected);
-    bool annotEditHover = annot && (selected || tab->editAnnotsWindow);
+    Annotation* annot = IsPlacingHighlighterAnnotation(win) ? nullptr : dm->GetAnnotationAtPos(pt, selected);
+    bool annotEditHover = annot && (win->pdfAnnotationsToolbarEnabled || selected);
 
     int pageNo = 0;
     IPageElement* pageEl = dm->GetElementAtPos(pt, &pageNo);
-    if (pageEl && pageEl->Is(kindPageElementDest) && gGlobalPrefs->disableLinks) {
+    if (pageEl && pageEl->Is(kindPageElementDest) && gSettings->disableLinks) {
         pageEl = nullptr;
     }
     if (!pageEl) {
@@ -3226,6 +3383,14 @@ static LRESULT OnSetCursorMouseNone(MainWindow* win, HWND hwnd) {
             SetTextOrArrorCursor(dm, pt);
         }
         win->DeleteToolTip();
+        return TRUE;
+    }
+    // The Edit PDF hover card and the text popup have the annotation's contents.
+    // Do not put the old one-line comment tooltip on top of them.
+    bool annotCardShown = win->pdfAnnotationsToolbarEnabled || IsAnnotationTextPopupShownFor(win, annot);
+    if (annotCardShown && annot && pageEl->Is(kindPageElementComment)) {
+        win->DeleteToolTip();
+        SetCursorCached(IDC_HAND);
         return TRUE;
     }
     Str text = pageEl->GetValue();
@@ -3250,14 +3415,46 @@ static LRESULT OnSetCursorMouseNone(MainWindow* win, HWND hwnd) {
 }
 
 static LRESULT OnSetCursor(MainWindow* win, HWND hwnd) {
+    if (win->measurementToolbar && win->mouseAction == MouseAction::None) {
+        SetCanvasCursor(win, IDC_CROSS);
+        return TRUE;
+    }
     ReportIf(win->hwndCanvas != hwnd);
+    if (SigMarksOnSetCursor(win)) {
+        return TRUE;
+    }
+    if (ReadingBarOnSetCursor(win)) {
+        win->DeleteToolTip();
+        return TRUE;
+    }
+    if (DisplayModel* dm = win->AsFixed()) {
+        Point pt = HwndGetCursorPos(hwnd);
+        bool allow = PageGridDragActive() || IsPageGridDialogOpen() || IsAltPressed();
+        PageGridAxis axis = PageGridCursorAxis(dm, pt.x, pt.y, allow);
+        if (axis != PageGridAxis::None) {
+            SetCursorCached(axis == PageGridAxis::Height ? IDC_SIZENS : IDC_SIZEWE);
+            win->DeleteToolTip();
+            return TRUE;
+        }
+    }
     if (win->mouseAction != MouseAction::None) {
         win->DeleteToolTip();
+    }
+
+    if (AnnotationPlacementOnSetCursor(win)) {
+        win->DeleteToolTip();
+        return TRUE;
     }
 
     // the laser dot replaces every other cursor, and while pointing at the page
     // during a talk a link tooltip popping up is just in the way
     if (SetLaserPointerCursor(win)) {
+        win->DeleteToolTip();
+        return TRUE;
+    }
+
+    if (IsPlacingSignature(win)) {
+        SetCursorCached(IDC_CROSS);
         win->DeleteToolTip();
         return TRUE;
     }
@@ -3296,7 +3493,7 @@ static LRESULT OnSetCursor(MainWindow* win, HWND hwnd) {
             return OnSetCursorMouseNone(win, hwnd);
         }
     }
-    return win->presentation ? TRUE : FALSE;
+    return win->InPresentation() ? TRUE : FALSE;
 }
 
 static float ScaleZoomBy(MainWindow* win, float factor) {
@@ -3309,7 +3506,7 @@ static bool gWheelZoomRelative = true;
 // we guess this is part of continous zoom action if WM_MOUSEWHEEL
 static bool IsFirstWheelMsg(LARGE_INTEGER& lastTime) {
     auto currTime = TimeGet();
-    auto elapsedMs = TimeDiffMs(lastTime, currTime);
+    auto elapsedMs = TimeSinceInMs(lastTime);
     // 150 ms is a heuristic based on looking at logs
     if (elapsedMs < 150.0) {
         // logf("IsFirstWheelMsg: no, elapsed: %.f\n", (float)elapsedMs);
@@ -3333,7 +3530,7 @@ static void ZoomByMouseWheel(MainWindow* win, WPARAM wp) {
     float newZoom;
     float factor = 0;
     // when ZoomIncrement is zero/negative, zoom must step through ZoomLevels (issue #5662)
-    bool discreteWheelZoom = !gWheelZoomRelative || gGlobalPrefs->zoomIncrement <= 0;
+    bool discreteWheelZoom = !gWheelZoomRelative || gSettings->zoomIncrement <= 0;
     if (discreteWheelZoom) {
         newZoom = win->ctrl->GetNextZoomStep(delta < 0 ? kZoomMin : kZoomMax);
         bool smartZoom = false; // Note: if true will prioritze selection
@@ -3383,10 +3580,48 @@ static void ZoomByMouseWheel(MainWindow* win, WPARAM wp) {
 // that scroll do anything" have to compare the target instead, or they see no
 // movement on every wheel event.
 static int WheelScrollPosOrTarget(MainWindow* win) {
-    if (gGlobalPrefs->smoothScroll && win->scrollAnimActive) {
+    if (gSettings->smoothScroll && win->scrollAnimActive) {
         return win->scrollTargetY;
     }
     return GetScrollPos(win->hwndCanvas, SB_VERT);
+}
+
+// a fractional delta keeps the wheel "fine" this long, so the odd whole notch
+// in a touchpad swipe doesn't turn a page by itself
+constexpr double kWheelFineDeltaMs = 500;
+
+// A mouse wheel reports whole notches (WHEEL_DELTA). A precision touchpad
+// reports finger travel in fractions of a notch and a swipe adds up to many
+// notches, so a page per notch races through a document (#3755)
+static bool IsFineWheel(MainWindow* win, int delta) {
+    if (delta % WHEEL_DELTA != 0) {
+        win->wheelFineDeltaTime = TimeGet();
+        return true;
+    }
+    return win->wheelFineDeltaTime.QuadPart != 0 && TimeSinceInMs(win->wheelFineDeltaTime) < kWheelFineDeltaMs;
+}
+
+// the wheel travel that turns a page: a notch, or for a fine wheel as much as
+// scrolling a window's height takes in continuous mode
+static int WheelPageTurnDelta(MainWindow* win, int delta) {
+    if (!IsFineWheel(win, delta)) {
+        return WHEEL_DELTA;
+    }
+    int perLine = gDeltaPerLine > 0 ? gDeltaPerLine : WHEEL_DELTA / 3;
+    int lineHeight = std::max(DpiScale(ScrollLineAmount(gSettings->scrollLineAmount)), 1);
+    int lines = win->canvasRc.dy / lineHeight;
+    return std::max(WHEEL_DELTA, lines * perLine);
+}
+
+static void WheelTurnPage(MainWindow* win, int dir) {
+    if (dir > 0) {
+        win->ctrl->GoToPrevPage();
+    } else if (dir < 0) {
+        win->ctrl->GoToNextPage();
+    }
+    if (dir != 0) {
+        ReadAloudOnUserViewChanged(win);
+    }
 }
 
 // Fit Content used to turn the mouse wheel into page flipping in every view mode.
@@ -3409,9 +3644,81 @@ static bool FitContentWheelFlipsPage(DisplayModel* dm) {
     return true;
 }
 
+// Comics decode slowly. Queued wheel notches after a page turn skip unread
+// pages (#6144). Allow another turn only after the current page is on screen
+// and a short gap has passed.
+constexpr double kWheelPageTurnGapMs = 250;
+
+static bool WheelMayTurnPage(MainWindow* win) {
+    DisplayModel* dm = win->AsFixed();
+    if (!dm || !dm->GetEngine() || !dm->GetEngine()->isImageCollection) {
+        return true;
+    }
+    if (win->wheelPageTurnTime.QuadPart != 0 && TimeSinceInMs(win->wheelPageTurnTime) < kWheelPageTurnGapMs) {
+        return false;
+    }
+    if (gRenderCache && !gRenderCache->Exists(dm, dm->CurrentPageNo(), dm->PageRotation(dm->CurrentPageNo()))) {
+        return false;
+    }
+    return true;
+}
+
+static void OnWheelPageTurn(MainWindow* win) {
+    StopSmoothScroll(win);
+    win->wheelAccumDelta = 0;
+    win->wheelPageTurnTime = TimeGet();
+}
+
+// Mouse-wheel on the citation-hover popup (cursor still on the citation
+// link that opened it; on the popup itself, the popup gets the wheel).
+//   shift+wheel → scroll popup content (rolls over to prev/next page)
+//   ctrl+wheel  → zoom popup content
+//   plain wheel → falls through to scroll the main document, as if the
+//                 popup weren't there (modifier-less wheel scrolling a
+//                 document shouldn't get hijacked by the hover popup)
+//   horizontal wheel → scroll popup content: mouse software often sends
+//                 shift+wheel as one (issue #6252)
+static bool RefHoverTakesWheel(MainWindow* win, UINT msg, WPARAM wp, LPARAM lp) {
+    RefHoverState* s = win->refHover;
+    if (!s || !s->hwndPopup || !HwndIsVisible(s->hwndPopup)) {
+        return false;
+    }
+    bool isCtrl = (LOWORD(wp) & MK_CONTROL) || IsCtrlPressed();
+    bool isShift = (LOWORD(wp) & MK_SHIFT) || IsShiftPressed();
+    if (msg == WM_MOUSEWHEEL && !isCtrl && !isShift) {
+        return false;
+    }
+    DisplayModel* dm = win->AsFixed();
+    int srcPage = s->displayed.srcPage;
+    if (!dm || !dm->ValidPageNo(srcPage)) {
+        return false;
+    }
+    // Is the wheel (lp, screen coordinates) on the link that opened the popup?
+    // Test its kept rect: the engine's link lookup fails while the popup
+    // renders, which sent the next wheel notches to the document.
+    Point pt = HwndScreenToClient(win->hwndCanvas, {GET_X_LPARAM(lp), GET_Y_LPARAM(lp)});
+    PointF pagePt = dm->CvtFromScreen(pt, srcPage);
+    if (!s->displayed.srcRect.Contains(pagePt)) {
+        return false;
+    }
+    RefHoverOnWheel(s, dm->GetEngine(), msg, wp, lp, RefHoverWheelAt::Link);
+    return true;
+}
+
+// InvertMouseWheel (#6493): the wheel delta with its sign flipped
+static WPARAM MaybeInvertWheel(WPARAM wp) {
+    if (!gSettings->invertMouseWheel) {
+        return wp;
+    }
+    int delta = -(int)GET_WHEEL_DELTA_WPARAM(wp);
+    delta = std::min(delta, (int)SHRT_MAX);
+    return MAKEWPARAM(LOWORD(wp), (WORD)(short)delta);
+}
+
 static LRESULT CanvasOnMouseWheel(MainWindow* win, UINT msg, WPARAM wp, LPARAM lp) {
     // Scroll the ToC sidebar, if it's visible and the cursor is in it
-    if (win->uiState.tocVisible && HwndIsCursorOverWindow(win->tocTreeView->hwnd) && !gWheelMsgRedirect) {
+    if (IsSidebarViewShown(win, SidebarView::Bookmarks) && HwndIsCursorOverWindow(win->tocTreeView->hwnd) &&
+        !gWheelMsgRedirect) {
         // Note: hwndTocTree's window procedure doesn't always handle
         //       WM_MOUSEWHEEL and when it's bubbling up, we'd return
         //       here recursively - prevent that
@@ -3427,33 +3734,8 @@ static LRESULT CanvasOnMouseWheel(MainWindow* win, UINT msg, WPARAM wp, LPARAM l
         gInMouseWheelScroll = wasInMouseWheelScroll;
     };
 
-    // Mouse-wheel on the citation-hover popup (cursor still on the citation
-    // link that opened it). Avoids moving the cursor onto the popup itself,
-    // which would dismiss the hover.
-    //   shift+wheel → scroll popup content (rolls over to prev/next page)
-    //   ctrl+wheel  → zoom popup content
-    //   plain wheel → falls through to scroll the main document, as if the
-    //                 popup weren't there (modifier-less wheel scrolling a
-    //                 document shouldn't get hijacked by the hover popup)
-    if (win->refHover && win->refHover->hwndPopup && HwndIsVisible(win->refHover->hwndPopup)) {
-        bool isCtrl = (LOWORD(wp) & MK_CONTROL) || IsCtrlPressed();
-        bool isShift = (LOWORD(wp) & MK_SHIFT) || IsShiftPressed();
-        if (isCtrl || isShift) {
-            DisplayModel* dmHover = win->AsFixed();
-            if (dmHover) {
-                Point pt = HwndGetCursorPos(win->hwndCanvas);
-                IPageElement* elHover = dmHover->GetElementAtPos(pt, nullptr);
-                if (RefHoverIsInternalLink(elHover, dmHover)) {
-                    short delta = GET_WHEEL_DELTA_WPARAM(wp);
-                    if (isCtrl) {
-                        RefHoverWheelZoom(win->refHover, dmHover->GetEngine(), delta);
-                    } else {
-                        RefHoverWheelScroll(win->refHover, dmHover->GetEngine(), delta);
-                    }
-                    return 0;
-                }
-            }
-        }
+    if (RefHoverTakesWheel(win, msg, wp, lp)) {
+        return 0;
     }
 
     // ignore wheel events while middle-button drag-scrolling is active
@@ -3463,16 +3745,18 @@ static LRESULT CanvasOnMouseWheel(MainWindow* win, UINT msg, WPARAM wp, LPARAM l
 
     DisplayModel* dm = win->AsFixed();
 
-    // Note: not all mouse drivers correctly report the Ctrl key's state
-    // isCtrl is also set if this is pinch gestore from touchpad (on thinkpad x1 at least).
+    // Note: not all mouse drivers correctly report the Ctrl / right-button
+    // state on WM_MOUSEWHEEL. isCtrl is also set if this is a pinch gesture
+    // from a touchpad (on a ThinkPad X1 at least).
     bool isCtrl = (LOWORD(wp) & MK_CONTROL) || IsCtrlPressed();
     bool isAlt = (LOWORD(wp) & MK_ALT) || IsAltPressed();
-    bool isRightButton = (LOWORD(wp) & MK_RBUTTON);
+    bool isRightButton = (LOWORD(wp) & MK_RBUTTON) || IsRightButtonPressed();
     bool isZooming = isCtrl || isRightButton;
     if (isZooming) {
         ZoomByMouseWheel(win, wp);
         return 0;
     }
+    wp = MaybeInvertWheel(wp);
 
     bool hScroll = (LOWORD(wp) & MK_SHIFT) || IsShiftPressed();
     bool vScroll = !hScroll;
@@ -3507,24 +3791,25 @@ static LRESULT CanvasOnMouseWheel(MainWindow* win, UINT msg, WPARAM wp, LPARAM l
         scrollIntent.armed = true;
     }
 
+    // MouseWheelTurnsPage: a wheel notch is a page turn, not a scroll, even when
+    // the page is zoomed past the window. Pairs with RememberViewOffsetOnPageTurn
+    // for reading zoomed-in pages (sheet music, scans with wide margins) without
+    // the keyboard. Alt + wheel still scrolls, so the rest of the page is
+    // reachable; Shift + wheel and Ctrl + wheel are unchanged
+    if (vScroll && !isAlt && gSettings->mouseWheelTurnsPage) {
+        WheelTurnPage(win, WheelPageTurnDir(win, delta, WheelPageTurnDelta(win, delta)));
+        return 0;
+    }
+
     // fit content: flip page on wheel, regardless of scrollbar state
     if (vScroll && dm && FitContentWheelFlipsPage(dm) && IsSingle(dm->GetDisplayMode())) {
-        win->wheelAccumDelta += delta;
-        if (win->wheelAccumDelta >= WHEEL_DELTA) {
-            win->ctrl->GoToPrevPage();
-            win->wheelAccumDelta -= WHEEL_DELTA;
-            ReadAloudOnUserViewChanged(win);
-        } else if (win->wheelAccumDelta <= -WHEEL_DELTA) {
-            win->ctrl->GoToNextPage();
-            win->wheelAccumDelta += WHEEL_DELTA;
-            ReadAloudOnUserViewChanged(win);
-        }
+        WheelTurnPage(win, WheelPageTurnDir(win, delta, WheelPageTurnDelta(win, delta)));
         return 0;
     }
 
     // Handle page-by-page navigation for non-continuous modes and SinglePage mode
     bool isSinglePageMode =
-        gGlobalPrefs->scrollbarInSinglePage && (win->ctrl->GetDisplayMode() == DisplayMode::SinglePage);
+        gSettings->scrollbarInSinglePage && (win->ctrl->GetDisplayMode() == DisplayMode::SinglePage);
 
     // For SinglePage mode with content requiring scrolling, use continuous scrolling behavior
     if (isSinglePageMode && vScroll) {
@@ -3533,20 +3818,7 @@ static LRESULT CanvasOnMouseWheel(MainWindow* win, UINT msg, WPARAM wp, LPARAM l
             // Fall through to the default scrolling behavior below
         } else {
             // Content fits in viewport, use page-by-page navigation
-            int pageFlipDelta = WHEEL_DELTA; // One wheel click = one page
-            win->wheelAccumDelta += delta;
-            if (win->wheelAccumDelta >= pageFlipDelta) {
-                win->ctrl->GoToPrevPage();
-                win->wheelAccumDelta -= pageFlipDelta;
-                ReadAloudOnUserViewChanged(win);
-                return 0;
-            }
-            if (win->wheelAccumDelta <= -pageFlipDelta) {
-                win->ctrl->GoToNextPage();
-                win->wheelAccumDelta += pageFlipDelta;
-                ReadAloudOnUserViewChanged(win);
-                return 0;
-            }
+            WheelTurnPage(win, WheelPageTurnDir(win, delta, WheelPageTurnDelta(win, delta)));
             return 0;
         }
     }
@@ -3560,25 +3832,9 @@ static LRESULT CanvasOnMouseWheel(MainWindow* win, UINT msg, WPARAM wp, LPARAM l
             // logf("  flipping page because !dm->NeedVScroll()\n");
             flipPage = true;
         }
-        // fit content/page: one wheel click = one page; otherwise 3 clicks
-        int pageFlipDelta = flipPage ? WHEEL_DELTA : WHEEL_DELTA * 3;
-
-        // int scrolLPos = GetScrollPos(win->hwndCanvas, SB_VERT);
-        //  Note: pre 3.6 didn't care about horizontallScroll and kZoomFitPage was handled below
+        // Note: pre 3.6 didn't care about horizontallScroll and kZoomFitPage was handled below
         if (flipPage) {
-            win->wheelAccumDelta += delta;
-            if (win->wheelAccumDelta >= pageFlipDelta) {
-                win->ctrl->GoToPrevPage();
-                win->wheelAccumDelta -= pageFlipDelta;
-                ReadAloudOnUserViewChanged(win);
-                return 0;
-            }
-            if (win->wheelAccumDelta <= -pageFlipDelta) {
-                win->ctrl->GoToNextPage();
-                win->wheelAccumDelta += pageFlipDelta;
-                ReadAloudOnUserViewChanged(win);
-                return 0;
-            }
+            WheelTurnPage(win, WheelPageTurnDir(win, delta, WheelPageTurnDelta(win, delta)));
             return 0;
         }
     }
@@ -3603,7 +3859,7 @@ static LRESULT CanvasOnMouseWheel(MainWindow* win, UINT msg, WPARAM wp, LPARAM l
             if (hScroll) {
                 dm->ScrollXBy(scrollBy);
             } else {
-                dm->ScrollYBy(scrollBy, true);
+                dm->ScrollYBy(scrollBy, gSettings->scrollEdgeTurnsPage);
             }
             // ScrollYBy updates the thumb via UpdateScrollbars; also force the
             // thin smart bar to appear for wheel-only reading (#5859).
@@ -3626,13 +3882,25 @@ static LRESULT CanvasOnMouseWheel(MainWindow* win, UINT msg, WPARAM wp, LPARAM l
         if (scrollBy == 0) {
             return 0;
         }
-        if (hScroll) {
+        if (dm->ScrollFollowsRotation()) {
+            if (hScroll && dm->ContentScrollHorizontal()) {
+                dm->ScrollYBy(scrollBy, false);
+            } else if (hScroll) {
+                dm->ScrollXBy(scrollBy);
+            } else {
+                dm->ScrollContentBy(scrollBy, gSettings->scrollEdgeTurnsPage);
+            }
+        } else if (hScroll) {
             dm->ScrollXBy(scrollBy);
         } else {
-            dm->ScrollYBy(scrollBy, true);
+            dm->ScrollYBy(scrollBy, gSettings->scrollEdgeTurnsPage);
         }
         if (ScrollbarsUseOverlay()) {
-            OverlayScrollbarNotifyScroll(hScroll ? win->overlayScrollH : win->overlayScrollV);
+            bool notifyH = hScroll;
+            if (dm->ScrollFollowsRotation() && dm->ContentScrollHorizontal()) {
+                notifyH = !hScroll;
+            }
+            OverlayScrollbarNotifyScroll(notifyH ? win->overlayScrollH : win->overlayScrollV);
         }
         ReadAloudOnUserViewChanged(win);
         return 0;
@@ -3641,17 +3909,17 @@ static LRESULT CanvasOnMouseWheel(MainWindow* win, UINT msg, WPARAM wp, LPARAM l
     // alt while scrolling will scroll by half a page per tick
     // usefull for browsing long files
     if (isAlt) {
-        wp = (delta > 0) ? SB_HALF_PAGEUP : SB_HALF_PAGEDOWN;
+        wp = (delta > 0) ? kSbHalfPageUp : kSbHalfPageDown;
         SendMessageW(win->hwndCanvas, WM_VSCROLL, wp, 0);
         return 0;
     }
 
-    if (gGlobalPrefs->fastScrollOverScrollbar) {
+    if (gSettings->fastScrollOverScrollbar) {
         // scroll faster if the cursor is over the scroll bar
         if (HwndIsCursorOverWindow(win->hwndCanvas)) {
             Point pt = HwndGetCursorPos(win->hwndCanvas);
             if (pt.x > win->canvasRc.dx) {
-                wp = (delta > 0) ? SB_HALF_PAGEUP : SB_HALF_PAGEDOWN;
+                wp = (delta > 0) ? kSbHalfPageUp : kSbHalfPageDown;
                 SendMessageW(win->hwndCanvas, WM_VSCROLL, wp, 0);
                 return 0;
             }
@@ -3659,6 +3927,36 @@ static LRESULT CanvasOnMouseWheel(MainWindow* win, UINT msg, WPARAM wp, LPARAM l
     }
 
     win->wheelAccumDelta += delta;
+    // Unshifted wheel follows the rotated stack. Shift+wheel stays the other axis.
+    if (dm && dm->ScrollFollowsRotation() && (!hScroll || dm->ContentScrollHorizontal())) {
+        int line = DpiScale(ScrollLineAmount(gSettings->scrollLineAmount));
+        bool crossY = hScroll && dm->ContentScrollHorizontal();
+        if (win->wheelAccumDelta < 0) {
+            while (win->wheelAccumDelta <= -gDeltaPerLine) {
+                if (crossY) {
+                    dm->ScrollYBy(line, false);
+                } else {
+                    dm->ScrollContentBy(line, false);
+                }
+                win->wheelAccumDelta += gDeltaPerLine;
+            }
+        } else {
+            while (win->wheelAccumDelta >= gDeltaPerLine) {
+                if (crossY) {
+                    dm->ScrollYBy(-line, false);
+                } else {
+                    dm->ScrollContentBy(-line, false);
+                }
+                win->wheelAccumDelta -= gDeltaPerLine;
+            }
+        }
+        if (ScrollbarsUseOverlay()) {
+            bool contentH = dm->ContentScrollHorizontal() && !crossY;
+            OverlayScrollbarNotifyScroll(contentH ? win->overlayScrollH : win->overlayScrollV);
+        }
+        ReadAloudOnUserViewChanged(win);
+        return 0;
+    }
     int prevScrollPos = WheelScrollPosOrTarget(win);
 
     UINT scrollMsg = hScroll ? WM_HSCROLL : WM_VSCROLL;
@@ -3682,27 +3980,45 @@ static LRESULT CanvasOnMouseWheel(MainWindow* win, UINT msg, WPARAM wp, LPARAM l
             didScrollByLine = true;
         }
     }
-    // in non-continuous mode flip page if necessary
-    if (!vScroll || !isCont) {
+    // in non-continuous mode flip page if necessary (ScrollEdgeTurnsPage off:
+    // stay on this page, it is changed by keyboard / toolbar / scrollbar only)
+    if (!vScroll || !isCont || !gSettings->scrollEdgeTurnsPage) {
         return 0;
     }
-    if (!didScrollByLine) {
+    bool didScroll = WheelScrollPosOrTarget(win) != prevScrollPos;
+    if (didScroll) {
+        // we don't flip a page if we did scroll by line
+        win->wheelEdgeAccumDelta = 0;
+        return 0;
+    }
+    // at an edge: a notch that moved nothing turns the page; a fine wheel
+    // turns it after a window's height of travel, like a page that fits
+    win->wheelEdgeAccumDelta += delta;
+    if (IsFineWheel(win, delta)) {
+        if (std::abs(win->wheelEdgeAccumDelta) < WheelPageTurnDelta(win, delta)) {
+            return 0;
+        }
+    } else if (!didScrollByLine) {
         // we haven't reached accumulated delta to scroll by line
         return 0;
     }
-
-    int currScrollPos = WheelScrollPosOrTarget(win);
-    bool didScroll = (currScrollPos != prevScrollPos);
-    if (didScroll) {
-        // we don't flip a page if we did scroll by line
+    win->wheelEdgeAccumDelta = 0;
+    if (!WheelMayTurnPage(win)) {
+        win->wheelAccumDelta = 0;
         return 0;
     }
     // logf("  flip page: delta: %d, accumDelta: %d\n", (int)delta, (int)win->wheelAccumDelta);
     if (delta > 0) {
         win->ctrl->GoToPrevPage(true);
+    } else if (dm) {
+        // this page turn continues a scroll, so start the new page at its top
+        // even with RememberViewOffsetOnPageTurn on - we're at the bottom of the
+        // old page only because we scrolled there (see GoToNextPage(bool))
+        dm->GoToNextPage(false);
     } else {
         win->ctrl->GoToNextPage();
     }
+    OnWheelPageTurn(win);
     ReadAloudOnUserViewChanged(win);
 
     return 0;
@@ -3710,7 +4026,8 @@ static LRESULT CanvasOnMouseWheel(MainWindow* win, UINT msg, WPARAM wp, LPARAM l
 
 static LRESULT CanvasOnMouseHWheel(MainWindow* win, UINT msg, WPARAM wp, LPARAM lp) {
     // Scroll the ToC sidebar, if it's visible and the cursor is in it
-    if (win->uiState.tocVisible && HwndIsCursorOverWindow(win->tocTreeView->hwnd) && !gWheelMsgRedirect) {
+    if (IsSidebarViewShown(win, SidebarView::Bookmarks) && HwndIsCursorOverWindow(win->tocTreeView->hwnd) &&
+        !gWheelMsgRedirect) {
         // Note: hwndTocTree's window procedure doesn't always handle
         //       WM_MOUSEHWHEEL and when it's bubbling up, we'd return
         //       here recursively - prevent that
@@ -3720,6 +4037,11 @@ static LRESULT CanvasOnMouseHWheel(MainWindow* win, UINT msg, WPARAM wp, LPARAM 
         return res;
     }
 
+    if (RefHoverTakesWheel(win, msg, wp, lp)) {
+        return 0;
+    }
+
+    wp = MaybeInvertWheel(wp);
     short delta = GET_WHEEL_DELTA_WPARAM(wp);
     win->wheelAccumDelta += delta;
 
@@ -3798,6 +4120,14 @@ static LRESULT OnGesture(MainWindow* win, UINT msg, WPARAM wp, LPARAM lp) {
                 touchState.pressRestPos = gi.ptsLocation;
                 touchState.pressRestTime = (DWORD)GetMessageTime();
                 touchState.longPressFired = false;
+                touchState.panMovedOnce = false;
+                // POINTERDOWN already reset these for this contact. Don't
+                // clear panDidScroll here: the finger may have started
+                // scrolling before the gesture engine sent GF_BEGIN.
+                if (win->touchPointerId < 0) {
+                    touchState.panDidScroll = false;
+                    win->touchLongPressDone = false;
+                }
                 TouchSelHandle h = HitTestTouchSelHandle(win, cpt.x, cpt.y);
                 if (h != TouchSelHandle::None) {
                     // this finger is here to move the selection, not the page
@@ -3822,19 +4152,26 @@ static LRESULT OnGesture(MainWindow* win, UINT msg, WPARAM wp, LPARAM lp) {
                 DWORD now = (DWORD)GetMessageTime();
                 DWORD restMs = now - touchState.pressRestTime;
                 if (dx > slop || dy > slop) {
-                    // still moving: the hold has to start over from here
+                    // The first jump is the gesture engine deciding this is a
+                    // pan; further movement is the user scrolling, and a pause
+                    // after that must not select (issue #6006).
+                    if (touchState.panMovedOnce) {
+                        MarkTouchPanDidScroll(win);
+                    }
+                    touchState.panMovedOnce = true;
                     touchState.pressRestPos = gi.ptsLocation;
                     touchState.pressRestTime = now;
                     restMs = 0;
                 }
-                if (gi.dwFlags & GF_END) {
-                }
-                if (!touchState.longPressFired && restMs >= kTouchLongPressMs) {
+                if (!touchState.panDidScroll && !touchState.longPressFired && !win->touchLongPressDone &&
+                    restMs >= kTouchLongPressMs) {
                     touchState.longPressFired = true;
                     logf("touch: finger at rest for %dms at %d,%d -> long press\n", (int)restMs, cpt.x, cpt.y);
                     if (OnTouchLongPress(win, cpt.x, cpt.y)) {
                         // the page must not scroll out from under the selection
                         touchState.panStarted = false;
+                        win->touchLongPressDone = true;
+                        win->touchSuppressContextMenu = true;
                         break;
                     }
                 }
@@ -3877,7 +4214,7 @@ static LRESULT OnGesture(MainWindow* win, UINT msg, WPARAM wp, LPARAM lp) {
                     if (deltaX < 0) {
                         bool goNext = dm->GetDisplayR2L();
                         dm->GoToPageHorizontal(false);
-                        // TODO: scroll to show the right-hand part
+                        // show the right-hand part of the page we land on
                         int x = dm->canvasSize.dx - dm->viewPort.dx;
                         // logf("x: %d\n");
                         dm->ScrollXTo(x);
@@ -3960,22 +4297,57 @@ static LRESULT OnGesture(MainWindow* win, UINT msg, WPARAM wp, LPARAM lp) {
 
 // WM_POINTER message support for pen/stylus input
 #ifndef WM_POINTERDOWN
-#define WM_POINTERDOWN 0x0246
-#define WM_POINTERUP 0x0247
-#define WM_POINTERUPDATE 0x0245
+constexpr UINT WM_POINTERDOWN = 0x0246;
+constexpr UINT WM_POINTERUP = 0x0247;
+constexpr UINT WM_POINTERUPDATE = 0x0245;
 #endif
 
 // POINTER_INPUT_TYPE values
-#define SUMATRA_PT_TOUCH 2
-#define SUMATRA_PT_PEN 3
+constexpr int kSumatraPtTouch = 2;
+constexpr int kSumatraPtPen = 3;
 
 // pointer message flags (in HIWORD of wParam)
-#define SUMATRA_POINTER_MESSAGE_FLAG_INCONTACT 0x0004
-#define SUMATRA_POINTER_MESSAGE_FLAG_FIRSTBUTTON 0x0010
+constexpr int kSumatraPointerMessageFlagInContact = 0x0004;
+constexpr int kSumatraPointerMessageFlagFirstButton = 0x0010;
 
 // dynamically loaded pointer API (Windows 8+)
+// Local ABI declarations keep the Windows 7 build target while using Win8 APIs.
+struct SumatraPointerInfo {
+    DWORD pointerType;
+    UINT32 pointerId;
+    UINT32 frameId;
+    UINT32 pointerFlags;
+    HANDLE sourceDevice;
+    HWND hwndTarget;
+    POINT ptPixelLocation;
+    POINT ptHimetricLocation;
+    POINT ptPixelLocationRaw;
+    POINT ptHimetricLocationRaw;
+    DWORD time;
+    UINT32 historyCount;
+    INT32 inputData;
+    DWORD keyStates;
+    UINT64 performanceCount;
+    DWORD buttonChangeType;
+};
+
+struct SumatraPointerPenInfo {
+    SumatraPointerInfo pointerInfo;
+    UINT32 penFlags;
+    UINT32 penMask;
+    UINT32 pressure;
+    UINT32 rotation;
+    INT32 tiltX;
+    INT32 tiltY;
+};
+
+constexpr UINT32 kSumatraPenFlagInverted = 0x0002;
+constexpr UINT32 kSumatraPenFlagEraser = 0x0004;
+
 typedef BOOL(WINAPI* Sig_GetPointerType)(UINT32 pointerId, DWORD* pointerType);
+typedef BOOL(WINAPI* Sig_GetPointerPenInfo)(UINT32 pointerId, SumatraPointerPenInfo* penInfo);
 static Sig_GetPointerType DynGetPointerType = nullptr;
+static Sig_GetPointerPenInfo DynGetPointerPenInfo = nullptr;
 static bool triedLoadPointerApi = false;
 
 static void EnsurePointerApiLoaded() {
@@ -3986,6 +4358,7 @@ static void EnsurePointerApiLoaded() {
     HMODULE h = GetModuleHandleW(L"user32.dll");
     if (h) {
         DynGetPointerType = (Sig_GetPointerType)GetProcAddress(h, "GetPointerType");
+        DynGetPointerPenInfo = (Sig_GetPointerPenInfo)GetProcAddress(h, "GetPointerPenInfo");
     }
 }
 
@@ -4000,7 +4373,7 @@ static void OnTouchPointer(MainWindow* win, HWND hwnd, UINT msg, WPARAM wp, LPAR
         win->touchDownPos = pt;
         win->touchDownTime = now;
         win->touchPointerId = LOWORD(wp);
-        win->touchLongPressDone = false;
+        ResetTouchLongPress(win);
         logf("touch: pointer down at %d,%d\n", pt.x, pt.y);
         SetTimer(hwnd, kTouchLongPressTimerID, kTouchLongPressMs, nullptr);
         return;
@@ -4019,8 +4392,8 @@ static void OnTouchPointer(MainWindow* win, HWND hwnd, UINT msg, WPARAM wp, LPAR
         }
         int slop = DpiScale(10);
         if (abs(pt.x - win->touchDownPos.x) > slop || abs(pt.y - win->touchDownPos.y) > slop) {
-            // moved: this is a pan, not a press
-            KillTimer(hwnd, kTouchLongPressTimerID);
+            // the finger itself moved: this contact is a scroll, not a press
+            MarkTouchPanDidScroll(win);
         }
         return;
     }
@@ -4050,7 +4423,7 @@ static bool OnPointerMessage(MainWindow* win, HWND hwnd, UINT msg, WPARAM wp, LP
     if (!DynGetPointerType(pointerId, &pointerType)) {
         return false;
     }
-    if (pointerType == SUMATRA_PT_TOUCH) {
+    if (pointerType == kSumatraPtTouch) {
         // Watch the raw contact but don't consume it: gestures (panning,
         // zooming) still have to come out of DefWindowProc. This is the only
         // place a finger's true timing shows up -- the gesture engine reports a
@@ -4061,7 +4434,7 @@ static bool OnPointerMessage(MainWindow* win, HWND hwnd, UINT msg, WPARAM wp, LP
         return false;
     }
     // only handle pen input; let mouse and touch go through normal paths
-    if (pointerType != SUMATRA_PT_PEN) {
+    if (pointerType != kSumatraPtPen) {
         return false;
     }
 
@@ -4069,6 +4442,18 @@ static bool OnPointerMessage(MainWindow* win, HWND hwnd, UINT msg, WPARAM wp, LP
     Point pt = HwndScreenToClient(hwnd, Point(GET_X_LPARAM(lp), GET_Y_LPARAM(lp)));
     int x = pt.x;
     int y = pt.y;
+
+    SumatraPointerPenInfo penInfo{};
+    bool eraser = DynGetPointerPenInfo && DynGetPointerPenInfo(pointerId, &penInfo) &&
+                  (penInfo.penFlags & (kSumatraPenFlagInverted | kSumatraPenFlagEraser)) != 0;
+    if (eraser && IsPlacingInkAnnotation(win)) {
+        WORD flags = HIWORD(wp);
+        bool inContact = (flags & kSumatraPointerMessageFlagInContact) != 0;
+        if (msg == WM_POINTERDOWN || (msg == WM_POINTERUPDATE && inContact)) {
+            AnnotationPlacementEraseAt(win, pt);
+        }
+        return true;
+    }
 
     // pointer message flags are in HIWORD(wParam)
     WORD flags = HIWORD(wp);
@@ -4080,7 +4465,7 @@ static bool OnPointerMessage(MainWindow* win, HWND hwnd, UINT msg, WPARAM wp, LP
         return true;
     }
     if (msg == WM_POINTERUPDATE) {
-        bool inContact = (flags & SUMATRA_POINTER_MESSAGE_FLAG_INCONTACT) != 0;
+        bool inContact = (flags & kSumatraPointerMessageFlagInContact) != 0;
         if (inContact) {
             mouseWp = MK_LBUTTON;
         }
@@ -4101,7 +4486,7 @@ static LRESULT WndProcCanvasFixedPageUI(MainWindow* win, HWND hwnd, UINT msg, WP
         bool hwndValid = IsWindow(hwnd);
         logf("WndProcCanvasFixedPageUI: MainWindow win: 0x%p is no longer valid, msg: %d, hwnd valid: %d\n", win,
              (int)msg, (int)hwndValid);
-        ReportIfFast(true);
+        ReportIf(true);
         return 0;
     }
 
@@ -4123,7 +4508,11 @@ static LRESULT WndProcCanvasFixedPageUI(MainWindow* win, HWND hwnd, UINT msg, WP
             return 0;
 
         case WM_MOUSELEAVE:
-            RefHoverOnCanvasMouseLeave(win->refHover, win->hwndCanvas, gGlobalPrefs->citationHoverDelay);
+            win->annotationUnderCursor = nullptr;
+            HideAnnotationHoverOverlay(win);
+            ReadingBarOnMouseLeave(win);
+            ScheduleRepaint(win, 0);
+            RefHoverOnCanvasMouseLeave(win->refHover, win->hwndCanvas, gSettings->citationHoverDelay);
             return 0;
 
         case WM_LBUTTONDOWN:
@@ -4134,6 +4523,10 @@ static LRESULT WndProcCanvasFixedPageUI(MainWindow* win, HWND hwnd, UINT msg, WP
             OnMouseLeftButtonUp(win, x, y, wp);
             return 0;
 
+        case WM_CAPTURECHANGED:
+            ReadingBarCancelDrag(win);
+            return 0;
+
         case WM_LBUTTONDBLCLK:
             OnMouseLeftButtonDblClk(win, x, y, wp);
             return 0;
@@ -4142,6 +4535,11 @@ static LRESULT WndProcCanvasFixedPageUI(MainWindow* win, HWND hwnd, UINT msg, WP
             // drive auto-scroll from a high-frequency timer (with fractional-pixel
             // accumulation in the handler) so it's smooth, not choppy (issue #2693)
             // TODO: Create window that shows location of initial click for reference
+            // no auto-scroll while an annotation is selected; a running one can still be stopped
+            if (AnnotationLockingMouse(win) && win->mouseAction != MouseAction::Scrolling) {
+                return 0;
+            }
+            ReadingAutoScrollStop(win);
             ToggleAutoScroll(win, x, y);
             return 0;
 
@@ -4213,7 +4611,8 @@ static LRESULT WndProcCanvasFixedPageUI(MainWindow* win, HWND hwnd, UINT msg, WP
             // On a device where a hold does arrive as WM_CONTEXTMENU (a pen,
             // or touch with panning off) treat it as a long press too; the
             // gesture path above has usually handled it already.
-            if (!fromKeyboard && (win->lastInputWasTouch || IsMouseMessageFromTouch()) && OnTouchLongPress(win, x, y)) {
+            if (!fromKeyboard && !win->touchState.panDidScroll &&
+                (win->lastInputWasTouch || IsMouseMessageFromTouch()) && OnTouchLongPress(win, x, y)) {
                 return 0;
             }
             OnWindowContextMenu(win, x, y);
@@ -4282,7 +4681,7 @@ static LRESULT WndProcCanvasChmUI(MainWindow* win, HWND hwnd, UINT msg, WPARAM w
 // string around the %s instead of assuming the name comes last. Falls back to
 // one plain run for RTL, where laying runs out left to right would be wrong.
 static void DrawLoadErrorLine(Gfx* gfx, Rect r, Str name, PlatformFont* font, Color textColor) {
-    Str tmpl = _TRA("Error loading %s");
+    Str tmpl = Tr("Error loading %s");
     int at = str::IndexOf(tmpl, StrL("%s"));
     if (at < 0 || IsUIRtl()) {
         u32 flags = gfxTextCenter | gfxTextVCenter | (IsUIRtl() ? gfxTextRtl : 0);
@@ -4319,12 +4718,31 @@ static Color LoadErrorTextColor() {
     return MkRgb(0xef, 0x9a, 0x9a);
 }
 
+// "Open in hex view" under the error, unless the file is gone
+static void DrawLoadErrorHexLink(MainWindow* win, Gfx* gfx, Rect rc, bool hasReason, PlatformFont* font) {
+    WindowTab* tab = win->CurrentTab();
+    if (!file::Exists(tab->filePath) || !CanAccessDisk()) {
+        return;
+    }
+    Str txt = Tr("Open in hex view");
+    Size sz = gfx->MeasureText(txt, font);
+    int lineDy = PlatformFontMeasureText(font, txt).dy;
+    // the error line's y, then past it (and the reason) with a blank line's gap
+    int nameY = rc.y + (rc.dy - (hasReason ? lineDy : 0) - lineDy) / 2;
+    int y = nameY + lineDy * (hasReason ? 2 : 1) + lineDy / 2;
+    Rect r(rc.x + (rc.dx - sz.dx) / 2, y, sz.dx, sz.dy);
+    gfx->DrawTextAt(txt, r.TL(), gfxTextSingleLine | gfxTextNoClip, font, ThemeWindowLinkColor());
+    win->loadErrorHexLinkRc = r;
+}
+
 static void OnPaintDocumentStatus(MainWindow* win) {
+    win->loadErrorHexLinkRc = {};
     PAINTSTRUCT ps;
     HDC hdc = BeginPaint(win->hwndCanvas, &ps);
+    SetLayout(hdc, 0);
 
     Gfx* gfx = GfxCreate(hdc);
-    PlatformFont* fontRightTxt = GetUserGuiFont("MS Shell Dlg", DpiScale(14));
+    PlatformFont* fontRightTxt = GetUserGuiFont(StrL("MS Shell Dlg"), DpiScale(14));
     auto bgCol = ThemeMainWindowBackgroundColor();
     gfx->FillRect(ToRect(ps.rcPaint), bgCol);
     auto* tab = win->CurrentTab();
@@ -4340,12 +4758,12 @@ static void OnPaintDocumentStatus(MainWindow* win) {
                 TempStr copied = str::FormatSizeShortTemp(tab->loadCopyBytesCopied, nullptr);
                 if (tab->loadCopyBytesTotal > 0) {
                     TempStr total = str::FormatSizeShortTemp(tab->loadCopyBytesTotal, nullptr);
-                    msg = fmt(_TRA("Copying %s: %s / %s").s, basename, copied, total);
+                    msg = fmt(Tr("Copying %s: %s / %s").s, basename, copied, total);
                 } else {
-                    msg = fmt(_TRA("Copying %s: %s").s, basename, copied);
+                    msg = fmt(Tr("Copying %s: %s").s, basename, copied);
                 }
             } else {
-                msg = fmt(_TRA("Loading %s ...").s, basename);
+                msg = fmt(Tr("Loading %s ...").s, basename);
             }
             if (tab->loadStartedAt != 0) {
                 u64 elapsedSecs = (GetTickCount64() - tab->loadStartedAt) / 1000;
@@ -4385,6 +4803,7 @@ static void OnPaintDocumentStatus(MainWindow* win) {
                 gfx->DrawText(reason, bottom, flags, fontRightTxt, LoadErrorTextColor());
             }
             DrawLoadErrorLine(gfx, top, name, fontRightTxt, LoadErrorTextColor());
+            DrawLoadErrorHexLink(win, gfx, rc, len(reason) > 0, fontRightTxt);
         }
     }
     delete gfx;
@@ -4404,6 +4823,17 @@ static LRESULT WndProcCanvasLoadError(MainWindow* win, HWND hwnd, UINT msg, WPAR
 
         case WM_SETCURSOR:
             win->DeleteToolTip();
+            if (win->loadErrorHexLinkRc.Contains(HwndGetCursorPos(hwnd))) {
+                SetCursorCached(IDC_HAND);
+                return TRUE;
+            }
+            return DefWindowProc(hwnd, msg, wp, lp);
+
+        case WM_LBUTTONUP:
+            if (win->loadErrorHexLinkRc.Contains(Point(GET_X_LPARAM(lp), GET_Y_LPARAM(lp)))) {
+                HwndSendCommand(win->hwndFrame, CmdViewAsHex);
+                return 0;
+            }
             return DefWindowProc(hwnd, msg, wp, lp);
 
         default:
@@ -4422,13 +4852,13 @@ static void RepaintTask(RepaintTaskData* d) {
     AutoDelete delData(d);
 
     auto* win = d->win;
-    if (!IsMainWindowValid(win)) {
+    if (!IsMainWindowValidAndNotClosing(win)) {
         return;
     }
     if (!d->delayInMs) {
-        WndProcCanvas(win->hwndCanvas, WM_TIMER, REPAINT_TIMER_ID, 0);
+        WndProcCanvas(win->hwndCanvas, WM_TIMER, kRepaintTimerID, 0);
     } else if (!win->delayedRepaintTimer) {
-        win->delayedRepaintTimer = SetTimer(win->hwndCanvas, REPAINT_TIMER_ID, (uint)d->delayInMs, nullptr);
+        win->delayedRepaintTimer = SetTimer(win->hwndCanvas, kRepaintTimerID, (uint)d->delayInMs, nullptr);
     }
 }
 
@@ -4442,20 +4872,20 @@ void ScheduleRepaint(MainWindow* win, int delayInMs) {
     auto fn = MkFunc0<RepaintTaskData>(RepaintTask, data);
     // even though RepaintAsync is mostly called from the UI thread,
     // we depend on the repaint message to happen asynchronously
-    uitask::Post(fn, nullptr);
+    uitask::Post(fn, "Repaint");
 }
 
 static void OnTimer(MainWindow* win, HWND hwnd, WPARAM timerId) {
     Point pt;
 
-    if (!IsMainWindowValid(win) || win->isBeingClosed) {
+    if (!IsMainWindowValidAndNotClosing(win)) {
         return;
     }
 
     switch (timerId) {
-        case REPAINT_TIMER_ID:
+        case kRepaintTimerID:
             win->delayedRepaintTimer = 0;
-            KillTimer(hwnd, REPAINT_TIMER_ID);
+            KillTimer(hwnd, kRepaintTimerID);
             // Only the canvas needs a document repaint (scroll, page render,
             // selection, etc.). RedrawAllIncludingNonClient() repaints the
             // entire frame and all children, so the toolbar "Page:" label and
@@ -4464,11 +4894,29 @@ static void OnTimer(MainWindow* win, HWND hwnd, WPARAM timerId) {
             HwndInvalidate(hwnd);
             break;
 
+        case kAnnotationResizeRerenderTimerID:
+            CancelAnnotationResizeRerender(win);
+            MainWindowRerender(win);
+            break;
+
+        case kAnnotationNudgeTimerID:
+            FinishAnnotationNudge(win);
+            break;
+
+        case kSidebarOverlayTimerID:
+            UpdateSidebarOverlay(win, SidebarOverlayUpdate::Mouse);
+            break;
+
         case kTouchLongPressTimerID: {
             KillTimer(hwnd, kTouchLongPressTimerID);
+            if (win->touchState.panDidScroll || win->touchState.longPressFired) {
+                logf("touch: long press timer ignored (already panned or fired)\n");
+                break;
+            }
             Point dp = win->touchDownPos;
             logf("touch: long press timer fired at %d,%d, mouseAction=%d\n", dp.x, dp.y, (int)win->mouseAction);
             win->touchLongPressDone = true;
+            win->touchState.longPressFired = true;
             if (OnTouchLongPress(win, dp.x, dp.y)) {
                 // The press selects the word and stops there. Carrying straight
                 // on into a drag looks like a good idea but the finger is never
@@ -4481,15 +4929,19 @@ static void OnTimer(MainWindow* win, HWND hwnd, WPARAM timerId) {
             break;
         }
 
-        case SMOOTHSCROLL_TIMER_ID:
+        case kSelectSmoothScrollTimerID:
             if (MouseAction::Selecting == win->mouseAction || MouseAction::SelectingText == win->mouseAction) {
                 pt = HwndGetCursorPos(win->hwndCanvas);
                 if (NeedsSelectionEdgeAutoscroll(win, pt.x, pt.y)) {
                     OnMouseMove(win, pt.x, pt.y, MK_CONTROL);
                 }
             } else {
-                KillTimer(hwnd, SMOOTHSCROLL_TIMER_ID);
+                KillTimer(hwnd, kSelectSmoothScrollTimerID);
             }
+            break;
+
+        case kReadingAutoScrollTimerID:
+            ReadingAutoScrollTick(win);
             break;
 
         case kAutoScrollTimerID:
@@ -4535,7 +4987,7 @@ static void OnTimer(MainWindow* win, HWND hwnd, WPARAM timerId) {
             break;
 
         case kLinkFollowTimerID:
-            // scrolling settled: re-number the links that are on screen now
+            // scrolling settled: relabel the links that are on screen now
             KillTimer(hwnd, kLinkFollowTimerID);
             KeyboardLinkFollowingRecompute(win);
             ScheduleRepaint(win, 0);
@@ -4550,12 +5002,12 @@ static void OnTimer(MainWindow* win, HWND hwnd, WPARAM timerId) {
             SelectionToolbarOnShowTimer(win);
             break;
 
-        case HIDE_FWDSRCHMARK_TIMER_ID:
+        case kHideFwdSearchMarkTimerID:
             win->fwdSearchMark.hideStep++;
             if (1 == win->fwdSearchMark.hideStep) {
-                SetTimer(hwnd, HIDE_FWDSRCHMARK_TIMER_ID, HIDE_FWDSRCHMARK_DECAYINTERVAL_IN_MS, nullptr);
-            } else if (win->fwdSearchMark.hideStep >= HIDE_FWDSRCHMARK_STEPS) {
-                KillTimer(hwnd, HIDE_FWDSRCHMARK_TIMER_ID);
+                SetTimer(hwnd, kHideFwdSearchMarkTimerID, kHideFwdSearchMarkDecayIntervalInMs, nullptr);
+            } else if (win->fwdSearchMark.hideStep >= kHideFwdSearchMarkSteps) {
+                KillTimer(hwnd, kHideFwdSearchMarkTimerID);
                 win->fwdSearchMark.show = false;
                 ScheduleRepaint(win, 0);
             } else {
@@ -4563,19 +5015,26 @@ static void OnTimer(MainWindow* win, HWND hwnd, WPARAM timerId) {
             }
             break;
 
-        case READ_ALOUD_HIGHLIGHT_TIMER_ID:
+        case kReadAloudHighlightTimerID:
             if (GetReadAloudSourceTab()) {
                 TtsProcessEvents();
-                ReadAloudUpdateAutoScroll(win);
-                ReadAloudPlaybackBarUpdateSession(GetReadAloudSourceTab());
-                HwndInvalidate(hwnd);
+                ReadAloudAfterTtsEvents();
+                int pos = TtsGetSpokenPosUtf8();
+                static int sLastTtsPos = -999;
+                if (pos != sLastTtsPos) {
+                    sLastTtsPos = pos;
+                    DBG_TTS(dbgtts("tick pos=%d speaking=%d\n", pos, (int)TtsIsSpeaking()));
+                    ReadAloudUpdateAutoScroll(win);
+                    HwndInvalidate(hwnd);
+                }
+                ReadAloudPlaybackBarTick(win);
             } else {
                 ReadAloudHighlightTimerStop(win);
             }
             break;
 
-        case AUTO_RELOAD_TIMER_ID: {
-            KillTimer(hwnd, AUTO_RELOAD_TIMER_ID);
+        case kAutoReloadTimerID: {
+            KillTimer(hwnd, kAutoReloadTimerID);
             auto* tab = win->CurrentTab();
             if (tab && tab->reloadOnFocus) {
                 if (tab->ignoreNextAutoReload) {
@@ -4583,12 +5042,15 @@ static void OnTimer(MainWindow* win, HWND hwnd, WPARAM timerId) {
                     // reloadOnFocus set or a later tab focus would reload
                     tab->ignoreNextAutoReload = false;
                     tab->reloadOnFocus = false;
-                } else if (AutoReloadFileStillChanging(tab)) {
+                } else if (IsThreadInMenuMode() || AutoReloadFileStillChanging(tab)) {
+                    // an open menu's nested loop dispatches this timer while
+                    // OnWindowContextMenu still holds the controller, engine and
+                    // page element it cached: reload once the menu is gone.
                     // a writer (LaTeX etc.) is still producing the file: reloading
                     // now shows a half-written document ("cannot find startxref",
                     // "document has no pages") and costs a second reload once the
                     // write finishes. Wait for it to go quiet instead.
-                    SetTimer(hwnd, AUTO_RELOAD_TIMER_ID, AUTO_RELOAD_DELAY_IN_MS, nullptr);
+                    SetTimer(hwnd, kAutoReloadTimerID, kAutoReloadDelayInMs, nullptr);
                 } else {
                     // timer-driven: never ask for a password here (#3493)
                     ReloadDocument(win, true, false);
@@ -4689,87 +5151,7 @@ static void OnDropFiles(MainWindow* win, HDROP hDrop, bool dragFinish) {
     StartLoadDocuments(files, win);
 }
 
-// returns true if url looks like it could be an image URL
-static bool IsImageUrl(Str url) {
-    // strip query string / fragment for extension check
-    int qIdx = str::IndexOfChar(url, '?');
-    int hIdx = str::IndexOfChar(url, '#');
-    int n = url.len;
-    if (qIdx >= 0 && qIdx < n) {
-        n = qIdx;
-    }
-    if (hIdx >= 0 && hIdx < n) {
-        n = hIdx;
-    }
-    // check for common image extensions
-    Str exts[] = {".png",  ".jpg",  ".jpeg", ".gif", ".bmp", ".tiff", ".tif",
-                  ".webp", ".avif", ".heic", ".jxr", ".jp2", ".tga"};
-    for (Str ext : exts) {
-        if (n >= ext.len) {
-            Str ending(url.s + n - ext.len, ext.len);
-            if (str::EqI(ending, ext)) {
-                return true;
-            }
-        }
-    }
-    return false;
-}
-
-// Get the user's Downloads folder path
-static TempStr GetDownloadsDirTemp() {
-    WCHAR* pathW = nullptr;
-    HRESULT hr = SHGetKnownFolderPath(FOLDERID_Downloads, 0, nullptr, &pathW);
-    if (FAILED(hr) || !pathW) {
-        CoTaskMemFree(pathW);
-        return {};
-    }
-    TempStr res = ToUtf8Temp(pathW);
-    CoTaskMemFree(pathW);
-    return res;
-}
-
-static void AdvanceUrlPathUntilSuffix(Str& p, Str& lastSlash) {
-    while (len(p) > 0 && p.s[0] != '?' && p.s[0] != '#') {
-        if (p.s[0] == '/') {
-            lastSlash = p;
-        }
-        p.s++;
-        p.len--;
-    }
-}
-
-// Extract a file name from a URL (last path component, without query/fragment)
-static TempStr FileNameFromUrlTemp(Str url) {
-    // skip past scheme
-    Str path = url;
-    Str slash = str::SliceFromChar(url, '/');
-    if (slash) {
-        path = slash;
-        if (path.len >= 2 && path.s[0] == '/' && path.s[1] == '/') {
-            path.s += 2;
-            path.len -= 2;
-        }
-    }
-    // find last '/' before any '?' or '#'
-    Str lastSlash;
-    Str p = path;
-    AdvanceUrlPathUntilSuffix(p, lastSlash);
-    if (!lastSlash) {
-        return {};
-    }
-    int nameLen = (int)(p.s - lastSlash.s - 1);
-    if (nameLen <= 0) {
-        return {};
-    }
-    return str::DupTemp(Str(lastSlash.s + 1, nameLen));
-}
-
-struct DownloadAndOpenUrlData {
-    Str url;
-    HWND hwndCanvas;
-};
-
-static void OpenDownloadedPath(Str* path) {
+void OpenDownloadedPath(Str* path) {
     MainWindow* win = FindMainWindowByHwnd(GetForegroundWindow());
     if (!win && len(gWindows) > 0) {
         win = gWindows[0];
@@ -4780,162 +5162,6 @@ static void OpenDownloadedPath(Str* path) {
     }
     str::Free(*path);
     delete path;
-}
-
-static void DownloadAndOpenUrl(DownloadAndOpenUrlData* data) {
-    Str url = data->url;
-
-    TempStr downloadsDir = GetDownloadsDirTemp();
-    if (!downloadsDir) {
-        logf("DownloadAndOpenUrl: failed to get Downloads folder\n");
-        str::Free(data->url);
-        delete data;
-        return;
-    }
-
-    TempStr fileName = FileNameFromUrlTemp(url);
-    if (!fileName || str::Eq(fileName, StrL(".")) || str::Eq(fileName, StrL("..")) ||
-        str::Contains(fileName, StrL("/")) || str::Contains(fileName, StrL("\\")) ||
-        str::Contains(fileName, StrL(":"))) {
-        // generate a fallback name
-        fileName = str::DupTemp("dropped_image.png");
-    }
-
-    TempStr destPath = path::JoinTemp(downloadsDir.s, fileName.s);
-
-    // avoid overwriting: if file exists, add a numeric suffix
-    if (file::Exists(destPath)) {
-        TempStr ext = path::GetExtTemp(destPath);
-        TempStr base = str::DupTemp(Str(fileName.s, len(fileName) - len(ext)));
-        for (int i = 1; i < 1000; i++) {
-            TempStr newName = fmt("%s_%d%s", base, i, ext);
-            destPath = path::JoinTemp(downloadsDir.s, newName.s);
-            if (!file::Exists(destPath)) {
-                break;
-            }
-        }
-    }
-
-    logf("DownloadAndOpenUrl: downloading '%s' to '%s'\n", url, destPath);
-
-    Func1<HttpProgress*> emptyProgress;
-    bool ok = HttpGetToFile(url, destPath, emptyProgress);
-    if (!ok) {
-        logf("DownloadAndOpenUrl: download failed for '%s'\n", url);
-        str::Free(data->url);
-        delete data;
-        return;
-    }
-
-    // verify the downloaded file is a supported image type
-    FileType kind = GuessFileTypeFromFile(destPath);
-    if (!IsEngineImageSupportedFileType(kind)) {
-        logf("DownloadAndOpenUrl: downloaded file is not a supported image type: '%s'\n", destPath);
-        file::Delete(destPath);
-        str::Free(data->url);
-        delete data;
-        return;
-    }
-
-    // ensure it has a good extension, some urls are like:
-    // https://pbs.twimg.com/media/HEwit7bbQAAWiIO?format=jpg&name=large
-    TempStr ext = GetExtForFileTypeTemp(kind);
-    if (!str::EndsWithI(destPath, ext)) {
-        TempStr newDest = str::JoinTemp(destPath, ext);
-        ok = file::Rename(newDest, destPath);
-        if (ok) {
-            destPath = newDest;
-        }
-    }
-
-    // open the file on the UI thread
-    auto* pathDup = new Str(str::Dup(destPath));
-    auto fn = MkFunc0<Str>(OpenDownloadedPath, pathDup);
-    uitask::Post(fn, "DownloadAndOpenUrl");
-
-    str::Free(data->url);
-    delete data;
-}
-
-// Extract text from IDataObject (tries CF_UNICODETEXT, then CF_TEXT)
-static TempStr GetTextFromDataObject(IDataObject* dataObj) {
-    FORMATETC fmtUnicode = {CF_UNICODETEXT, nullptr, DVASPECT_CONTENT, -1, TYMED_HGLOBAL};
-    FORMATETC fmtAnsi = {CF_TEXT, nullptr, DVASPECT_CONTENT, -1, TYMED_HGLOBAL};
-    STGMEDIUM medium{};
-    HRESULT hr = dataObj->GetData(&fmtUnicode, &medium);
-    TempStr res;
-    if (SUCCEEDED(hr) && medium.hGlobal) {
-        WCHAR* w = (WCHAR*)GlobalLock(medium.hGlobal);
-        res = w ? ToUtf8Temp(w) : nullptr;
-        goto Cleanup;
-    }
-    hr = dataObj->GetData(&fmtAnsi, &medium);
-    if (SUCCEEDED(hr) && medium.hGlobal) {
-        char* s = (char*)GlobalLock(medium.hGlobal);
-        res = s ? str::DupTemp(Str(s)) : nullptr;
-        goto Cleanup;
-    }
-    return {};
-Cleanup:
-    GlobalUnlock(medium.hGlobal);
-    ReleaseStgMedium(&medium);
-    return res;
-}
-
-// Check if IDataObject contains a URL (registered format "UniformResourceLocatorW" or "UniformResourceLocator")
-static TempStr GetUrlFromDataObject(IDataObject* dataObj) {
-    // try wide URL format first
-    static CLIPFORMAT cfUrlW = (CLIPFORMAT)RegisterClipboardFormatW(L"UniformResourceLocatorW");
-    if (cfUrlW) {
-        FORMATETC fmt = {cfUrlW, nullptr, DVASPECT_CONTENT, -1, TYMED_HGLOBAL};
-        STGMEDIUM medium{};
-        HRESULT hr = dataObj->GetData(&fmt, &medium);
-        if (SUCCEEDED(hr) && medium.hGlobal) {
-            WCHAR* w = (WCHAR*)GlobalLock(medium.hGlobal);
-            TempStr res = w ? ToUtf8Temp(w) : nullptr;
-            GlobalUnlock(medium.hGlobal);
-            ReleaseStgMedium(&medium);
-            if (res && (str::StartsWithI(res, StrL("http://")) || str::StartsWithI(res, StrL("https://")))) {
-                return res;
-            }
-        }
-    }
-    // try ANSI URL format
-    static CLIPFORMAT cfUrl = (CLIPFORMAT)RegisterClipboardFormatW(L"UniformResourceLocator");
-    if (cfUrl) {
-        FORMATETC fmt = {cfUrl, nullptr, DVASPECT_CONTENT, -1, TYMED_HGLOBAL};
-        STGMEDIUM medium{};
-        HRESULT hr = dataObj->GetData(&fmt, &medium);
-        if (SUCCEEDED(hr) && medium.hGlobal) {
-            char* s = (char*)GlobalLock(medium.hGlobal);
-            TempStr res = s ? str::DupTemp(Str(s)) : nullptr;
-            GlobalUnlock(medium.hGlobal);
-            ReleaseStgMedium(&medium);
-            if (res && (str::StartsWithI(res, StrL("http://")) || str::StartsWithI(res, StrL("https://")))) {
-                return res;
-            }
-        }
-    }
-    return {};
-}
-
-static bool DataObjectHasFiles(IDataObject* dataObj) {
-    FORMATETC fmt = {CF_HDROP, nullptr, DVASPECT_CONTENT, -1, TYMED_HGLOBAL};
-    return dataObj->QueryGetData(&fmt) == S_OK;
-}
-
-static bool DataObjectHasUrl(IDataObject* dataObj) {
-    TempStr url = GetUrlFromDataObject(dataObj);
-    if (url && IsImageUrl(url)) {
-        return true;
-    }
-    // also check plain text that looks like an image URL
-    TempStr text = GetTextFromDataObject(dataObj);
-    if (text && (str::StartsWithI(text, StrL("http://")) || str::StartsWithI(text, StrL("https://"))) &&
-        IsImageUrl(text)) {
-        return true;
-    }
-    return false;
 }
 
 class CanvasDropTarget : public IDropTarget {
@@ -4999,7 +5225,7 @@ class CanvasDropTarget : public IDropTarget {
 
         // try URL drop
         TempStr url = GetUrlFromDataObject(dataObj);
-        if (!url) {
+        if (len(url) == 0) {
             // fall back to plain text
             TempStr text = GetTextFromDataObject(dataObj);
             if (text && (str::StartsWithI(text, StrL("http://")) || str::StartsWithI(text, StrL("https://")))) {
@@ -5012,7 +5238,7 @@ class CanvasDropTarget : public IDropTarget {
             data->url = str::Dup(url);
             data->hwndCanvas = hwnd;
             auto fn = MkFunc0<DownloadAndOpenUrlData>(DownloadAndOpenUrl, data);
-            RunAsync(fn, "DownloadAndOpenUrl");
+            RunAsync(fn, StrL("DownloadAndOpenUrl"));
         }
 
         return S_OK;
@@ -5045,6 +5271,13 @@ LRESULT CALLBACK WndProcCanvas(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             }
             // let DefWindowProc calculate NC size without scroll styles
             return DefWindowProc(hwnd, msg, wp, lp);
+        }
+    }
+
+    if (msg == WM_CTLCOLOREDIT) {
+        HBRUSH br = FreeTextInPlaceEditCtlColor((HWND)lp, (HDC)wp);
+        if (br) {
+            return (LRESULT)br;
         }
     }
 
@@ -5095,14 +5328,17 @@ LRESULT CALLBACK WndProcCanvas(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         }
     }
 
+    // the frame forwards the wheel here and DefWindowProc would hand it back to
+    // the frame: recursion until the stack overflows
+    bool isWheel = msg == WM_MOUSEWHEEL || msg == WM_MOUSEHWHEEL;
     if (!win) {
-        return DefWindowProc(hwnd, msg, wp, lp);
+        return isWheel ? 0 : DefWindowProc(hwnd, msg, wp, lp);
     }
 
     // Window close deletes controllers while DestroyWindow (WebView2, etc.) can
     // still deliver canvas messages; don't touch win->ctrl after that starts.
     if (win->isBeingClosed) {
-        return DefWindowProc(hwnd, msg, wp, lp);
+        return isWheel ? 0 : DefWindowProc(hwnd, msg, wp, lp);
     }
 
     // reveal/hide the floating overlay toolbar as the mouse approaches the top;
@@ -5121,12 +5357,7 @@ LRESULT CALLBACK WndProcCanvas(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             // stop middle-button auto-scroll when the canvas loses focus, e.g.
             // the user clicked the bookmarks/menu or minimized the window (#3203)
             if (win->mouseAction == MouseAction::Scrolling) {
-                win->mouseAction = MouseAction::None;
-                win->xScrollSpeed = 0;
-                win->yScrollSpeed = 0;
-                win->xScrollAccum = 0;
-                win->yScrollAccum = 0;
-                KillTimer(hwnd, kAutoScrollTimerID);
+                StopAutoScroll(win);
             }
             return DefWindowProc(hwnd, msg, wp, lp);
 
@@ -5137,6 +5368,10 @@ LRESULT CALLBACK WndProcCanvas(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                     logf("redraw: WM_SIZE hwnd=0x%p (canvas) size=(%d,%d)\n", hwnd, rc.dx, rc.dy);
                 }
                 win->UpdateCanvasSize();
+                if (win->IsCurrentTabAbout()) {
+                    HomePageRelayout(win);
+                }
+                HexViewUpdateScrollbars(win);
                 // fully invalidate since layout depends on size
                 // (replaces CS_HREDRAW | CS_VREDRAW which caused transparent flash)
                 HwndInvalidate(hwnd);
@@ -5168,14 +5403,13 @@ LRESULT CALLBACK WndProcCanvas(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             return UiaReturnRawElementProvider(hwnd, wp, lp, win->uiaProvider);
 
         default:
-            // TODO: achieve this split through subclassing or different window classes
             if (win->AsFixed()) {
-                HomePageDestroySearch(win);
+                HomePageHideSearch(win);
                 return WndProcCanvasFixedPageUI(win, hwnd, msg, wp, lp);
             }
 
             if (IsBrowserDocController(win->ctrl)) {
-                HomePageDestroySearch(win);
+                HomePageHideSearch(win);
                 return WndProcCanvasChmUI(win, hwnd, msg, wp, lp);
             }
 
@@ -5183,7 +5417,10 @@ LRESULT CALLBACK WndProcCanvas(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 return WndProcCanvasAbout(win, hwnd, msg, wp, lp);
             }
 
-            HomePageDestroySearch(win);
+            HomePageHideSearch(win);
+            if (win->CurrentTab() && win->CurrentTab()->IsHexTab()) {
+                return WndProcCanvasHex(win, hwnd, msg, wp, lp);
+            }
             return WndProcCanvasLoadError(win, hwnd, msg, wp, lp);
     }
 }

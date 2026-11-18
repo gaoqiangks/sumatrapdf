@@ -3,7 +3,7 @@
 
 #include "base/Base.h"
 #include "gui/Dpi.h"
-#include "base/ScopedWin.h"
+#include "base/AutoWin.h"
 #include "base/Win.h"
 #include "base/GuessFileType.h"
 
@@ -124,7 +124,7 @@ static inline void VariantSetLong(VARIANT* res, long val) {
 }
 
 bool IsBlankUrl(Str url) {
-    return str::EqI("about:blank", url);
+    return str::EqI(StrL("about:blank"), url);
 }
 
 bool IsBlankUrl(WStr url) {
@@ -203,7 +203,7 @@ static HtmlWindow* FindHtmlWindowById(int windowId) {
     // so a crafted document can pass a negative or out-of-range value. Reject it
     // instead of indexing out of bounds (Vec::operator[]'s ReportIf is
     // diagnostic-only and still reads els[idx]). Callers null-check the result.
-    if (!gHtmlWindows.isValidIndex(windowId)) {
+    if (!VecIsValidIndex(gHtmlWindows, windowId)) {
         return nullptr;
     }
     return gHtmlWindows[windowId];
@@ -211,7 +211,7 @@ static HtmlWindow* FindHtmlWindowById(int windowId) {
 
 static int GenNewWindowId(HtmlWindow* htmlWin) {
     int newWindowId = len(gHtmlWindows);
-    gHtmlWindows.Append(htmlWin);
+    VecAppend(gHtmlWindows, htmlWin);
     ReportIf(htmlWin != FindHtmlWindowById(newWindowId));
     return newWindowId;
 }
@@ -222,9 +222,9 @@ static void FreeWindowId(int windowId) {
 }
 
 // Re-using its protocol, see comments at the top.
-#define HW_PROTO_PREFIX L"its"
+constexpr const WCHAR* kHwProtoPrefix = L"its";
 
-#define HW_PROTO_PREFIXA "its"
+#define kHwProtoPrefixA "its"
 
 // {F1EC293F-DBBD-4A4B-94F4-FA52BA0BA6EE}
 static const GUID CLSID_HW_IInternetProtocol = {0xf1ec293f,
@@ -274,12 +274,7 @@ class HW_IInternetProtocolInfo : public IInternetProtocolInfo {
 };
 
 ULONG STDMETHODCALLTYPE HW_IInternetProtocolInfo::Release() {
-    LONG res = InterlockedDecrement(&refCount);
-    ReportIf(res < 0);
-    if (0 == res) {
-        delete this;
-    }
-    return res;
+    return ComRelease(&refCount, [this] { delete this; });
 }
 
 STDMETHODIMP HW_IInternetProtocolInfo::QueryInterface(REFIID riid, void** ppv) {
@@ -323,12 +318,7 @@ class HW_IInternetProtocol : public IInternetProtocol {
 };
 
 ULONG STDMETHODCALLTYPE HW_IInternetProtocol::Release() {
-    LONG res = InterlockedDecrement(&refCount);
-    ReportIf(res < 0);
-    if (0 == res) {
-        delete this;
-    }
-    return res;
+    return ComRelease(&refCount, [this] { delete this; });
 }
 
 STDMETHODIMP HW_IInternetProtocol::QueryInterface(REFIID riid, void** ppv) {
@@ -342,16 +332,31 @@ STDMETHODIMP HW_IInternetProtocol::QueryInterface(REFIID riid, void** ppv) {
 // out $htmlWindowId and $urlRest. Returns false if url doesn't conform
 // to this pattern.
 static bool ParseProtoUrl(Str url, int* htmlWindowId, TempStr* urlRest) {
-    Str rest = str::Parse(url, HW_PROTO_PREFIXA "://%d/%S", htmlWindowId, urlRest);
-    return !rest;
+    Str rest = str::Parse(url, kHwProtoPrefixA "://%d/%S", htmlWindowId, urlRest);
+    // success-at-end is {non-null, len 0}; failure is {nullptr, 0}. !rest is
+    // true for both (str::Parse unit tests use rest.s).
+    return rest.s && len(rest) == 0;
 }
 
-#define kDefaultMimeType "text/html"
+// If url is its://<id>/<rest> for this HtmlWindow, return <rest>. Otherwise
+// return url unchanged. Logs and ReportIf if the id belongs to another window.
+static TempStr UrlWithoutProtoTemp(Str url, int windowId) {
+    int protoWindowId = 0;
+    TempStr urlReal = url;
+    bool ok = ParseProtoUrl(url, &protoWindowId, &urlReal);
+    if (ok && protoWindowId != windowId) {
+        logf("UrlWithoutProtoTemp: protoWindowId=%d windowId=%d url='%s'\n", protoWindowId, windowId, url);
+    }
+    ReportIf(ok && (protoWindowId != windowId));
+    return urlReal;
+}
+
+constexpr const char* kDefaultMimeType = "text/html";
 
 static TempStr MimeFromUrlTemp(Str url, Str imgExt = {}) {
     Str ext = str::SliceFromCharLast(url, '.');
     if (!ext.s) {
-        return {kDefaultMimeType};
+        return StrL(kDefaultMimeType);
     }
 
     Str semi = str::SliceFromChar(ext, ';');
@@ -367,12 +372,12 @@ static TempStr MimeFromUrlTemp(Str url, Str imgExt = {}) {
         return mime;
     }
 
-    TempStr contentType = ReadRegStrTemp(HKEY_CLASSES_ROOT, ext, "Content Type");
+    TempStr contentType = ReadRegStrTemp(HKEY_CLASSES_ROOT, ext, StrL("Content Type"));
     if (contentType) {
         return contentType;
     }
 
-    return {kDefaultMimeType};
+    return StrL(kDefaultMimeType);
 }
 
 // TODO: return an error page html in case of errors?
@@ -472,12 +477,7 @@ class HW_IInternetProtocolFactory : public IClassFactory {
 };
 
 STDMETHODIMP_(ULONG) HW_IInternetProtocolFactory::Release() {
-    LONG res = InterlockedDecrement(&refCount);
-    ReportIf(res < 0);
-    if (0 == res) {
-        delete this;
-    }
-    return res;
+    return ComRelease(&refCount, [this] { delete this; });
 }
 
 STDMETHODIMP HW_IInternetProtocolFactory::QueryInterface(REFIID riid, void** ppv) {
@@ -490,11 +490,11 @@ STDMETHODIMP HW_IInternetProtocolFactory::CreateInstance(IUnknown* pUnkOuter, RE
         return CLASS_E_NOAGGREGATION;
     }
     if (riid == IID_IInternetProtocol) {
-        ScopedComPtr<IInternetProtocol> proto(new HW_IInternetProtocol());
+        AutoReleaseComPtr<IInternetProtocol> proto(new HW_IInternetProtocol());
         return proto->QueryInterface(riid, ppvObject);
     }
     if (riid == IID_IInternetProtocolInfo) {
-        ScopedComPtr<IInternetProtocolInfo> proto(new HW_IInternetProtocolInfo());
+        AutoReleaseComPtr<IInternetProtocolInfo> proto(new HW_IInternetProtocolInfo());
         return proto->QueryInterface(riid, ppvObject);
     }
     return E_NOINTERFACE;
@@ -504,19 +504,19 @@ static AtomicInt gProtocolFactoryRefCount = 0;
 static HW_IInternetProtocolFactory* gInternetProtocolFactory = nullptr;
 
 // Register our protocol so that urlmon will call us for every
-// url that starts with HW_PROTO_PREFIX
+// url that starts with kHwProtoPrefix
 static void RegisterInternetProtocolFactory() {
     int val = AtomicIntInc(&gProtocolFactoryRefCount);
     if (val > 1) {
         return;
     }
 
-    ScopedComPtr<IInternetSession> internetSession;
+    AutoReleaseComPtr<IInternetSession> internetSession;
     HRESULT hr = CoInternetGetSession(0, &internetSession, 0);
     ReportIf(FAILED(hr));
     ReportIf(nullptr != gInternetProtocolFactory);
     gInternetProtocolFactory = new HW_IInternetProtocolFactory();
-    hr = internetSession->RegisterNameSpace(gInternetProtocolFactory, CLSID_HW_IInternetProtocol, HW_PROTO_PREFIX, 0,
+    hr = internetSession->RegisterNameSpace(gInternetProtocolFactory, CLSID_HW_IInternetProtocol, kHwProtoPrefix, 0,
                                             nullptr, 0);
     ReportIf(FAILED(hr));
 }
@@ -526,10 +526,10 @@ static void UnregisterInternetProtocolFactory() {
     if (val > 0) {
         return;
     }
-    ScopedComPtr<IInternetSession> internetSession;
+    AutoReleaseComPtr<IInternetSession> internetSession;
     HRESULT hr = CoInternetGetSession(0, &internetSession, 0);
     ReportIf(FAILED(hr));
-    internetSession->UnregisterNameSpace(gInternetProtocolFactory, HW_PROTO_PREFIX);
+    internetSession->UnregisterNameSpace(gInternetProtocolFactory, kHwProtoPrefix);
     ULONG refCount = gInternetProtocolFactory->Release();
     ReportIf(refCount != 0);
     gInternetProtocolFactory = nullptr;
@@ -903,10 +903,6 @@ IDownloadManager : public IUnknown {
                                   UINT uiCP) = 0;
 };
 
-#ifdef __GNUC__
-__CRT_UUID_DECL(IDownloadManager, 0x988934a4, 0x064b, 0x11d3, 0xbb, 0x80, 0x0, 0x10, 0x4b, 0x35, 0xe7, 0xf9)
-#endif
-
 #endif
 
 class HW_IDownloadManager : public IDownloadManager {
@@ -986,7 +982,7 @@ class HW_IServiceProvider : public IServiceProvider {
     // IServiceProvider
     STDMETHODIMP QueryService(REFGUID guidService, REFIID riid, void** ppv) override {
         if (guidService == SID_SDownloadManager) {
-            ScopedComPtr<IDownloadManager> dm(new HW_IDownloadManager());
+            AutoReleaseComPtr<IDownloadManager> dm(new HW_IDownloadManager());
             return dm->QueryInterface(riid, ppv);
         }
         return E_NOINTERFACE;
@@ -1137,24 +1133,28 @@ ULONG STDMETHODCALLTYPE HtmlMoniker::AddRef() {
 }
 
 ULONG STDMETHODCALLTYPE HtmlMoniker::Release() {
-    LONG res = InterlockedDecrement(&refCount);
-    ReportIf(res < 0);
-    if (0 == res) {
-        delete this;
-    }
-    return res;
+    return ComRelease(&refCount, [this] { delete this; });
 }
 
+// The window that renders the page and processes its input. It sits under
+// "Shell Embedding" / "Shell DocObject View", but descending into the first
+// child at each level found nothing once the parent had another child before
+// it -- our canvas hosts an edit control too (issue #6148). Search by class.
 static HWND GetBrowserControlHwnd(HWND hwndControlParent) {
-    // This is a fragile way to get the actual hwnd of the browser control
-    // that is responsible for processing keyboard messages (I believe the
-    // hierarchy might change depending on how the browser control is configured
-    // e.g. if it has status window etc.).
-    // But it works for us.
-    HWND w1 = GetWindow(hwndControlParent, GW_CHILD);
-    HWND w2 = GetWindow(w1, GW_CHILD);
-    HWND w3 = GetWindow(w2, GW_CHILD);
-    return w3;
+    HWND child = GetWindow(hwndControlParent, GW_CHILD);
+    while (child) {
+        WCHAR cls[64] = {};
+        int n = GetClassNameW(child, cls, dimof(cls));
+        if (wstr::Eq(WStr(cls, n), WStrL(L"Internet Explorer_Server"))) {
+            return child;
+        }
+        HWND res = GetBrowserControlHwnd(child);
+        if (res) {
+            return res;
+        }
+        child = GetWindow(child, GW_HWNDNEXT);
+    }
+    return nullptr;
 }
 
 // WndProc of the window that is a parent hwnd of embedded browser control.
@@ -1171,10 +1171,17 @@ static LRESULT CALLBACK WndProcParent(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp,
             }
             break;
 
-        // Note: not quite sure why I need this but if we don't swallow WM_MOUSEWHEEL
-        // messages, we might get infinite recursion.
+        // The wheel lands here whenever the browser control isn't focused, and
+        // swallowing it left CHM / markdown unscrollable (issue #6148). Forward
+        // it instead; the control bounces an unhandled wheel back to this
+        // parent, so a flag breaks the recursion.
         case WM_MOUSEWHEEL:
         case WM_MOUSEHWHEEL:
+            if (!win->forwardingWheel) {
+                win->forwardingWheel = true;
+                win->SendMsg(msg, wp, lp);
+                win->forwardingWheel = false;
+            }
             return 0;
 
         case WM_PARENTNOTIFY:
@@ -1235,7 +1242,7 @@ HtmlWindow::HtmlWindow(HWND parent, HtmlWindowCallback* cb) {
 
 bool HtmlWindow::CreateBrowser() {
     HRESULT hr;
-    ScopedComPtr<IUnknown> p;
+    AutoReleaseComPtr<IUnknown> p;
     if (!p.Create(CLSID_WebBrowser)) {
         return false;
     }
@@ -1257,13 +1264,13 @@ bool HtmlWindow::CreateBrowser() {
     bool invisibleAtRuntime = 0 != (status & OLEMISC_INVISIBLEATRUNTIME);
 
     FrameSite* fs = new FrameSite(this);
-    ScopedComPtr<IUnknown> fsScope(fs);
+    AutoReleaseComPtr<IUnknown> fsScope(fs);
 
     if (setClientSiteFirst) {
         oleObject->SetClientSite(fs->oleClientSite);
     }
 
-    ScopedComQIPtr<IPersistStreamInit> psInit(p);
+    AutoReleaseComQIPtr<IPersistStreamInit> psInit(p);
     if (psInit) {
         hr = psInit->InitNew();
         ReportIf(!SUCCEEDED(hr));
@@ -1287,10 +1294,6 @@ bool HtmlWindow::CreateBrowser() {
         if (FAILED(hr)) {
             return false;
         }
-#if 0 // is this necessary?
-        hr = oleObject->DoVerb(OLEIVERB_SHOW, 0, fs->oleClientSite, 0,
-                hwnd, &rc);
-#endif
     }
 
     if (!setClientSiteFirst) {
@@ -1302,7 +1305,7 @@ bool HtmlWindow::CreateBrowser() {
         return false;
     }
 
-    ScopedComQIPtr<IConnectionPointContainer> cpContainer(p);
+    AutoReleaseComQIPtr<IConnectionPointContainer> cpContainer(p);
     if (!cpContainer) {
         return false;
     }
@@ -1332,7 +1335,7 @@ bool HtmlWindow::CreateBrowser() {
 }
 
 // urlmon.dll is delay-loaded. On systems where it (or an export we need) can't
-// be loaded -- e.g. Wine, or a stripped-down Windows install -- calling a
+// be loaded -- e.g. a stripped-down Windows install -- calling a
 // delay-loaded urlmon function raises a fatal delay-load exception (0xC06D007E)
 // that we can't catch here. The HtmlWindow ctor calls into urlmon
 // (RegisterInternetProtocolFactory -> CoInternetGetSession), so verify urlmon is
@@ -1426,10 +1429,21 @@ void HtmlWindow::OnLButtonDown() const {
     }
 }
 
+// BrowserDocView keeps the IE control alive across tab switches. Its parent is
+// the shared document canvas, so the IE subclass must not keep intercepting
+// paint, scroll, and input messages while another tab is active.
 void HtmlWindow::SetVisible(bool visible) {
-    HwndSetVisible(hwndParent, visible);
+    if (visible && !subclassId) {
+        SubclassHwnd();
+    }
     if (webBrowser) {
         webBrowser->put_Visible(visible ? VARIANT_TRUE : VARIANT_FALSE);
+    }
+    if (oleObjectHwnd) {
+        HwndSetVisible(oleObjectHwnd, visible);
+    }
+    if (!visible) {
+        UnsubclassHwnd();
     }
 }
 
@@ -1501,7 +1515,7 @@ void HtmlWindow::CopySelection() {
 }
 
 void HtmlWindow::NavigateToAboutBlank() {
-    NavigateToUrl("about:blank");
+    NavigateToUrl(StrL("about:blank"));
 }
 
 void HtmlWindow::SetHtml(Str d, Str url) {
@@ -1524,25 +1538,25 @@ void HtmlWindow::SetHtmlReal(Str d) {
     }
     htmlContent = new HtmlMoniker();
     htmlContent->SetHtml(d);
-    TempStr baseUrl = fmt(HW_PROTO_PREFIXA "://%d/", windowId);
+    TempStr baseUrl = fmt(kHwProtoPrefixA "://%d/", windowId);
     htmlContent->SetBaseUrl(ToWStrTemp(baseUrl));
 
-    ScopedComPtr<IDispatch> docDispatch;
+    AutoReleaseComPtr<IDispatch> docDispatch;
     HRESULT hr = webBrowser->get_Document(&docDispatch);
     if (FAILED(hr) || !docDispatch) {
         return;
     }
 
-    ScopedComQIPtr<IHTMLDocument2> doc(docDispatch);
+    AutoReleaseComQIPtr<IHTMLDocument2> doc(docDispatch);
     if (!doc) {
         return;
     }
 
-    ScopedComQIPtr<IPersistMoniker> perstMon(doc);
+    AutoReleaseComQIPtr<IPersistMoniker> perstMon(doc);
     if (!perstMon) {
         return;
     }
-    ScopedComQIPtr<IMoniker> htmlMon(htmlContent);
+    AutoReleaseComQIPtr<IMoniker> htmlMon(htmlContent);
     hr = perstMon->Load(TRUE, htmlMon, nullptr, STGM_READ);
     ReportIf(FAILED(hr));
 }
@@ -1552,24 +1566,24 @@ void HtmlWindow::SetHtmlReal(Str d) {
 // This is equivalent of <body scroll=auto> but for any html
 // This seems to be the only way to hide vertical scrollbar if it's not necessary
 void HtmlWindow::SetScrollbarToAuto() {
-    ScopedComPtr<IDispatch> docDispatch;
+    AutoReleaseComPtr<IDispatch> docDispatch;
     HRESULT hr = webBrowser->get_Document(&docDispatch);
     if (FAILED(hr) || !docDispatch) {
         return;
     }
 
-    ScopedComQIPtr<IHTMLDocument2> doc2(docDispatch);
+    AutoReleaseComQIPtr<IHTMLDocument2> doc2(docDispatch);
     if (!doc2) {
         return;
     }
 
-    ScopedComPtr<IHTMLElement> bodyElement;
+    AutoReleaseComPtr<IHTMLElement> bodyElement;
     hr = doc2->get_body(&bodyElement);
     if (FAILED(hr) || !bodyElement) {
         return;
     }
 
-    ScopedComQIPtr<IHTMLBodyElement> body(bodyElement);
+    AutoReleaseComQIPtr<IHTMLBodyElement> body(bodyElement);
     if (!body) {
         return;
     }
@@ -1590,7 +1604,7 @@ Point HtmlWindow::GetScrollPos() {
         return res;
     }
 
-    ScopedComPtr<IDispatch> docDispatch;
+    AutoReleaseComPtr<IDispatch> docDispatch;
     HRESULT hr = webBrowser->get_Document(&docDispatch);
     if (FAILED(hr) || !docDispatch) {
         return res;
@@ -1600,12 +1614,12 @@ Point HtmlWindow::GetScrollPos() {
     long y = 0;
     bool got = false;
 
-    ScopedComQIPtr<IHTMLDocument3> doc3(docDispatch);
+    AutoReleaseComQIPtr<IHTMLDocument3> doc3(docDispatch);
     if (doc3) {
-        ScopedComPtr<IHTMLElement> documentElement;
+        AutoReleaseComPtr<IHTMLElement> documentElement;
         hr = doc3->get_documentElement(&documentElement);
         if (SUCCEEDED(hr) && documentElement) {
-            ScopedComQIPtr<IHTMLElement2> element2(documentElement);
+            AutoReleaseComQIPtr<IHTMLElement2> element2(documentElement);
             if (element2) {
                 long sx = 0;
                 long sy = 0;
@@ -1618,12 +1632,12 @@ Point HtmlWindow::GetScrollPos() {
         }
     }
 
-    ScopedComQIPtr<IHTMLDocument2> doc2(docDispatch);
+    AutoReleaseComQIPtr<IHTMLDocument2> doc2(docDispatch);
     if (doc2) {
-        ScopedComPtr<IHTMLElement> bodyElement;
+        AutoReleaseComPtr<IHTMLElement> bodyElement;
         hr = doc2->get_body(&bodyElement);
         if (SUCCEEDED(hr) && bodyElement) {
-            ScopedComQIPtr<IHTMLElement2> body2(bodyElement);
+            AutoReleaseComQIPtr<IHTMLElement2> body2(bodyElement);
             if (body2) {
                 long sx = 0;
                 long sy = 0;
@@ -1654,18 +1668,18 @@ void HtmlWindow::SetScrollPos(Point pos) {
     pos.x = std::max(pos.x, 0);
     pos.y = std::max(pos.y, 0);
 
-    ScopedComPtr<IDispatch> docDispatch;
+    AutoReleaseComPtr<IDispatch> docDispatch;
     HRESULT hr = webBrowser->get_Document(&docDispatch);
     if (FAILED(hr) || !docDispatch) {
         return;
     }
 
-    ScopedComQIPtr<IHTMLDocument3> doc3(docDispatch);
+    AutoReleaseComQIPtr<IHTMLDocument3> doc3(docDispatch);
     if (doc3) {
-        ScopedComPtr<IHTMLElement> documentElement;
+        AutoReleaseComPtr<IHTMLElement> documentElement;
         hr = doc3->get_documentElement(&documentElement);
         if (SUCCEEDED(hr) && documentElement) {
-            ScopedComQIPtr<IHTMLElement2> element2(documentElement);
+            AutoReleaseComQIPtr<IHTMLElement2> element2(documentElement);
             if (element2) {
                 element2->put_scrollLeft(pos.x);
                 element2->put_scrollTop(pos.y);
@@ -1673,22 +1687,22 @@ void HtmlWindow::SetScrollPos(Point pos) {
         }
     }
 
-    ScopedComQIPtr<IHTMLDocument2> doc2(docDispatch);
+    AutoReleaseComQIPtr<IHTMLDocument2> doc2(docDispatch);
     if (!doc2) {
         return;
     }
 
-    ScopedComPtr<IHTMLElement> bodyElement;
+    AutoReleaseComPtr<IHTMLElement> bodyElement;
     hr = doc2->get_body(&bodyElement);
     if (SUCCEEDED(hr) && bodyElement) {
-        ScopedComQIPtr<IHTMLElement2> body2(bodyElement);
+        AutoReleaseComQIPtr<IHTMLElement2> body2(bodyElement);
         if (body2) {
             body2->put_scrollLeft(pos.x);
             body2->put_scrollTop(pos.y);
         }
     }
 
-    ScopedComPtr<IHTMLWindow2> window;
+    AutoReleaseComPtr<IHTMLWindow2> window;
     hr = doc2->get_parentWindow(&window);
     if (SUCCEEDED(hr) && window) {
         window->scrollTo(pos.x, pos.y);
@@ -1699,12 +1713,12 @@ void HtmlWindow::SetScrollPos(Point pos) {
 // it to <finalSize>. It's up to the caller to make sure <area> fits
 // within window (we don't check that's the case)
 HBITMAP HtmlWindow::TakeScreenshot(Rect area, Size finalSize) {
-    ScopedComPtr<IDispatch> docDispatch;
+    AutoReleaseComPtr<IDispatch> docDispatch;
     HRESULT hr = webBrowser->get_Document(&docDispatch);
     if (FAILED(hr) || !docDispatch) {
         return nullptr;
     }
-    ScopedComQIPtr<IViewObject2> view(docDispatch);
+    AutoReleaseComQIPtr<IViewObject2> view(docDispatch);
     if (!view) {
         return nullptr;
     }
@@ -1752,10 +1766,7 @@ bool HtmlWindow::OnBeforeNavigate(Str url, bool newWindow) {
 
     // if it's url for our internal protocol, strip the protocol
     // part as we don't want to expose it to clients.
-    int protoWindowId;
-    TempStr urlReal = url;
-    bool ok = ParseProtoUrl(url, &protoWindowId, &urlReal);
-    ReportIf(ok && (protoWindowId != windowId));
+    TempStr urlReal = UrlWithoutProtoTemp(url, windowId);
     bool shouldNavigate = htmlWinCb->OnBeforeNavigate(urlReal, newWindow);
     return shouldNavigate;
 }
@@ -1785,10 +1796,7 @@ void HtmlWindow::OnDocumentComplete(Str url) {
 
     // if it's url for our internal protocol, strip the protocol
     // part as we don't want to expose it to clients.
-    int protoWindowId;
-    TempStr urlReal = url;
-    bool ok = ParseProtoUrl(url, &protoWindowId, &urlReal);
-    ReportIf(ok && (protoWindowId != windowId));
+    TempStr urlReal = UrlWithoutProtoTemp(url, windowId);
 
     str::Free(currentURL);
     currentURL = str::Dup(urlReal);
@@ -1799,7 +1807,7 @@ void HtmlWindow::OnDocumentComplete(Str url) {
 }
 
 HRESULT HtmlWindow::OnDragEnter(IDataObject* dataObj) {
-    ScopedComQIPtr<IDataObject> data(dataObj);
+    AutoReleaseComQIPtr<IDataObject> data(dataObj);
     if (!data) {
         return E_INVALIDARG;
     }
@@ -1813,7 +1821,7 @@ HRESULT HtmlWindow::OnDragEnter(IDataObject* dataObj) {
 }
 
 HRESULT HtmlWindow::OnDragDrop(IDataObject* dataObj) {
-    ScopedComQIPtr<IDataObject> data(dataObj);
+    AutoReleaseComQIPtr<IDataObject> data(dataObj);
     if (!data) {
         return E_INVALIDARG;
     }
@@ -1927,12 +1935,7 @@ STDMETHODIMP FrameSite::QueryInterface(REFIID riid, void** ppv) {
 }
 
 ULONG STDMETHODCALLTYPE FrameSite::Release() {
-    LONG res = InterlockedDecrement(&refCount);
-    ReportIf(res < 0);
-    if (0 == res) {
-        delete this;
-    }
-    return res;
+    return ComRelease(&refCount, [this] { delete this; });
 }
 
 // IDispatch
@@ -1997,16 +2000,6 @@ HRESULT HW_DWebBrowserEvents2::Invoke(DISPID dispIdMember, __unused REFIID riid,
             *pDispParams->rgvarg[0].pboolVal = shouldCancel ? VARIANT_TRUE : VARIANT_FALSE;
             break;
         }
-
-#if 0
-        case DISPID_PROGRESSCHANGE:
-        {
-            long current = pDispParams->rgvarg[1].lVal;
-            long maximum = pDispParams->rgvarg[0].lVal;
-            fs->htmlWindow->OnProgressURL(current, maximum);
-            break;
-        }
-#endif
 
         case DISPID_DOCUMENTCOMPLETE: {
             // TODO: there are complexities related to multi-frame documents. This
@@ -2140,16 +2133,6 @@ HRESULT HW_IOleInPlaceSiteWindowless::GetDC(__unused LPCRECT pRect, __unused DWO
         return E_INVALIDARG;
     }
 
-#if 0
-    if (grfFlags & OLEDC_NODRAW)
-    {
-        *phDC = mfs->hDCBuffer;
-        return S_OK;
-    }
-
-    if (fs->hDCBuffer != nullptr)
-        return E_UNEXPECTED;
-#endif
     return E_NOTIMPL;
 }
 

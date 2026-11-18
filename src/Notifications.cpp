@@ -16,22 +16,23 @@
 
 #include "Settings.h"
 #include "AppSettings.h"
+#include "DocController.h"
+#include "EngineBase.h"
+#include "DisplayModel.h"
 #include "SumatraPDF.h"
 #include "MainWindow.h"
+#include "AIChatTypes.h"
 #include "WindowTab.h"
 
-#include "Notifications.h"
 #include "Theme.h"
+#include "Notifications.h"
+#include "NotificationsCommon.h"
 
 static StrNode* gDelayedNotifications = nullptr;
 
-Kind kNotifCursorPos = "cursorPosHelper";
-Kind kNotifActionResponse = "responseToAction";
-Kind kNotifPageInfo = "pageInfoHelper";
-// can have multiple of those
-Kind kNotifAdHoc = "notifAdHoc";
-// debug-only: continuous layout re-done because newly visible pages got measured
-Kind kNotifLazyLayout = "notifLazyLayout";
+void SetNotifWindow(NotificationCreateArgs& args, MainWindow* win) {
+    args.hwndParent = win ? win->hwndCanvas : nullptr;
+}
 
 static Kind kindNotifText = "notifText";
 static Kind kindNotifProgress = "notifProgress";
@@ -97,7 +98,8 @@ struct NotificationWnd : WindowBase {
     void Layout(Str message);
     void BuildTree(ILayout* customContent);
     NotifColors Colors() const;
-    void ScheduleRemove(VirtMouseEvent* ev = nullptr);
+    void ScheduleRemove(NotifCloseReason reason);
+    void CloseByUser(VirtMouseEvent* ev);
 
     int timeoutMs = kNotifDefaultTimeOut; // 0 means no timeout
 
@@ -109,7 +111,8 @@ struct NotificationWnd : WindowBase {
     // reused across layouts because, unlike `msg`, it can't be re-parsed
     VirtRichText* richMsg = nullptr;
 
-    NotificationWndRemoved wndRemovedCb;
+    NotificationClosed closedCb;
+    NotifCloseReason closeReason = NotifCloseReason::Program;
 
     // there can only be a single notification of a given group
     Kind groupId = nullptr;
@@ -208,6 +211,11 @@ void RelayoutNotifications(HWND hwndCanvas) {
         }
         int xMargin = DpiScale(wnd->xMargin);
         int yMargin = DpiScale(wnd->yMargin);
+        // close ✕ is sized at create; re-apply if DPI changed while it was up
+        int closeDx = DpiScale(16);
+        if (wnd->closeCtrl && wnd->closeCtrl->idealSize.dx != closeDx) {
+            wnd->Layout(HwndGetTextTemp(wnd->hwnd));
+        }
         NotifCorner corner = wnd->corner;
         bool isBar = (corner == NotifCorner::BottomBar);
         Rect rect = HwndWindowRect(wnd->hwnd);
@@ -309,12 +317,6 @@ static void NotifsRemoveNotification(NotificationWnd* wnd) {
     delete wnd;
 }
 
-__unused static int GetWndX(NotificationWnd* wnd) {
-    Rect rect = HwndWindowRect(wnd->hwnd);
-    rect = HwndMapRectToWindow(rect, HWND_DESKTOP, GetParent(wnd->hwnd));
-    return rect.x;
-}
-
 NotificationWnd::~NotificationWnd() {
     if (delayTimerId != 0) {
         KillTimer(hwnd, delayTimerId);
@@ -379,7 +381,7 @@ void NotificationWnd::BuildTree(ILayout* customContent) {
     row->AddChild(left, 1);
     if (!noClose) {
         closeCtrl = new VirtCloseButton();
-        closeCtrl->onClick = MkMethod1<NotificationWnd, VirtMouseEvent*, &NotificationWnd::ScheduleRemove>(this);
+        closeCtrl->onClick = MkMethod1<NotificationWnd, VirtMouseEvent*, &NotificationWnd::CloseByUser>(this);
         closeCtrl->idealSize = {closeDx, closeDx + 2};
         row->AddChild(new Spacer(closeGap, 0));
         row->AddChild(closeCtrl);
@@ -400,11 +402,7 @@ HWND NotificationWnd::Create(const NotificationCreateArgs& args) {
         ReportIf(shrinkLimit < 0.2f);
         shrinkLimit = 1.f;
     }
-    if (args.onRemoved.IsValid()) {
-        wndRemovedCb = args.onRemoved;
-    } else {
-        wndRemovedCb = MkFunc1Void(NotifsRemoveNotification);
-    }
+    closedCb = args.onClosed;
     timeoutMs = args.timeoutMs;
     tab = args.tab;
     corner = args.corner;
@@ -455,19 +453,8 @@ HWND NotificationWnd::Create(const NotificationCreateArgs& args) {
     return hwnd;
 }
 
-// returns 0% - 100%
-int CalcPerc(int current, int total) {
-    ReportIf(total <= 0 || current < 0);
-    ReportIf(total < current);
-    if (total <= 0) {
-        total = 1;
-    }
-    int perc = limitValue(100 * current / total, 0, 100);
-    return perc;
-}
-
 void NotificationWnd::Layout(Str message) {
-    if (!message) {
+    if (len(message) == 0) {
         message = StrL("");
     }
     int padX = DpiScale(12);
@@ -666,8 +653,11 @@ void NotificationWnd::UpdateMessage(Str msg, int timeoutMs, bool highlight) {
     HwndSetRtl(hwnd, IsUIRtl());
     Layout(msg);
     HwndRepaintNow(hwnd);
+    // 0 persists: drop a timeout armed by an earlier message
     if (timeoutMs != 0) {
         SetTimer(hwnd, kNotifTimerTimeoutId, timeoutMs, nullptr);
+    } else {
+        KillTimer(hwnd, kNotifTimerTimeoutId);
     }
 }
 
@@ -682,23 +672,30 @@ bool UpdateNotificationProgress(NotificationWnd* wnd, Str msg, int perc) {
 }
 
 static void NotifRemove(NotificationWnd* wnd) {
-    wnd->wndRemovedCb.Call(wnd);
-}
-
-static void NotifDelete(NotificationWnd* wnd) {
-    delete wnd;
-}
-
-// Delete off the stack of the message being dispatched (uitask runs after
-// dispatch), so the wnd survives until the handler returns.
-void NotificationWnd::ScheduleRemove(VirtMouseEvent*) {
-    if (wndRemovedCb.IsValid()) {
-        auto fn = MkFunc0<NotificationWnd>(NotifRemove, this);
-        uitask::Post(fn, "TaskNotifRemove");
-    } else {
-        auto fn = MkFunc0<NotificationWnd>(NotifDelete, this);
-        uitask::Post(fn, "TaskNotifDelete");
+    // already removed (and freed) between ScheduleRemove and now
+    if (NotificationIndexOf(wnd) < 0) {
+        return;
     }
+    if (!wnd->closedCb.IsValid()) {
+        NotifsRemoveNotification(wnd);
+        return;
+    }
+    NotificationClosedEvent ev;
+    ev.wnd = wnd;
+    ev.reason = wnd->closeReason;
+    wnd->closedCb.Call(&ev);
+}
+
+void NotificationWnd::CloseByUser(VirtMouseEvent*) {
+    ScheduleRemove(NotifCloseReason::User);
+}
+
+// Remove off the stack of the message being dispatched (uitask runs after
+// dispatch), so the wnd survives until the handler returns.
+void NotificationWnd::ScheduleRemove(NotifCloseReason reason) {
+    closeReason = reason;
+    auto fn = MkFunc0<NotificationWnd>(NotifRemove, this);
+    uitask::Post(fn, "TaskNotifRemove");
 }
 
 void NotificationWnd::OnTimer(WindowBase::TimerEvent* ev) {
@@ -716,7 +713,7 @@ void NotificationWnd::OnTimer(WindowBase::TimerEvent* ev) {
         return;
     }
     ReportIf(kNotifTimerTimeoutId != timerId);
-    ScheduleRemove();
+    ScheduleRemove(NotifCloseReason::Timeout);
 }
 
 // If onlyTab is non-null, only remove notifications in this group that are
@@ -774,8 +771,16 @@ static NotificationWnd* NotifsGetForGroup(NotificationWnd** wnds, int nWnds, Kin
     return nullptr;
 }
 
-NotificationWnd* ShowNotification(const NotificationCreateArgs& args) {
+NotificationWnd* ShowNotification(const NotificationCreateArgs& argsIn) {
+    NotificationCreateArgs args = argsIn;
+    if (!args.hwndParent && args.win) {
+        args.hwndParent = args.win->hwndCanvas;
+    }
     ReportIf(!args.hwndParent);
+    if (!gNotificationsEnabled) {
+        // callers already handle a null (Create() / NotifsAdd() can fail)
+        return nullptr;
+    }
 
     NotificationWnd* wnd = new NotificationWnd();
     wnd->Create(args);
@@ -788,7 +793,7 @@ NotificationWnd* ShowNotification(const NotificationCreateArgs& args) {
     // already selected another tab). Hide if this tab is not current.
     if (args.tab && wnd->delayTimerId == 0) {
         MainWindow* win = FindMainWindowByHwnd(args.hwndParent);
-        if (win && win->CurrentTab() != args.tab) {
+        if (win && !IsCurrentTab(win, args.tab)) {
             ShowWindow(wnd->hwnd, SW_HIDE);
         } else {
             BringWindowToTop(wnd->hwnd);
@@ -805,16 +810,29 @@ NotificationWnd* ShowNotification(const NotificationCreateArgs& args) {
     return wnd;
 }
 
+enum class NotifFlavor {
+    Normal,
+    Warning,
+    Plain,
+    PlainWarning
+};
+
+static NotificationWnd* ShowMsgNotification(HWND hwnd, Str msg, int timeoutMs, NotifFlavor flavor) {
+    NotificationCreateArgs args;
+    args.hwndParent = hwnd;
+    args.msg = msg;
+    args.warning = flavor == NotifFlavor::Warning || flavor == NotifFlavor::PlainWarning;
+    args.plainText = flavor == NotifFlavor::Plain || flavor == NotifFlavor::PlainWarning;
+    args.timeoutMs = timeoutMs;
+    return ShowNotification(args);
+}
+
 // show a temporary notification that will go away after a timeout
 NotificationWnd* ShowTemporaryNotification(HWND hwnd, Str msg, int timeoutMs) {
     if (timeoutMs <= 0) {
         timeoutMs = kNotifDefaultTimeOut;
     }
-    NotificationCreateArgs args;
-    args.hwndParent = hwnd;
-    args.msg = msg;
-    args.timeoutMs = timeoutMs;
-    return ShowNotification(args);
+    return ShowMsgNotification(hwnd, msg, timeoutMs, NotifFlavor::Normal);
 }
 
 // show a notification whose content is an arbitrary VirtCtrl tree. Ownership of
@@ -834,12 +852,7 @@ NotificationWnd* ShowWarningNotification(HWND hwndParent, Str msg, int timeoutMs
     if (timeoutMs < 0) {
         timeoutMs = kNotifDefaultTimeOut;
     }
-    NotificationCreateArgs args;
-    args.hwndParent = hwndParent;
-    args.msg = msg;
-    args.warning = true;
-    args.timeoutMs = timeoutMs;
-    return ShowNotification(args);
+    return ShowMsgNotification(hwndParent, msg, timeoutMs, NotifFlavor::Warning);
 }
 
 // for a message that embeds text we didn't author (a file path, document
@@ -849,25 +862,14 @@ NotificationWnd* ShowPlainNotification(HWND hwnd, Str msg, int timeoutMs) {
     if (timeoutMs <= 0) {
         timeoutMs = kNotifDefaultTimeOut;
     }
-    NotificationCreateArgs args;
-    args.hwndParent = hwnd;
-    args.msg = msg;
-    args.plainText = true;
-    args.timeoutMs = timeoutMs;
-    return ShowNotification(args);
+    return ShowMsgNotification(hwnd, msg, timeoutMs, NotifFlavor::Plain);
 }
 
 NotificationWnd* ShowPlainWarningNotification(HWND hwndParent, Str msg, int timeoutMs) {
     if (timeoutMs < 0) {
         timeoutMs = kNotifDefaultTimeOut;
     }
-    NotificationCreateArgs args;
-    args.hwndParent = hwndParent;
-    args.msg = msg;
-    args.plainText = true;
-    args.warning = true;
-    args.timeoutMs = timeoutMs;
-    return ShowNotification(args);
+    return ShowMsgNotification(hwndParent, msg, timeoutMs, NotifFlavor::PlainWarning);
 }
 
 void NotificationUpdateMessage(NotificationWnd* wnd, Str msg, int timeoutInMS, bool highlight) {
@@ -884,8 +886,37 @@ TempStr NotificationGetMessageTemp(NotificationWnd* wnd) {
     return HwndGetTextTemp(wnd->hwnd);
 }
 
+// paints it now, without running the message loop: the UI thread is busy, e.g.
+// downloading a font mupdf asked for
+void RepaintNotificationNow(NotificationWnd* wnd) {
+    if (NotificationIndexOf(wnd) < 0 || !wnd->hwnd) {
+        return;
+    }
+    RedrawWindow(wnd->hwnd, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_UPDATENOW);
+}
+
 void RemoveNotification(NotificationWnd* wnd) {
     NotifsRemoveNotification(wnd);
+}
+
+void CloseNotification(NotificationWnd* wnd, NotifCloseReason reason) {
+    if (!wnd) {
+        return;
+    }
+    wnd->ScheduleRemove(reason);
+}
+
+// Turning them off also takes down the ones already on screen, so a test can
+// disable them after the app has shown one (the zoom notification from -zoom
+// is up before a test can say anything).
+void SetNotificationsEnabled(bool enabled) {
+    gNotificationsEnabled = enabled;
+    if (enabled) {
+        return;
+    }
+    while (gNotifsCount > 0) {
+        NotifsRemoveNotification(gNotifs[0]);
+    }
 }
 
 bool RemoveNotificationsForGroup(HWND hwnd, Kind kind) {
@@ -907,6 +938,34 @@ NotificationWnd* GetNotificationForGroup(HWND hwnd, Kind kind) {
     NotificationWnd* wnds[kMaxNotifs];
     int nWnds = GetForHwnd(hwnd, wnds);
     return NotifsGetForGroup(wnds, nWnds, kind);
+}
+
+static HWND CanvasOf(MainWindow* win) {
+    return win ? win->hwndCanvas : nullptr;
+}
+
+bool RemoveNotificationsForGroup(MainWindow* win, Kind kind) {
+    return RemoveNotificationsForGroup(CanvasOf(win), kind);
+}
+
+NotificationWnd* GetNotificationForGroup(MainWindow* win, Kind kind) {
+    return GetNotificationForGroup(CanvasOf(win), kind);
+}
+
+NotificationWnd* ShowTemporaryNotification(MainWindow* win, Str msg, int timeoutMs) {
+    return ShowTemporaryNotification(CanvasOf(win), msg, timeoutMs);
+}
+
+NotificationWnd* ShowWarningNotification(MainWindow* win, Str msg, int timeoutMs) {
+    return ShowWarningNotification(CanvasOf(win), msg, timeoutMs);
+}
+
+NotificationWnd* ShowPlainNotification(MainWindow* win, Str msg, int timeoutMs) {
+    return ShowPlainNotification(CanvasOf(win), msg, timeoutMs);
+}
+
+NotificationWnd* ShowPlainWarningNotification(MainWindow* win, Str msg, int timeoutMs) {
+    return ShowPlainWarningNotification(CanvasOf(win), msg, timeoutMs);
 }
 
 void MaybeDelayedWarningNotification(Str msg) {

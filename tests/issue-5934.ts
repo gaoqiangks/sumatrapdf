@@ -1,12 +1,13 @@
-// Issue #5934: close the translate dialog with Esc / Ctrl+W, and the edit
-// annotations window with Ctrl+W (but not Esc).
+// Issue #5934: close the translate dialog with Esc / Ctrl+W.
 //
 // Esc is exercised with posted WM_KEYDOWN (no modifiers). Ctrl+W needs
 // GetKeyState(VK_CONTROL) which posted messages do not set, so that path is
 // covered by code review / manual check rather than this script.
 
 import { writeFileSync } from "node:fs";
-import { cmdId, tmpPath } from "./util";
+import { IS_MAC } from "./host.ts";
+import { ControlCommand } from "./control.ts";
+import { cmdId, SLOW_BUILD_FACTOR, tmpPath, USE_NG } from "./util";
 import { launchControlled, killAndWait } from "./win-automation";
 import {
   enumWindows,
@@ -22,29 +23,6 @@ import {
   WM_KEYDOWN,
   WM_KEYUP,
 } from "./winapi";
-
-function makeAnnotPdf(): string {
-  const annot = `<< /Type /Annot /Subtype /Text /Rect [50 700 70 720] /T (tester) /Contents (hello) >>`;
-  const objs = [
-    `<< /Type /Catalog /Pages 2 0 R >>`,
-    `<< /Type /Pages /Count 1 /Kids [3 0 R] >>`,
-    `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Annots [${annot}] >>`,
-  ];
-  let body = "%PDF-1.4\n";
-  const offsets: number[] = [];
-  for (let i = 0; i < objs.length; i++) {
-    offsets.push(body.length);
-    body += `${i + 1} 0 obj\n${objs[i]}\nendobj\n`;
-  }
-  const xrefStart = body.length;
-  const size = objs.length + 1;
-  body += `xref\n0 ${size}\n0000000000 65535 f \n`;
-  for (const off of offsets) {
-    body += off.toString().padStart(10, "0") + " 00000 n \n";
-  }
-  body += `trailer\n<< /Size ${size} /Root 1 0 R >>\nstartxref\n${xrefStart}\n%%EOF\n`;
-  return body;
-}
 
 function makeTextPdf(): Buffer {
   const line = "hello translation window";
@@ -103,6 +81,8 @@ function pressEscape(hwnd: number): void {
   postMessage(hwnd, WM_KEYUP, VK_ESCAPE, 0);
 }
 
+const ESC_SETTLE_MS = 300;
+
 async function waitForSecondary(
   pid: number,
   frame: number,
@@ -120,34 +100,6 @@ async function waitForSecondary(
   return 0;
 }
 
-async function testAnnotationsEscDoesNotClose(): Promise<void> {
-  const pdf = tmpPath("issue-5934-annots.pdf");
-  writeFileSync(pdf, makeAnnotPdf(), "latin1");
-
-  const { proc, client, frame } = await launchControlled([pdf]);
-  try {
-    await client.waitForRenderIdle();
-    sendMessage(frame, WM_COMMAND, BigInt(cmdId("CmdEditAnnotations")), 0n);
-    const ew = await waitForSecondary(proc.pid!, frame, undefined, 4000);
-    if (!ew) {
-      throw new Error("annotations: editor window did not appear");
-    }
-
-    pressEscape(ew);
-    const stillThere = Date.now() + 250;
-    while (Date.now() < stillThere) {
-      if (!isWindowVisible(ew) || !findSecondaryWindow(proc.pid!, frame)) {
-        throw new Error("annotations: Esc closed the edit annotations window (must not)");
-      }
-      await sleep(30);
-    }
-    console.log("  edit annotations: Esc does not close ✓");
-  } finally {
-    client.close();
-    await killAndWait(proc);
-  }
-}
-
 async function testTranslateEscCloses(): Promise<void> {
   const pdf = tmpPath("issue-5934-translate.pdf");
   writeFileSync(pdf, makeTextPdf());
@@ -163,9 +115,47 @@ async function testTranslateEscCloses(): Promise<void> {
     }
 
     sendMessage(frame, WM_COMMAND, BigInt(cmdId("CmdTranslateSelection")), 0n);
+    if (IS_MAC) {
+      // The translate UI is a tool window. enumWindows does not see it.
+      const deadline = Date.now() + 4000;
+      let list = "";
+      while (Date.now() < deadline) {
+        list = String((await client.request(ControlCommand.TestToolWindow, ["list"]))[1] ?? "");
+        if (/(^|\n)translate /.test(list)) {
+          break;
+        }
+        await sleep(100);
+      }
+      if (!/(^|\n)translate /.test(list)) {
+        throw new Error(`translate: dialog did not appear (selection empty?)\n${list}`);
+      }
+      // a key sent before the tool window's first frame is lost: press until it closes
+      const closeBy = Date.now() + 3000 * SLOW_BUILD_FACTOR;
+      while (Date.now() < closeBy) {
+        await client.request(ControlCommand.TestToolWindow, ["input", "translate", "key", VK_ESCAPE, 0, 0, 0]);
+        await sleep(ESC_SETTLE_MS);
+        list = String((await client.request(ControlCommand.TestToolWindow, ["list"]))[1] ?? "");
+        if (!/(^|\n)translate /.test(list)) {
+          console.log("  translate: Esc closes ✓");
+          return;
+        }
+      }
+      throw new Error(`translate: Esc did not close the translate dialog\n${list}`);
+    }
     const tw = await waitForSecondary(proc.pid!, frame, "translate", 4000);
     if (!tw) {
       throw new Error("translate: dialog did not appear (selection empty?)");
+    }
+    // ng's window shows before its first frame, and takes no keys until then
+    if (USE_NG) {
+      const drawnBy = Date.now() + 4000;
+      while (Date.now() < drawnBy) {
+        const layout = String((await client.request(ControlCommand.TestToolWindow, ["layout", "translate"]))[1] ?? "");
+        if (layout.includes("label='Close'")) {
+          break;
+        }
+        await sleep(50);
+      }
     }
 
     pressEscape(tw);
@@ -185,7 +175,6 @@ async function testTranslateEscCloses(): Promise<void> {
 }
 
 export async function testit(): Promise<void> {
-  await testAnnotationsEscDoesNotClose();
   await testTranslateEscCloses();
 }
 

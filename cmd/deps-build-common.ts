@@ -1,11 +1,10 @@
 /**
  * Shared helpers for building SumatraPDF dependency static libraries
- * (used by the macOS, Linux, and MinGW build implementations).
+ * (used by the macOS and Linux build implementations).
  */
 
 import { Glob } from "bun";
-import { mkdirSync, existsSync, statSync, rmSync } from "node:fs";
-import { readFile, writeFile } from "node:fs/promises";
+import { mkdirSync, existsSync, readFileSync, statSync, rmSync, writeFileSync } from "node:fs";
 import { join, extname, dirname } from "node:path";
 import { cpus } from "node:os";
 
@@ -13,8 +12,6 @@ export interface BuildTools {
   cc: string;
   cxx: string;
   ar: string;
-  /** PE objcopy (mingw) or Mach-O ld (mac) for font/binary embedding */
-  embed: string;
 }
 
 export interface FileGroup {
@@ -42,11 +39,31 @@ export interface BuildLibraryOptions {
   commonFlags?: string[];
   cxxFlags: string[];
   jobs: number;
-  /** extra object files to add to the archive (e.g. embedded fonts) */
-  extraObjs?: string[];
 }
 
 export const DEFAULT_JOBS = Math.max(1, Math.min(4, cpus().length));
+
+export function invalidateObjsIfBuildChanged(
+  outDir: string,
+  tools: BuildTools,
+  config: string,
+  commonFlags: string[],
+): void {
+  const stampPath = join(outDir, ".compiler");
+  const stamp = `${tools.cc}\n${tools.cxx}\n${config}\n${commonFlags.join("\n")}\n`;
+  let same = false;
+  if (existsSync(stampPath)) {
+    try {
+      same = readFileSync(stampPath, "utf8") === stamp;
+    } catch {}
+  }
+  if (!same && existsSync(join(outDir, "obj"))) {
+    console.log("Compiler, config, or common flags changed; rebuilding objects...");
+    rmSync(join(outDir, "obj"), { recursive: true, force: true });
+  }
+  mkdirSync(outDir, { recursive: true });
+  writeFileSync(stampPath, stamp);
+}
 
 const kX86OnlyCflagRe = /^-m(no-)?(sse|avx|mmx|f16c|fma|aes|pclmul|popcnt|bmi|lzcnt|movbe|xop)/;
 
@@ -63,36 +80,6 @@ export function dropX86OnlyCflags(lib: LibDef, arch: string): void {
   }
   lib.extraCflags = lib.extraCflags.filter((f) => !kX86OnlyCflagRe.test(f));
 }
-
-/** Font files embedded into the mupdf static lib (premake fonts()). */
-export const FONT_FILES = [
-  { path: "ext/mupdf/resources/fonts/urw/Dingbats.cff", ext: "cff" },
-  { path: "ext/mupdf/resources/fonts/urw/NimbusMonoPS-Regular.cff", ext: "cff" },
-  { path: "ext/mupdf/resources/fonts/urw/NimbusMonoPS-Italic.cff", ext: "cff" },
-  { path: "ext/mupdf/resources/fonts/urw/NimbusMonoPS-Bold.cff", ext: "cff" },
-  { path: "ext/mupdf/resources/fonts/urw/NimbusMonoPS-BoldItalic.cff", ext: "cff" },
-  { path: "ext/mupdf/resources/fonts/urw/NimbusRoman-Regular.cff", ext: "cff" },
-  { path: "ext/mupdf/resources/fonts/urw/NimbusRoman-Italic.cff", ext: "cff" },
-  { path: "ext/mupdf/resources/fonts/urw/NimbusRoman-Bold.cff", ext: "cff" },
-  { path: "ext/mupdf/resources/fonts/urw/NimbusRoman-BoldItalic.cff", ext: "cff" },
-  { path: "ext/mupdf/resources/fonts/urw/NimbusSans-Regular.cff", ext: "cff" },
-  { path: "ext/mupdf/resources/fonts/urw/NimbusSans-Italic.cff", ext: "cff" },
-  { path: "ext/mupdf/resources/fonts/urw/NimbusSans-Bold.cff", ext: "cff" },
-  { path: "ext/mupdf/resources/fonts/urw/NimbusSans-BoldItalic.cff", ext: "cff" },
-  { path: "ext/mupdf/resources/fonts/urw/StandardSymbolsPS.cff", ext: "cff" },
-  { path: "ext/mupdf/resources/fonts/droid/DroidSansFallbackFull.ttf", ext: "ttf" },
-  { path: "ext/mupdf/resources/fonts/sil/CharisSIL.cff", ext: "cff" },
-  { path: "ext/mupdf/resources/fonts/sil/CharisSIL-Bold.cff", ext: "cff" },
-  { path: "ext/mupdf/resources/fonts/sil/CharisSIL-Italic.cff", ext: "cff" },
-  { path: "ext/mupdf/resources/fonts/sil/CharisSIL-BoldItalic.cff", ext: "cff" },
-  { path: "ext/mupdf/resources/fonts/noto/NotoSans-Regular.otf", ext: "otf" },
-  { path: "ext/mupdf/resources/fonts/noto/NotoSansMath-Regular.otf", ext: "otf" },
-  { path: "ext/mupdf/resources/fonts/noto/NotoSansSymbols-Regular.otf", ext: "otf" },
-  { path: "ext/mupdf/resources/fonts/noto/NotoSansSymbols2-Regular.otf", ext: "otf" },
-  { path: "ext/mupdf/resources/fonts/noto/NotoEmoji-Regular.ttf", ext: "ttf" },
-  { path: "ext/mupdf/resources/fonts/noto/NotoMusic-Regular.otf", ext: "otf" },
-  { path: "ext/mupdf/resources/fonts/noto/NotoSerif-Regular.otf", ext: "otf" },
-];
 
 /** Resolve file patterns, returning only .c/.cpp/.cc source files */
 export async function resolveSources(groups: FileGroup[]): Promise<string[]> {
@@ -135,6 +122,102 @@ export async function spawnCmd(
   return { ok: code === 0, stderr, stdout };
 }
 
+function depPathForObj(obj: string): string {
+  return obj.replace(/\.o$/i, ".d");
+}
+
+function isUnderSrc(src: string): boolean {
+  const n = src.replaceAll("\\", "/");
+  return n.startsWith("src/") || n.includes("/src/");
+}
+
+// gcc/clang -MMD output: "foo.o: bar.cpp baz.h \\\n  qux.h"
+function parseDepFile(depPath: string): string[] {
+  let text: string;
+  try {
+    text = readFileSync(depPath, "utf8");
+  } catch {
+    return [];
+  }
+  const colon = text.indexOf(":");
+  if (colon < 0) {
+    return [];
+  }
+  return text
+    .slice(colon + 1)
+    .replace(/\\\r?\n/g, " ")
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean);
+}
+
+let cachedSrcHeaderMaxMtime: number | undefined;
+
+async function srcHeaderMaxMtime(): Promise<number> {
+  if (cachedSrcHeaderMaxMtime !== undefined) {
+    return cachedSrcHeaderMaxMtime;
+  }
+  let max = 0;
+  const glob = new Glob("src/**/*.{h,hh,hpp,inc}");
+  for await (const path of glob.scan({ dot: false })) {
+    try {
+      const t = statSync(path).mtimeMs;
+      if (t > max) {
+        max = t;
+      }
+    } catch {}
+  }
+  cachedSrcHeaderMaxMtime = max;
+  return max;
+}
+
+function newerThanObj(path: string, objMtime: number): boolean {
+  try {
+    return statSync(path).mtimeMs >= objMtime;
+  } catch {
+    return true;
+  }
+}
+
+async function objectNeedsCompile(src: string, obj: string): Promise<boolean> {
+  if (!existsSync(obj)) {
+    return true;
+  }
+  let objMtime: number;
+  try {
+    objMtime = statSync(obj).mtimeMs;
+  } catch {
+    return true;
+  }
+  if (newerThanObj(src, objMtime)) {
+    return true;
+  }
+  const depPath = depPathForObj(obj);
+  if (existsSync(depPath)) {
+    for (const dep of parseDepFile(depPath)) {
+      if (newerThanObj(dep, objMtime)) {
+        return true;
+      }
+    }
+    return false;
+  }
+  // No .d yet (object from before header tracking). For src/ treat any
+  // newer project header as a dep so a StrVec.h-sized layout change
+  // rebuilds Dict_ut.o instead of linking a mixed ABI. ext/ stays
+  // src-mtime-only until the next compile writes a .d.
+  if (isUnderSrc(src) && (await srcHeaderMaxMtime()) >= objMtime) {
+    return true;
+  }
+  return false;
+}
+
+function withDepArgs(args: string[], obj: string): string[] {
+  if (args.includes("-MMD") || args.includes("-MD")) {
+    return args;
+  }
+  return [...args, "-MMD", "-MP", "-MF", depPathForObj(obj)];
+}
+
 /** Compile a list of {src, obj, args} units in parallel */
 export async function compileAll(units: { src: string; obj: string; args: string[] }[], jobs: number): Promise<void> {
   let idx = 0;
@@ -149,26 +232,23 @@ export async function compileAll(units: { src: string; obj: string; args: string
       process.stdout.write(`  [${i + 1}/${total}] ${u.src}\n`);
       mkdirSync(dirname(u.obj), { recursive: true });
 
-      if (existsSync(u.obj)) {
-        try {
-          const srcMtime = statSync(u.src).mtimeMs;
-          const objMtime = statSync(u.obj).mtimeMs;
-          if (objMtime > srcMtime) {
-            continue;
-          }
-        } catch {}
+      if (!(await objectNeedsCompile(u.src, u.obj))) {
+        continue;
       }
 
       try {
         rmSync(u.obj);
       } catch {}
-      const res = await spawnCmd(u.args);
+      const res = await spawnCmd(withDepArgs(u.args, u.obj));
       if (!res.ok) {
         console.error(`FAILED: ${u.src}`);
         if (res.stderr) console.error(res.stderr.trimEnd().slice(0, 1000));
         failed++;
         try {
           rmSync(u.obj);
+        } catch {}
+        try {
+          rmSync(depPathForObj(u.obj));
         } catch {}
       }
       const done = i + 1;
@@ -189,6 +269,7 @@ export async function compileAll(units: { src: string; obj: string; args: string
 export async function createArchive(tools: BuildTools, archivePath: string, objFiles: string[]): Promise<void> {
   if (objFiles.length === 0) return;
   mkdirSync(dirname(archivePath), { recursive: true });
+  rmSync(archivePath, { force: true });
   const batch = 200;
   for (let i = 0; i < objFiles.length; i += batch) {
     const chunk = objFiles.slice(i, i + batch);
@@ -198,102 +279,13 @@ export async function createArchive(tools: BuildTools, archivePath: string, objF
   }
 }
 
-export type EmbedFormat = "pe" | "macho" | "elf";
-
-/** Embed a binary file as a linkable .o (font data for mupdf noto.c). */
-export async function embedBinaryFile(
-  tools: BuildTools,
-  format: EmbedFormat,
-  inputFile: string,
-  outputObj: string,
-  symbolPrefix: string,
-): Promise<void> {
-  mkdirSync(dirname(outputObj), { recursive: true });
-  const outAbsolute = join(process.cwd(), outputObj);
-  const cleanFileName = symbolPrefix.replace(/^_binary_/, "");
-  const tmpDir = join(dirname(outputObj), "_fonttmp");
-  mkdirSync(tmpDir, { recursive: true });
-  const tmpInput = join(tmpDir, cleanFileName);
-  const data = await readFile(inputFile);
-  await writeFile(tmpInput, data);
-
-  let res: { ok: boolean; stderr: string };
-  if (format === "pe") {
-    res = await spawnCmd(
-      [
-        tools.embed,
-        "-I",
-        "binary",
-        "-O",
-        "pe-x86-64",
-        "-B",
-        "i386:x86-64",
-        "--rename-section",
-        ".data=.rodata,CONTENTS,ALLOC,LOAD,READONLY,DATA",
-        "--redefine-sym",
-        `_binary_${cleanFileName}_start=${symbolPrefix}`,
-        cleanFileName,
-        outAbsolute,
-      ],
-      { cwd: tmpDir },
-    );
-  } else if (format === "elf") {
-    res = await spawnCmd(
-      [
-        tools.embed,
-        "-I",
-        "binary",
-        "-O",
-        "elf64-x86-64",
-        "-B",
-        "i386:x86-64",
-        "--rename-section",
-        ".data=.rodata,alloc,load,readonly,data",
-        "--redefine-sym",
-        `_binary_${cleanFileName}_start=${symbolPrefix}`,
-        cleanFileName,
-        outAbsolute,
-      ],
-      { cwd: tmpDir },
-    );
-  } else {
-    // Mach-O: Apple's ld lacks GNU objcopy/ld -b binary. Use xxd + clang.
-    const cSrc = join(dirname(outputObj), `${cleanFileName}.c`);
-    const xxd = Bun.which("xxd");
-    if (!xxd) {
-      throw new Error("xxd not found (needed to embed fonts on macOS / Linux arm64)");
-    }
-    const xxdRes = await spawnCmd([xxd, "-i", cleanFileName], { cwd: tmpDir, captureStdout: true });
-    if (!xxdRes.ok) {
-      throw new Error(`xxd failed for ${inputFile}: ${xxdRes.stderr}`);
-    }
-    // xxd -i names symbols from the filename: <name>[] and <name>_len
-    const cBody = xxdRes.stdout
-      .replace(new RegExp(`unsigned char ${cleanFileName}\\[\\]`), `const unsigned char ${symbolPrefix}[]`)
-      .replace(new RegExp(`unsigned int ${cleanFileName}_len`), `const unsigned int ${symbolPrefix}_size`);
-    await writeFile(cSrc, cBody);
-    res = await spawnCmd([tools.cc, "-Os", "-c", cSrc, "-o", outAbsolute]);
-    if (!res.ok) {
-      throw new Error(`Failed to compile embedded font ${inputFile}: ${res.stderr}`);
-    }
-    return;
-  }
-
-  if (!res.ok) {
-    throw new Error(`Failed to embed ${inputFile}: ${res.stderr}`);
-  }
-  try {
-    await Bun.write(tmpInput, "");
-  } catch {}
-}
-
 export async function buildLibrary(
   lib: LibDef,
   outDir: string,
   isRelease: boolean,
   opts: BuildLibraryOptions,
 ): Promise<{ archive: string; objs: string[] }> {
-  const { tools, commonDefines, cxxFlags, jobs, extraObjs } = opts;
+  const { tools, commonDefines, cxxFlags, jobs } = opts;
   const commonFlags = opts.commonFlags ?? [];
   console.log(`Building ${lib.name}...`);
 
@@ -371,7 +363,7 @@ export async function buildLibrary(
 
   await compileAll(units, jobs);
 
-  const objs = [...units.map((u) => u.obj), ...(extraObjs ?? [])];
+  const objs = units.map((u) => u.obj);
   const archivePath = join(outDir, "lib", `lib${lib.name}.a`);
   await createArchive(tools, archivePath, objs);
   console.log(`  -> ${archivePath}`);

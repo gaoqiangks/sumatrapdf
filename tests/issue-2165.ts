@@ -55,7 +55,7 @@ async function queryLayout(client: ControlClient): Promise<Layout> {
     const exitCode = res[0] as number;
     const raw = String(res[1] ?? "").trim();
     if (exitCode === 0) {
-      const m = /OK pref=(\d+) tocVis=\d+ favVis=(\d+) tocX=-?\d+ favX=(-?\d+) canvasX=(-?\d+)/.exec(raw);
+      const m = /OK pref=(\d+) topVis=\d+ bottomVis=(\d+) topX=-?\d+ bottomX=(-?\d+) canvasX=(-?\d+)/.exec(raw);
       if (!m) {
         throw new Error(`issue-2165: could not parse: ${raw}`);
       }
@@ -66,7 +66,9 @@ async function queryLayout(client: ControlClient): Promise<Layout> {
         canvasX: parseInt(m[4]!, 10),
         raw,
       };
-      if (layout.favVis === 1 && layout.favX >= 0 && layout.canvasX >= 0) {
+      // Fav and canvas can share a rect for a frame before RelayoutFrame
+      // separates them (SidebarOnRight); that used to fail the side check.
+      if (layout.favVis === 1 && layout.favX >= 0 && layout.canvasX >= 0 && layout.favX !== layout.canvasX) {
         return layout;
       }
     } else if (exitCode !== 2) {

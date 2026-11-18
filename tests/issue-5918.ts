@@ -1,4 +1,5 @@
 // #5918: opening a .html file parsed every sibling .html file to build the TOC
+// (HTML now opens as a single file, #6448; .md keeps folder mode, so this uses .md)
 // before showing the document, which hangs for minutes in a directory with
 // thousands of files. The TOC now starts as a flat list of the files and a
 // background thread replaces it with the real one (headings included).
@@ -10,11 +11,30 @@
 // in flight doesn't take the app down with it.
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { cmdId, runStandalone, tmpPath } from "./util";
-import { findChildWindow, getWindowText, postMessage, sendMessage, sleep, WM_CLOSE } from "./winapi";
-import { killAndWait, launchSumatra, sendCommand, waitForExit, waitForFrame, waitForTitle } from "./win-automation";
+import { ControlClient, ControlCommand } from "./control";
+import { IS_MAC } from "./host";
+import { cmdId, runStandalone, tmpPath, USE_NG } from "./util";
+import {
+  findChildWindow,
+  getWindowText,
+  postMessage,
+  sendMessage,
+  sleep,
+  treeExpandRecursively,
+  TVE_EXPAND,
+  TVM_GETCOUNT,
+  WM_CLOSE,
+} from "./winapi";
+import {
+  killAndWait,
+  launchControlled,
+  launchSumatra,
+  sendCommand,
+  waitForExit,
+  waitForFrame,
+  waitForTitle,
+} from "./win-automation";
 
-const TVM_GETCOUNT = 0x1100 + 5;
 const nFiles = 400;
 const headingsPerFile = 3;
 
@@ -23,22 +43,23 @@ function makeFolder(): string {
   rmSync(dir, { recursive: true, force: true });
   mkdirSync(dir, { recursive: true });
   for (let i = 0; i < nFiles; i++) {
-    const name = `page-${String(i).padStart(4, "0")}.html`;
+    const name = `page-${String(i).padStart(4, "0")}.md`;
     // 3 headings each, plus filler so parsing isn't free
-    const body = [
-      `<h1>Title ${i}</h1>`,
-      `<p>${"lorem ipsum dolor sit amet ".repeat(200)}</p>`,
-      `<h2>Section ${i}.1</h2>`,
-      `<p>${"lorem ipsum dolor sit amet ".repeat(200)}</p>`,
-      `<h2>Section ${i}.2</h2>`,
-      `<p>${"lorem ipsum dolor sit amet ".repeat(200)}</p>`,
-    ].join("\n");
-    writeFileSync(join(dir, name), `<html><head><title>Page ${i}</title></head><body>\n${body}\n</body></html>\n`);
+    const filler = "lorem ipsum dolor sit amet ".repeat(200);
+    const body = [`# Title ${i}`, filler, `## Section ${i}.1`, filler, `## Section ${i}.2`, filler].join("\n\n");
+    writeFileSync(join(dir, name), body + "\n");
   }
   return dir;
 }
 
-function tocItemCount(frame: number): number {
+// ng draws the outline in the frame, so the count comes from the control pipe.
+// It includes collapsed rows: the native tree only inserts those on expand.
+async function tocItemCount(frame: number, client: ControlClient | null): Promise<number> {
+  if (client) {
+    const raw = String((await client.request(ControlCommand.TestUiState, []))[1] ?? "");
+    const m = /tocItems=(-?\d+)/.exec(raw);
+    return m ? +m[1]! : -1;
+  }
   const tree = findChildWindow(frame, "SysTreeView32");
   if (!tree) {
     return -1;
@@ -46,11 +67,21 @@ function tocItemCount(frame: number): number {
   return Number(sendMessage(tree, TVM_GETCOUNT, 0, 0));
 }
 
-async function waitForTocCount(frame: number, want: number, timeoutMs = 30000): Promise<number> {
+async function waitForTocCount(
+  frame: number,
+  client: ControlClient | null,
+  want: number,
+  timeoutMs = 30000,
+): Promise<number> {
   const deadline = Date.now() + timeoutMs;
   let last = -1;
   while (Date.now() < deadline) {
-    last = tocItemCount(frame);
+    // Materialize lazy headings before counting the completed background TOC.
+    const tree = findChildWindow(frame, "SysTreeView32");
+    if (tree) {
+      treeExpandRecursively(tree, TVE_EXPAND);
+    }
+    last = await tocItemCount(frame, client);
     if (last === want) {
       return last;
     }
@@ -59,14 +90,45 @@ async function waitForTocCount(frame: number, want: number, timeoutMs = 30000): 
   return last;
 }
 
-function launch(dir: string, file: string): Bun.Subprocess {
-  return launchSumatra([join(dir, file)]);
+async function launch(
+  dir: string,
+  file: string,
+): Promise<{ proc: Bun.Subprocess; client: ControlClient | null; frame: number }> {
+  const path = join(dir, file);
+  if (USE_NG) {
+    const launched = await launchControlled([path]);
+    return { proc: launched.proc, client: launched.client, frame: launched.frame };
+  }
+  return { proc: launchSumatra([path]), client: null, frame: 0 };
 }
 
-async function waitForTocTree(frame: number, timeoutMs = 8000): Promise<number> {
+// The mac frame has no HWND. The current tab's path is the window title's file.
+async function currentFile(client: ControlClient): Promise<string> {
+  const res = await client.request(ControlCommand.TestCurrentTab, []);
+  const raw = String(res[1] ?? "");
+  if (res[0] !== 0) {
+    return "";
+  }
+  return /path=(.*) page=/.exec(raw)?.[1] ?? "";
+}
+
+async function waitForFile(client: ControlClient, name: string, timeoutMs: number): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  let last = "";
+  while (Date.now() < deadline) {
+    last = await currentFile(client);
+    if (last.endsWith(name)) {
+      return;
+    }
+    await sleep(40);
+  }
+  throw new Error(`issue-5918: current file did not become ${name} (last: '${last}')`);
+}
+
+async function waitForTocTree(frame: number, client: ControlClient | null, timeoutMs = 8000): Promise<number> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    const n = tocItemCount(frame);
+    const n = await tocItemCount(frame, client);
     if (n > 0) {
       return n;
     }
@@ -79,18 +141,22 @@ async function waitForTocTree(frame: number, timeoutMs = 8000): Promise<number> 
 // folder then navigates within the browser view instead of reloading (a reload
 // would drop the TOC back to the flat file list)
 async function testTocAndNextFile(dir: string): Promise<void> {
-  const proc = launch(dir, "page-0000.html");
+  const { proc, client, frame: launchedFrame } = await launch(dir, "page-0000.md");
   const wantFull = nFiles * (1 + headingsPerFile);
   try {
-    const frame = await waitForFrame(proc.pid!);
-    await waitForTitle(frame, (t) => t.startsWith("page-0000.html"), 60000);
+    const frame = launchedFrame || (await waitForFrame(proc.pid!));
+    if (IS_MAC && client) {
+      await waitForFile(client, "page-0000.md", 60000);
+    } else {
+      await waitForTitle(frame, (t) => t.startsWith("page-0000.md"), 60000);
+    }
     sendCommand(frame, cmdId("CmdToggleBookmarks"));
-    const first = await waitForTocTree(frame);
+    const first = await waitForTocTree(frame, client);
     if (first < nFiles) {
       throw new Error(`issue-5918: TOC has ${first} items, want at least ${nFiles} (one per file)`);
     }
 
-    const settled = await waitForTocCount(frame, wantFull);
+    const settled = await waitForTocCount(frame, client, wantFull);
     if (settled !== wantFull) {
       throw new Error(`issue-5918: TOC settled at ${settled} items, want ${wantFull} (files plus their headings)`);
     }
@@ -100,11 +166,15 @@ async function testTocAndNextFile(dir: string): Promise<void> {
     const deadline = Date.now() + 5000;
     let switched = false;
     while (Date.now() < deadline) {
-      const n = tocItemCount(frame);
+      const n = await tocItemCount(frame, client);
       if (n !== wantFull) {
         throw new Error(`issue-5918: TOC dropped to ${n} items after next-file, want it kept at ${wantFull}`);
       }
-      if (getWindowText(frame).startsWith("page-0001.html")) {
+      const opened =
+        IS_MAC && client
+          ? (await currentFile(client)).endsWith("page-0001.md")
+          : getWindowText(frame).startsWith("page-0001.md");
+      if (opened) {
         switched = true;
         break;
       }
@@ -117,6 +187,7 @@ async function testTocAndNextFile(dir: string): Promise<void> {
     postMessage(frame, WM_CLOSE, 0, 0);
     await waitForExit(proc, 5000);
   } finally {
+    client?.close();
     await killAndWait(proc);
   }
 }
@@ -124,15 +195,15 @@ async function testTocAndNextFile(dir: string): Promise<void> {
 // closing the document while the background build is still running must not
 // crash: the build has no model left to deliver its result to
 async function testCloseDuringBuild(dir: string): Promise<void> {
-  const proc = launch(dir, "page-0001.html");
+  const { proc, client, frame: launchedFrame } = await launch(dir, "page-0001.md");
   const wantFull = nFiles * (1 + headingsPerFile);
   try {
-    const frame = await waitForFrame(proc.pid!);
+    const frame = launchedFrame || (await waitForFrame(proc.pid!));
     sendCommand(frame, cmdId("CmdToggleBookmarks"));
     // close once the background build has started, before it finishes
     const deadline = Date.now() + 5000;
     while (Date.now() < deadline) {
-      const n = tocItemCount(frame);
+      const n = await tocItemCount(frame, client);
       if (n > 0 && n < wantFull) {
         break;
       }
@@ -152,6 +223,7 @@ async function testCloseDuringBuild(dir: string): Promise<void> {
       throw new Error("issue-5918: app did not exit after closing during the TOC build");
     }
   } finally {
+    client?.close();
     await killAndWait(proc);
   }
 }

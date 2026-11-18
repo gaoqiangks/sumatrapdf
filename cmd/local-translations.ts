@@ -1,10 +1,10 @@
-import { readFileSync, readdirSync } from "node:fs";
-import { join } from "node:path";
-import { commands } from "./gen-commands";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
+import { extractStringsToTranslate } from "./trans-dl";
 
 // Keep this fork's tab label in the packaged translations without changing the
 // downloaded cache or submitting translations to apptranslator.
-export function addLocalTranslations(downloaded: string): string {
+export function addLocalTranslations(downloaded: string, sourceStrings = extractStringsToTranslate()): string {
   const lines = downloaded.trimEnd()
     ? downloaded.trimEnd().split(/\r?\n/)
     : ["AppTranslator: SumatraPDF", "0".repeat(40)];
@@ -42,18 +42,24 @@ export function addLocalTranslations(downloaded: string): string {
   // asserts when an original is absent, but permits an untranslated original.
   // Match the source extraction used by trans-dl.ts, including command names.
   const originals = new Set(lines.filter((line) => line.startsWith(":")).map((line) => line.slice(1)));
-  const sourceStrings = commands.filter((_, index) => index % 2 === 1);
-  for (const entry of readdirSync("src", { withFileTypes: true })) {
-    if (!entry.isFile() || !entry.name.toLowerCase().endsWith(".cpp")) continue;
-    const source = readFileSync(join("src", entry.name), "utf-8");
-    for (const match of source.matchAll(/\b_TR[ANW]?\("(.*?)"\)/g)) {
-      sourceStrings.push(match[1]);
-    }
-  }
   for (const original of sourceStrings) {
     if (originals.has(original)) continue;
     lines.push(":" + original);
     originals.add(original);
   }
   return lines.join("\n") + "\n";
+}
+
+export function prepareLocalTranslations(
+  inputRoot = resolve(import.meta.dir, ".."),
+  output = join(inputRoot, ".work", "local-translations.txt"),
+): string {
+  const cachedPath = join(inputRoot, ".work", "translations.txt");
+  const bundledPath = join(inputRoot, "translations", "translations.txt");
+  const cached = existsSync(cachedPath) ? readFileSync(cachedPath, "utf8") : "";
+  const downloaded = cached.trim() ? cached : existsSync(bundledPath) ? readFileSync(bundledPath, "utf8") : "";
+  const text = addLocalTranslations(downloaded);
+  mkdirSync(dirname(output), { recursive: true });
+  if (!existsSync(output) || readFileSync(output, "utf8") !== text) writeFileSync(output, text);
+  return output;
 }

@@ -2,557 +2,438 @@
    License: GPLv3 */
 
 #include "base/Base.h"
-#include "base/Win.h"
 #include "gui/Dpi.h"
-#include "base/UITask.h"
 
 #include "gui/UIModels.h"
-#include "gui/Layout.h"
-#include "gui/win/WinGui.h"
 #include "gui/PlatformFont.h"
 #include "gui/Gfx.h"
 #include "gui/GuiColors.h"
+#include "gui/PlatformWindow.h"
+#include "base/Win.h"
+#include "gui/Layout.h"
+#include "gui/win/WinGui.h"
 #include "gui/VirtCtrl.h"
-
 #include "Settings.h"
-#include "GlobalPrefs.h"
+#include "AppSettings.h"
 #include "DocController.h"
 #include "MainWindow.h"
-#include "Theme.h"
-#include "AppSettings.h"
-#include "Commands.h"
 #include "Accelerators.h"
 #include "Translations.h"
+
+#include "Commands.h"
 #include "KeyboardHelp.h"
+#include "KeyboardHelpCommon.h"
 
-// A compact keyboard cheat sheet, in the spirit of Vimium's `?` overlay: the
-// most useful commands grouped into sections, each row showing the command's
-// current shortcut (as key-caps) and its name. Both the shortcuts and the names
-// come straight from the command table and the live accelerator list, so a user
-// override or a rebind shows through here without any extra bookkeeping. A
-// command with no binding is simply skipped, so the sheet self-adjusts.
-//
-// The sheet is a layout tree of VirtCtrls: an HBox of two columns, each
-// column a Table of (key-caps, description) rows with the section headers as
-// full-width spanning cells.
+// next to the parent window on whichever side has more room, or docked to the
+// right edge of the work area when the parent is fullscreen / maximized
+static Rect PositionHelpWindow(NativeWnd parent, bool fullscreen, Size size) {
+    Rect work = PlatformWindowWorkArea(parent);
+    if (work.IsEmpty()) {
+        work = {0, 0, std::max(size.dx, 1920), std::max(size.dy, 1080)};
+    }
+    // never taller or wider than the work area (issue #5999)
+    size.dx = std::min(size.dx, work.dx);
+    size.dy = std::min(size.dy, work.dy);
+    Rect frame = PlatformWindowRect(parent);
+    if (!parent || frame.IsEmpty()) {
+        return {work.x + ((work.dx - size.dx) / 2), work.y + ((work.dy - size.dy) / 2), size.dx, size.dy};
+    }
+    if (fullscreen || PlatformWindowIsMaximized(parent)) {
+        int x = std::max(work.x, work.Right() - size.dx);
+        int y = limitValue(work.y + ((work.dy - size.dy) / 2), work.y, std::max(work.y, work.Bottom() - size.dy));
+        return {x, y, size.dx, size.dy};
+    }
+    int rightSpace = work.Right() - frame.Right();
+    int leftSpace = frame.x - work.x;
+    int x = rightSpace >= leftSpace ? frame.Right() : frame.x - size.dx;
+    x = limitValue(x, work.x, std::max(work.x, work.Right() - size.dx));
+    int y = limitValue(frame.y, work.y, std::max(work.y, work.Bottom() - size.dy));
+    return {x, y, size.dx, size.dy};
+}
 
-// which commands go in which section; each list is 0-terminated. Kept in enum
-// order within a section only for readability - display order follows this.
-// clang-format off
-static const int kSecNav[] = {
-    CmdScrollUp, CmdScrollDown, CmdScrollLeft, CmdScrollRight,
-    CmdScrollUpPage, CmdScrollDownPage,
-    CmdGoToNextPage, CmdGoToPrevPage,
-    CmdGoToFirstPage, CmdGoToLastPage, CmdGoToPage,
-    CmdNavigateBack, CmdNavigateForward, 0,
-};
-static const int kSecView[] = {
-    CmdZoomIn, CmdZoomOut,
-    CmdZoomFitPage, CmdZoomFitWidth, CmdZoomActualSize, CmdToggleZoom,
-    CmdSinglePageView, CmdFacingView, CmdBookView, CmdToggleContinuousView,
-    CmdRotateLeft, CmdRotateRight,
-    CmdToggleFullscreen, CmdTogglePresentationMode, CmdInvertColors, 0,
-};
-static const int kSecDoc[] = {
-    CmdOpenFile, CmdSaveAs, CmdPrint, CmdReloadDocument, CmdClose, CmdNewWindow,
-    CmdOpenNextFileInFolder, CmdOpenPrevFileInFolder, CmdRenameFile, CmdProperties, 0,
-};
-static const int kSecFind[] = {
-    CmdFindFirst, CmdFindNext, CmdFindPrev,
-    CmdSelectAll, CmdCopySelection,
-    CmdSelectTextViaKeyboard, CmdToggleKeyboardLinkFollowing, 0,
-};
-static const int kSecTabs[] = {
-    CmdNextTabSmart, CmdNextTab, CmdPrevTab,
-    CmdMoveTabLeft, CmdMoveTabRight, CmdReopenLastClosedFile, 0,
-};
-static const int kSecAnnot[] = {
-    CmdCreateAnnotHighlight, CmdCreateAnnotUnderline,
-    CmdSaveAnnotations, CmdDeleteAnnotation, 0,
-};
-static const int kSecIface[] = {
-    CmdToggleBookmarks, CmdToggleToolbar, CmdToggleMenuBar,
-    CmdToggleCursorPosition, CmdTogglePageInfo, CmdCommandPalette,
-    CmdFavoriteAdd, CmdFavoriteToggle, CmdHelpOpenManual, CmdToggleKeyboardHelp, 0,
-};
-
-struct KbSectionDef {
-    const char* title;
-    const int* cmds;
-};
-
-static KbSectionDef gKbSectionDefs[] = {
-    {"Navigation", kSecNav},
-    {"View & Zoom", kSecView},
-    {"Document", kSecDoc},
-    {"Find & Select", kSecFind},
-    {"Tabs", kSecTabs},
-    {"Annotations", kSecAnnot},
-    {"Interface", kSecIface},
-};
-// clang-format on
-
-// a row while the sheet is being assembled; the strings live in the temp arena
-// until the controls copy them
-struct KbRowDef {
-    Str keys; // shortcut(s), e.g. "↑, K"
-    Str desc; // command name
-};
-
-struct KbSectionData {
-    Str title;
-    Vec<KbRowDef> rows;
-    int height = 0; // estimated, only used to balance the two columns
-    int col = 0;    // 0 (left) or 1 (right)
-};
-
-static Kind kindKbKeyCaps = "kbKeyCaps";
-
-// the shortcut(s) of one row, drawn as rounded key-caps
-struct KbKeyCaps : VirtCtrl {
-    StrVec toks; // one per cap, at most 4
-    PlatformFont* font = nullptr;
-    int capPadX = 0;
-    int capGap = 0;
-    int capDy = 0;
-    int radius = 0;
-
-    KbKeyCaps();
-    ~KbKeyCaps() override = default;
-
-    Size GetIdealSize() override;
-    void Paint(VirtPaintCtx&) override;
-};
-
+// The window's whole content is a layout tree: VirtText for the title, section
+// headers and descriptions, VirtRichText key-caps for the shortcuts, a
+// VirtCloseButton for the ✕ and a VirtLine under the title. There is no
+// painting or positioning code here: WindowBase paints the tree and the
+// containers (VBox / HBox / Table) place everything
 struct KeyboardHelpWnd : WindowBase {
-    MainWindow* win = nullptr;
-
-    PlatformFont* fontTitle = nullptr; // window title
-    PlatformFont* fontHdr = nullptr;   // section headers
-    PlatformFont* fontRow = nullptr;   // rows
-
-    // the sheet's layout tree; WindowBase::layout owns it
-    VBox* container = nullptr;
-    VirtText* title = nullptr;
+    HWND parentFrame = nullptr;
+    ScrollBox* scroll = nullptr;
     VirtCloseButton* closeBtn = nullptr;
-    VirtLine* separator = nullptr;
-    HBox* columns = nullptr;
-    VirtText* footer = nullptr;
 
-    // y of the columns; the band above is the drag handle
-    int contentTop = 0;
-
-    ~KeyboardHelpWnd() override;
-    bool Create(MainWindow* win);
-    void BuildContent();
-    void SyncColors();
-    void PaintContent(Gfx* gfx, const Rect& client);
-    void OnPaint(WindowBase::PaintEvent* ev);
-    void OnSetCursor(WindowBase::SetCursorEvent* ev);
-    void OnMouseEvent(WindowBase::MouseEvent* ev);
-    void OnKeyDown(KeyEvent* ev);
+    ~KeyboardHelpWnd() override = default;
+    bool Create(const KeyboardHelpArgs&);
+    void OnDpiChanged(WindowBase::DpiChangedEvent* ev);
+    void OnNcHitTest(WindowBase::NcHitTestEvent* ev);
 };
 
 static KeyboardHelpWnd* gKeyboardHelpWnd = nullptr;
-static HWND gHwndToActivateOnClose = nullptr;
 
-static void SafeDeleteKeyboardHelpWnd() {
-    if (!gKeyboardHelpWnd) {
-        return;
-    }
-    auto* tmp = gKeyboardHelpWnd;
-    gKeyboardHelpWnd = nullptr;
-    delete tmp;
-    if (gHwndToActivateOnClose) {
-        HWND fg = GetForegroundWindow();
-        if (!fg || fg == gHwndToActivateOnClose) {
-            SetActiveWindow(gHwndToActivateOnClose);
-        }
-        gHwndToActivateOnClose = nullptr;
-    }
-}
-
-// close on the UI task queue: the trigger can arrive from inside the window's
-// own message handling (WM_ACTIVATE / a key), where deleting it now would pull
-// the ground out from under the current call.
 static void ScheduleCloseKeyboardHelp() {
-    if (!gKeyboardHelpWnd) {
-        return;
-    }
-    auto fn = MkFunc0Void(SafeDeleteKeyboardHelpWnd);
-    uitask::Post(fn, "SafeDeleteKeyboardHelpWnd");
-}
-
-// id -> its (translated) menu description; empty if not found
-static TempStr CmdDescTemp(int cmdId) {
-    int off = 0;
-    int id = (int)CmdFirst + 1;
-    while (SeqStrAt(gCommandDescriptions, off).s) {
-        if (id == cmdId) {
-            Str s = SeqStrAt(gCommandDescriptions, off);
-            return str::DupTemp(trans::GetTranslation(s));
-        }
-        if (!SeqStrAdvance(gCommandDescriptions, off, &id)) {
-            break;
-        }
-    }
-    return {};
-}
-
-KeyboardHelpWnd::~KeyboardHelpWnd() {}
-
-// Park the window beside the main window on whichever side has more room, so it
-// covers the document as little as possible, always kept fully on-screen. In
-// fullscreen / presentation (the frame fills the monitor, so neither side has
-// room) it's pinned to the right edge instead. The user can still drag it.
-static Rect PositionHelpWindow(MainWindow* win, int winDx, int winDy) {
-    HWND frame = win->hwndFrame;
-    Rect fr = HwndWindowRect(frame);
-
-    if (win->isFullScreen || win->InPresentation()) {
-        // the frame is the whole screen; sit against its right edge, centered
-        // vertically
-        int x = std::max(fr.x, (fr.x + fr.dx) - winDx);
-        int y = std::max(fr.y, fr.y + ((fr.dy - winDy) / 2));
-        return Rect{x, y, winDx, winDy};
-    }
-
-    Rect work = GetWorkAreaRect(fr, frame);
-    if (IsZoomed(frame)) {
-        // maximized: the frame covers the whole work area, so there's no room
-        // beside it - pin to the right edge and center vertically
-        int x = std::max(work.x, (work.x + work.dx) - winDx);
-        int maxY = std::max(work.y, (work.y + work.dy) - winDy);
-        int y = limitValue(work.y + ((work.dy - winDy) / 2), work.y, maxY);
-        return Rect{x, y, winDx, winDy};
-    }
-
-    int spaceRight = (work.x + work.dx) - (fr.x + fr.dx);
-    int spaceLeft = fr.x - work.x;
-    // hug the frame edge on the roomier side; the columns read left-to-right,
-    // so on a tie prefer the right
-    int x = (spaceRight >= spaceLeft) ? (fr.x + fr.dx) : (fr.x - winDx);
-    int y = fr.y;
-    // keep it fully visible on the monitor (may overlap the frame if that side
-    // is narrower than the window, but it's never clipped off-screen)
-    x = limitValue(x, work.x, work.x + work.dx - winDx);
-    y = limitValue(y, work.y, work.y + work.dy - winDy);
-    return Rect{x, y, winDx, winDy};
-}
-
-//--- the controls
-
-KbKeyCaps::KbKeyCaps() {
-    kind = kindKbKeyCaps;
-    flags |= vwfNoHitTest;
-}
-
-Size KbKeyCaps::GetIdealSize() {
-    int n = toks.size;
-    if (n <= 0) {
-        return {0, capDy};
-    }
-    int dx = 0;
-    for (int i = 0; i < n; i++) {
-        Size sz = PlatformFontMeasureText(font, toks.At(i));
-        dx += sz.dx + (2 * capPadX);
-    }
-    dx += capGap * (n - 1);
-    return {dx, capDy};
-}
-
-void KbKeyCaps::Paint(VirtPaintCtx& ctx) {
-    int n = toks.size;
-    if (n <= 0) {
-        return;
-    }
-    Color bg = ThemeWindowControlBackgroundColor();
-    Color capBg = AccentColor(bg, 16);
-    Color capBorder = ThemeEdgeColor();
-    Color txt = ThemeWindowTextColor();
-
-    Rect r = ctx.bounds;
-    int x = r.x;
-    int y = r.y + ((r.dy - capDy) / 2);
-
-    for (int i = 0; i < n; i++) {
-        Str tok = toks.At(i);
-        int dx = PlatformFontMeasureText(font, tok).dx + (2 * capPadX);
-        Rect capRc{x, y, dx, capDy};
-        ctx.gfx->FillRoundedRect(capRc, radius, capBg, capBorder);
-        ctx.gfx->DrawText(tok, capRc, gfxTextCenter | gfxTextVCenter | gfxTextEllipsis, font, txt);
-        x += dx + capGap;
+    if (gKeyboardHelpWnd) {
+        gKeyboardHelpWnd->ScheduleDelete();
     }
 }
 
-//--- building the sheet
+static void OnHelpBeforeDelete(KeyboardHelpWnd* w) {
+    gKeyboardHelpWnd = nullptr;
+    PlatformWindowActivateIfForeground(w->parentFrame);
+}
 
-static void OnCloseClicked(VirtMouseEvent*) {
+static void OnHelpClose(WindowBase::CloseEvent*) {
     ScheduleCloseKeyboardHelp();
 }
 
-// collects the sections that have at least one bound shortcut and assigns each
-// to a column, splitting where the two columns end up closest in height
-static void CollectSections(Vec<KbSectionData>& out, int secTitleH, int rowH, int secGap) {
-    for (auto& def : gKbSectionDefs) {
-        KbSectionData s;
-        s.title = trans::GetTranslation(Str(def.title));
-        for (const int* c = def.cmds; *c; c++) {
-            TempStr keys = ShortcutsForCmdTemp(*c, 2);
-            if (keys.len == 0) {
+// the frame owns this window, so closing the frame destroys it behind our back
+static void OnHelpDestroy(WindowBase::DestroyEvent*) {
+    ScheduleCloseKeyboardHelp();
+}
+
+static void OnHelpCloseClicked(VirtMouseEvent*) {
+    ScheduleCloseKeyboardHelp();
+}
+
+// the window has no caption, so HTCAPTION on the client (except the close
+// button) is what lets the user drag it. A caption double-click would
+// otherwise maximize a popup that has no maximize box.
+void KeyboardHelpWnd::OnNcHitTest(WindowBase::NcHitTestEvent* ev) {
+    Point pt = HwndScreenToClient(hwnd, ev->screenPos);
+    Rect client = HwndClientRect(hwnd);
+    if (!client.Contains(pt)) {
+        return;
+    }
+    if (closeBtn && closeBtn->lastBounds.Contains(pt)) {
+        ev->result = HTCLIENT;
+        ev->didHandle = true;
+        return;
+    }
+    ev->result = HTCAPTION;
+    ev->didHandle = true;
+}
+
+// '?' toggles the help, so it also closes it while it has the focus
+static void OnHelpWndProc(WindowBase::WndProcEvent* ev) {
+    if (ev->msg == WM_NCLBUTTONDBLCLK) {
+        ev->result = 0;
+        ev->didHandle = true;
+        return;
+    }
+    if (ev->msg == WM_CHAR && ev->wparam == '?') {
+        ev->result = 0;
+        ev->didHandle = true;
+        ScheduleCloseKeyboardHelp();
+        return;
+    }
+    auto* help = (KeyboardHelpWnd*)ev->w;
+    ScrollBox* scroll = help ? help->scroll : nullptr;
+    if (!scroll) {
+        return;
+    }
+    if (ev->msg == WM_VSCROLL && ev->lparam == 0) {
+        scroll->OnVScroll(ev->wparam);
+        ev->result = 0;
+        ev->didHandle = true;
+        return;
+    }
+    if (ev->msg == WM_MOUSEWHEEL) {
+        VirtMouseEvent mev;
+        mev.wheelDelta = GET_WHEEL_DELTA_WPARAM(ev->wparam);
+        scroll->OnMouseWheel(&mev);
+        ev->result = 0;
+        ev->didHandle = true;
+    }
+}
+
+static void OnHelpKeyDown(KeyEvent* ev) {
+    ScrollBox* scroll = gKeyboardHelpWnd ? gKeyboardHelpWnd->scroll : nullptr;
+    if (!scroll) {
+        return;
+    }
+    switch (ev->vkey) {
+        case VK_UP:
+            scroll->ScrollBy(-scroll->lineDy);
+            ev->didHandle = true;
+            break;
+        case VK_DOWN:
+            scroll->ScrollBy(scroll->lineDy);
+            ev->didHandle = true;
+            break;
+        case VK_PRIOR:
+            scroll->ScrollPage(-1);
+            ev->didHandle = true;
+            break;
+        case VK_NEXT:
+            scroll->ScrollPage(1);
+            ev->didHandle = true;
+            break;
+        case VK_HOME:
+            scroll->ScrollTo(0);
+            ev->didHandle = true;
+            break;
+        case VK_END:
+            scroll->ScrollTo(scroll->MaxScrollY());
+            ev->didHandle = true;
+            break;
+    }
+}
+
+static void ApplyKeyboardHelpCloseDpi(VirtCloseButton* closeBtn, int dpi) {
+    if (!closeBtn || dpi <= 0) {
+        return;
+    }
+    int btnDx = DpiScaleByDpi(dpi, 16);
+    int btnPad = DpiScaleByDpi(dpi, 4);
+    closeBtn->padding = Insets{btnPad, btnPad, btnPad, btnPad};
+    closeBtn->idealSize = {btnDx + (2 * btnPad), btnDx + (2 * btnPad)};
+}
+
+static ILayout* BuildKeyboardHelpLayout(KeyboardHelpDataSource* ds, Str title, ScrollBox** scrollOut,
+                                        VirtCloseButton** closeOut) {
+    PlatformFont* fontRow = GetDefaultGuiFont();
+    PlatformFont* fontHeader = GetBoldPlatformFont(fontRow);
+    PlatformFont* fontTitle = GetScaledPlatformFont(fontHeader, 125);
+    if (!fontRow || !fontHeader || !fontTitle) {
+        return nullptr;
+    }
+
+    int columnGap = DpiScale(16);
+    int keysDescriptionGap = DpiScale(12);
+    int rowGap = DpiScale(8);
+    int sectionGap = DpiScale(14);
+
+    VBox* columns[2] = {new VBox(), new VBox()};
+    for (VBox* column : columns) {
+        column->gap = sectionGap;
+    }
+
+    for (const KbSectionDef& definition : kSections) {
+        StrVec keys;
+        StrVec descriptions;
+        for (const int* cmdId = definition.commands; *cmdId; cmdId++) {
+            TempStr k = ds->CommandShortcutTemp(*cmdId, 2);
+            TempStr d = ds->CommandDescriptionTemp(*cmdId);
+            // skip commands with no keyboard shortcut (e.g. un-bound by the user)
+            if (len(k) == 0 || len(d) == 0) {
                 continue;
             }
-            TempStr desc = CmdDescTemp(*c);
-            if (desc.len == 0) {
-                continue;
-            }
-            s.rows.Append({keys, desc});
+            keys.Append(k);
+            descriptions.Append(d);
         }
-        if (len(s.rows) == 0) {
+        int nRows = len(keys);
+        if (nRows == 0) {
             continue;
         }
-        s.height = secTitleH + (len(s.rows) * rowH);
-        out.Append(s);
-    }
+        auto* section = new VBox();
+        section->gap = rowGap;
+        section->AddChild(new VirtText(ds->Translate(Str(definition.title)), fontHeader));
 
-    // the left column gets a prefix of the sections, so they stay in reading
-    // order (Navigation top-left) while the columns end up about as tall
-    int n = len(out);
-    int total = 0;
-    for (auto& s : out) {
-        total += s.height + secGap;
-    }
-    int bestSplit = n;
-    int bestBalance = total;
-    int prefix = 0;
-    for (int k = 1; k < n; k++) {
-        prefix += out[k - 1].height + secGap;
-        int bal = std::max(prefix, total - prefix);
-        if (bal < bestBalance) {
-            bestBalance = bal;
-            bestSplit = k;
-        }
-    }
-    for (int i = 0; i < n; i++) {
-        out[i].col = (i < bestSplit) ? 0 : 1;
-    }
-}
-
-void KeyboardHelpWnd::BuildContent() {
-    fontRow = GetAppFont();
-    fontHdr = GetBoldPlatformFont(fontRow);
-    fontTitle = GetBoldPlatformFont(GetAppBiggerFont());
-
-    Size szRow = PlatformFontMeasureText(fontRow, "Ag");
-    Size szHdr = PlatformFontMeasureText(fontHdr, "Ag");
-
-    int rem = DpiScale(16); // 1rem == 16px at 96 DPI
-    int pad = DpiScale(20);
-    int rowGap = DpiScale(8);
-    int secTitleH = szHdr.dy + DpiScale(8);
-    int secGap = DpiScale(14);
-    int colGap = rem; // gap between the two columns
-    int capPadX = DpiScale(7);
-    int capGap = DpiScale(5);
-    int keysDescGap = DpiScale(12);
-
-    Vec<KbSectionData> sections;
-    CollectSections(sections, secTitleH, szRow.dy + rowGap, secGap);
-
-    container = new VBox();
-    container->alignCross = CrossAxisAlign::Stretch;
-
-    title = new VirtText(trans::GetTranslation("Keyboard Shortcuts"), fontTitle);
-    closeBtn = new VirtCloseButton();
-    closeBtn->onClick = MkFunc1Void(OnCloseClicked);
-    int btnDx = DpiScale(16);
-    int closeGrow = DpiScale(4);
-    closeBtn->padding = Insets{closeGrow, closeGrow, closeGrow, closeGrow};
-    closeBtn->idealSize = {btnDx + (2 * closeGrow), btnDx + (2 * closeGrow)};
-
-    auto* titleRow = new HBox();
-    titleRow->alignCross = CrossAxisAlign::CrossCenter;
-    titleRow->gap = fontTitle->averageCharWidth;
-    titleRow->AddChild(title, 1);
-    titleRow->AddChild(closeBtn);
-    container->AddChild(titleRow);
-
-    separator = new VirtLine();
-    separator->thickness = DpiScale(1);
-    container->AddChild(new Spacer(0, DpiScale(6)));
-    container->AddChild(separator);
-
-    columns = new HBox();
-    columns->alignCross = CrossAxisAlign::CrossStart;
-    Table* tables[2] = {new Table(), new Table()};
-    for (Table* t : tables) {
-        t->colGap = keysDescGap;
-        t->rowGap = rowGap;
-    }
-    columns->AddChild(tables[0]);
-    columns->AddChild(new Spacer(colGap, 0));
-    columns->AddChild(tables[1]);
-    container->AddChild(new Spacer(0, DpiScale(10)));
-    container->AddChild(columns);
-
-    footer = new VirtText(trans::GetTranslation("Press ? to close"), fontRow);
-    container->AddChild(new Spacer(0, DpiScale(12)));
-    container->AddChild(footer);
-
-    // one table per column: a section header spans both table columns, each row
-    // is (key-caps, description)
-    int nRows[2] = {0, 0};
-    for (auto& s : sections) {
-        nRows[s.col] += 1 + len(s.rows);
-    }
-    tables[0]->SetSize(nRows[0], 2);
-    tables[1]->SetSize(nRows[1], 2);
-
-    int capDy = szRow.dy + DpiScale(5);
-    int radius = DpiScale(5);
-    int rowAt[2] = {0, 0};
-    for (auto& s : sections) {
-        Table* t = tables[s.col];
-        int& row = rowAt[s.col];
-
-        // the padding is the gap that separates the header from the section
-        // above: a column is a single table, and its rowGap is uniform
-        auto* hdr = new VirtText(s.title, fontHdr);
-        hdr->padding.top = (row == 0) ? 0 : secGap;
-        TableCell& hdrCell = t->SetCell(row, 0, hdr, 1, 2);
-        hdrCell.alignV = CrossAxisAlign::CrossEnd;
-        row++;
-
-        for (auto& r : s.rows) {
-            auto* caps = new KbKeyCaps();
+        auto* table = new Table();
+        table->SetSize(nRows, 2);
+        table->colGap = keysDescriptionGap;
+        table->rowGap = rowGap;
+        for (int i = 0; i < nRows; i++) {
+            auto* caps = new VirtRichText();
             caps->font = fontRow;
-            caps->capPadX = capPadX;
-            caps->capGap = capGap;
-            caps->capDy = capDy;
-            caps->radius = radius;
-            // at most 4 caps per row, like the sheet has always shown
-            Split(&caps->toks, r.keys, ", ", false, 4);
-            // the caps sit against the description, like a gutter
-            TableCell& capsCell = t->SetCell(row, 0, caps);
-            capsCell.alignH = CrossAxisAlign::CrossEnd;
-            capsCell.alignV = CrossAxisAlign::CrossCenter;
-
-            auto* desc = NewVirtText({.s = r.desc, .font = fontRow, .ellipsis = true});
-            TableCell& descCell = t->SetCell(row, 1, desc);
+            ParseTipInto(caps, fmt("(Kbd/%s)", keys.At(i)));
+            TableCell& keysCell = table->SetCell(i, 0, caps);
+            keysCell.alignH = CrossAxisAlign::CrossEnd;
+            keysCell.alignV = CrossAxisAlign::CrossCenter;
+            TableCell& descCell = table->SetCell(i, 1, new VirtText(descriptions.At(i), fontRow));
             descCell.alignV = CrossAxisAlign::CrossCenter;
-            row++;
+        }
+        section->AddChild(table);
+        columns[definition.column]->AddChild(section);
+    }
+
+    // Shortcuts from advanced settings that are not already a rebinding of a
+    // command listed above (named entries, commands with args, unlisted cmds)
+    if (gSettings && gSettings->shortcuts) {
+        StrVec keys;
+        StrVec descriptions;
+        for (Shortcut* sc : *gSettings->shortcuts) {
+            if (!sc || str::IsEmptyOrWhiteSpace(sc->key) || sc->cmdId <= 0) {
+                continue;
+            }
+            CustomCommand* cmd = FindCustomCommand(sc->cmdId);
+            int orig = cmd ? cmd->origId : sc->cmdId;
+            bool extra = cmd && cmd->firstArg;
+            if (!extra && len(sc->name) == 0 && IsHelpListedCmd(orig)) {
+                continue;
+            }
+            TempStr k = ShortcutsForCmdTemp(sc->cmdId, 2);
+            if (len(k) == 0) {
+                k = str::DupTemp(sc->key);
+            }
+            TempStr d;
+            if (len(sc->name) > 0) {
+                d = str::DupTemp(sc->name);
+            } else {
+                d = ds->CommandDescriptionTemp(orig);
+                if (len(d) == 0) {
+                    d = str::DupTemp(sc->cmd);
+                }
+            }
+            if (len(k) == 0 || len(d) == 0) {
+                continue;
+            }
+            keys.Append(k);
+            descriptions.Append(d);
+        }
+        int nRows = len(keys);
+        if (nRows > 0) {
+            auto* section = new VBox();
+            section->gap = rowGap;
+            section->AddChild(new VirtText(ds->Translate(StrL("Custom")), fontHeader));
+            auto* table = new Table();
+            table->SetSize(nRows, 2);
+            table->colGap = keysDescriptionGap;
+            table->rowGap = rowGap;
+            for (int i = 0; i < nRows; i++) {
+                auto* caps = new VirtRichText();
+                caps->font = fontRow;
+                ParseTipInto(caps, fmt("(Kbd/%s)", keys.At(i)));
+                TableCell& keysCell = table->SetCell(i, 0, caps);
+                keysCell.alignH = CrossAxisAlign::CrossEnd;
+                keysCell.alignV = CrossAxisAlign::CrossCenter;
+                TableCell& descCell = table->SetCell(i, 1, new VirtText(descriptions.At(i), fontRow));
+                descCell.alignV = CrossAxisAlign::CrossCenter;
+            }
+            section->AddChild(table);
+            columns[0]->AddChild(section);
         }
     }
 
-    layout = new Padding(container, Insets{pad, pad, pad / 2, pad});
+    auto* header = new HBox();
+    header->alignCross = CrossAxisAlign::CrossCenter;
+    header->AddChild(new VirtText(title, fontTitle), 1);
+    auto* closeBtn = new VirtCloseButton();
+    ApplyKeyboardHelpCloseDpi(closeBtn, DpiGet());
+    closeBtn->onClick = MkFunc1Void<VirtMouseEvent*>(OnHelpCloseClicked);
+    header->AddChild(closeBtn);
+    if (closeOut) {
+        *closeOut = closeBtn;
+    }
 
-    LayoutAndSizeToContent(layout, 0, 0, hwnd);
-    DoLayout(HwndClientRect(hwnd).Size());
-    contentTop = columns->lastBounds.y;
+    auto* content = new HBox();
+    content->gap = columnGap;
+    content->AddChild(columns[0]);
+    content->AddChild(columns[1]);
+    auto* scroll = new ScrollBox(content);
+    scroll->lineDy = DpiScale(24);
+    if (scrollOut) {
+        *scrollOut = scroll;
+    }
 
-    Rect wr = HwndWindowRect(hwnd);
-    Rect r = PositionHelpWindow(win, wr.dx, wr.dy);
-    SetWindowPos(hwnd, nullptr, r.x, r.y, r.dx, r.dy, SWP_NOZORDER);
+    auto* separator = new VirtLine();
+    separator->thickness = DpiScale(1);
+
+    auto* root = new VBox();
+    root->alignCross = CrossAxisAlign::Stretch;
+    root->AddChild(header);
+    root->AddChild(new Spacer(0, DpiScale(6)));
+    root->AddChild(separator);
+    root->AddChild(new Spacer(0, DpiScale(10)));
+    // flex so the columns shrink to the window and ScrollBox scrolls them
+    root->AddChild(scroll, 1);
+
+    int pad = DpiScale(20);
+    return new Padding(root, Insets{pad, pad, pad, pad});
 }
 
-// the title, the separator and the key rows paint in the gui/ defaults, which
-// follow the theme. Only the footer differs: it is dimmed
-void KeyboardHelpWnd::SyncColors() {
-    Color dim = AccentColor(gColsText[kColText], 90);
-    footer->SetColor(kColText, dim);
-}
+bool KeyboardHelpWnd::Create(const KeyboardHelpArgs& helpArgs) {
+    parentFrame = (HWND)helpArgs.parent;
+    KeyboardHelpDataSource* ds = helpArgs.dataSource ? helpArgs.dataSource : GetDefaultKeyboardHelpDataSource();
+    // scale to the monitor the parent (and so the help) is on
+    DpiScope dpiScope(parentFrame);
+    Str title = ds->Translate(StrL("Keyboard Shortcuts"));
 
-void KeyboardHelpWnd::PaintContent(Gfx* gfx, const Rect& client) {
-    Color bg = ThemeWindowControlBackgroundColor();
+    layout = BuildKeyboardHelpLayout(ds, title, &scroll, &closeBtn);
+    if (!layout) {
+        return false;
+    }
+    Size size = layout->Layout(ExpandInf());
+    Rect work = PlatformWindowWorkArea(parentFrame);
+    DWORD style = WS_POPUP;
+    if (!work.IsEmpty() && size.dy > work.dy) {
+        size.dy = work.dy;
+        size.dx += DpiGetSystemMetrics(SM_CXVSCROLL);
+        style |= WS_VSCROLL;
+    }
 
-    SyncColors();
-    gfx->FillRect(client, bg);
-    if (vroot) {
-        vroot->Paint(gfx, client);
-    }
-}
-
-void KeyboardHelpWnd::OnPaint(WindowBase::PaintEvent* ev) {
-    Rect client = HwndClientRect(hwnd);
-    Gfx* gfx = GfxCreate(ev->hdc);
-    PaintContent(gfx, client);
-    delete gfx;
-}
-
-// title-band cursor. VirtTree for content is handled after this in WndProcDefault
-void KeyboardHelpWnd::OnSetCursor(WindowBase::SetCursorEvent* ev) {
-    Point pt = HwndGetCursorPos(hwnd);
-    // the ✕ lives in the title band; leave WM_SETCURSOR to VirtTree so it can
-    // show the hand cursor instead of the drag cursor
-    if (closeBtn && closeBtn->lastBounds.Contains(pt)) {
-        return;
-    }
-    if (pt.y < contentTop) {
-        SetCursorCached(IDC_SIZEALL);
-        ev->result = TRUE;
-        ev->didHandle = true;
-    }
-}
-
-// dragging the title band moves the window (it has no title bar of its own)
-void KeyboardHelpWnd::OnMouseEvent(WindowBase::MouseEvent* ev) {
-    if (ev->msg != WM_LBUTTONDOWN) {
-        return;
-    }
-    int y = (short)HIWORD(ev->lparam);
-    if (y < contentTop) {
-        ReleaseCapture();
-        SendMessageW(hwnd, WM_NCLBUTTONDOWN, HTCAPTION, 0);
-        ev->didHandle = true;
-    }
-}
-
-void KeyboardHelpWnd::OnKeyDown(KeyEvent* ev) {
-    // '?' (Shift + '/') toggles the sheet back off, matching how it opened. The
-    // sheet otherwise stays up until '?' or the close button - it doesn't close
-    // on focus loss, so it can sit alongside the document as a reference.
-    if (ev->vkey == VK_OEM_2 && ev->isShift) {
-        ScheduleCloseKeyboardHelp();
-        ev->didHandle = true;
-    }
-}
-
-bool KeyboardHelpWnd::Create(MainWindow* win) {
-    this->win = win;
-    onPaint = MkMethod1<KeyboardHelpWnd, WindowBase::PaintEvent*, &KeyboardHelpWnd::OnPaint>(this);
-    onSetCursor = MkMethod1<KeyboardHelpWnd, WindowBase::SetCursorEvent*, &KeyboardHelpWnd::OnSetCursor>(this);
-    onMouseEvent = MkMethod1<KeyboardHelpWnd, WindowBase::MouseEvent*, &KeyboardHelpWnd::OnMouseEvent>(this);
-    onKeyDown = MkMethod1<KeyboardHelpWnd, KeyEvent*, &KeyboardHelpWnd::OnKeyDown>(this);
-    {
-        CreateCustomArgs args;
-        args.visible = false;
-        args.style = WS_POPUPWINDOW;
-        args.title = "Keyboard Shortcuts";
-        CreateCustom(args);
-    }
+    CreateCustomArgs args;
+    args.title = title;
+    args.style = style;
+    args.exStyle = WS_EX_TOOLWINDOW;
+    args.visible = false;
+    onDpiChanged = MkMethod1<KeyboardHelpWnd, WindowBase::DpiChangedEvent*, &KeyboardHelpWnd::OnDpiChanged>(this);
+    CreateCustom(args);
     if (!hwnd) {
         return false;
     }
-    BuildContent();
+    // owned by the frame (not created as its child: CreateCustomHwnd would add
+    // WS_CHILD) so the help stays above it and is destroyed with it
+    if (parentFrame) {
+        SetWindowLongPtrW(hwnd, GWLP_HWNDPARENT, (LONG_PTR)parentFrame);
+    }
+    int dpi = DpiGetForHwnd(hwnd);
+    if (dpi <= 0) {
+        dpi = DpiGet();
+    }
+    ApplyKeyboardHelpCloseDpi(closeBtn, dpi);
+
+    Rect wr = PositionHelpWindow(parentFrame, helpArgs.parentFullscreen, size);
+    SetWindowPos(hwnd, nullptr, wr.x, wr.y, wr.dx, wr.dy, SWP_NOZORDER | SWP_NOACTIVATE);
+    DoLayout();
+    UpdateTheme();
     SetIsVisible(true);
     HwndSetFocus(hwnd);
     return true;
 }
 
-void ToggleKeyboardHelp(MainWindow* win) {
+void KeyboardHelpWnd::OnDpiChanged(WindowBase::DpiChangedEvent* ev) {
+    int dpi = (int)ev->dpiX;
+    ApplyKeyboardHelpCloseDpi(closeBtn, dpi);
+    DoLayout();
+    ev->didHandle = true;
+}
+
+void ToggleKeyboardHelp(const KeyboardHelpArgs& args) {
     if (gKeyboardHelpWnd) {
         ScheduleCloseKeyboardHelp();
         return;
     }
+    auto* w = new KeyboardHelpWnd();
+    w->closeOnEsc = true;
+    w->onBeforeDelete = MkFunc0(OnHelpBeforeDelete, w);
+    w->onClose = MkFunc1Void<WindowBase::CloseEvent*>(OnHelpClose);
+    w->onDestroy = MkFunc1Void<WindowBase::DestroyEvent*>(OnHelpDestroy);
+    w->onWndProc = MkFunc1Void<WindowBase::WndProcEvent*>(OnHelpWndProc);
+    w->onNcHitTest = MkMethod1<KeyboardHelpWnd, WindowBase::NcHitTestEvent*, &KeyboardHelpWnd::OnNcHitTest>(w);
+    w->onKeyDown = MkFunc1Void<KeyEvent*>(OnHelpKeyDown);
+    if (!w->Create(args)) {
+        delete w;
+        return;
+    }
+    gKeyboardHelpWnd = w;
+}
+
+void CloseKeyboardHelp() {
+    ScheduleCloseKeyboardHelp();
+}
+
+bool IsKeyboardHelpVisible() {
+    return gKeyboardHelpWnd != nullptr;
+}
+
+static SumatraKeyboardHelpDataSource gSumatraKeyboardHelpDataSource;
+
+void ToggleKeyboardHelp(MainWindow* win) {
     if (!win) {
         return;
     }
-    auto* wnd = new KeyboardHelpWnd();
-    bool ok = wnd->Create(win);
-    if (!ok) {
-        delete wnd;
-        return;
-    }
-    gKeyboardHelpWnd = wnd;
-    gHwndToActivateOnClose = win->hwndFrame;
+    KeyboardHelpArgs args;
+    args.parent = win->hwndFrame;
+    args.parentFullscreen = win->IsFullScreenOrPresentation();
+    args.dataSource = &gSumatraKeyboardHelpDataSource;
+    ToggleKeyboardHelp(args);
 }

@@ -3,6 +3,7 @@
 
 #include "base/Base.h"
 #include "gui/Dpi.h"
+
 #include "base/Win.h"
 
 #include "gui/Layout.h"
@@ -13,12 +14,12 @@ void dbglayout(Str s) {
     if (!gEnableDebugLayout) {
         return;
     }
-    OutputDebugStringA(s.s);
+    log(s);
 }
 
 static void LogAppendNum(str::Builder& s, int n, Str suffix) {
     if (n == Inf) {
-        s.Append("Inf");
+        s.Append(StrL("Inf"));
     } else {
         s.Append(fmt("%d", n));
     }
@@ -30,22 +31,23 @@ static void LogAppendNum(str::Builder& s, int n, Str suffix) {
 void LogConstraints(Constraints c, Str suffix) {
     // Debug-only; "dx: Inf - Inf dy: Inf - Inf <suffix>" is tiny.
     char sScratch[128]{};
-    str::Builder s(Str(sScratch, sizeofi(sScratch)));
+    str::Builder s;
+    s.UseExternalBuffer(Str(sScratch, sizeofi(sScratch)));
     if (c.min.dx == c.max.dx) {
-        dbglayout("dx: ");
-        LogAppendNum(s, c.min.dx, " ");
+        dbglayout(StrL("dx: "));
+        LogAppendNum(s, c.min.dx, StrL(" "));
     } else {
-        dbglayout("dx: ");
-        LogAppendNum(s, c.min.dx, " - ");
-        LogAppendNum(s, c.max.dx, " ");
+        dbglayout(StrL("dx: "));
+        LogAppendNum(s, c.min.dx, StrL(" - "));
+        LogAppendNum(s, c.max.dx, StrL(" "));
     }
     if (c.min.dy == c.max.dy) {
-        dbglayout("dy: ");
-        LogAppendNum(s, c.min.dy, " ");
+        dbglayout(StrL("dy: "));
+        LogAppendNum(s, c.min.dy, StrL(" "));
     } else {
-        dbglayout("dy: ");
-        LogAppendNum(s, c.min.dy, " - ");
-        LogAppendNum(s, c.max.dy, " ");
+        dbglayout(StrL("dy: "));
+        LogAppendNum(s, c.min.dy, StrL(" - "));
+        LogAppendNum(s, c.max.dy, StrL(" "));
     }
     s.Append(suffix);
     dbglayout(fmt("%s", ToStr(s)));
@@ -88,16 +90,6 @@ void MoveXY(Rect& r, int x, int y) {
     r.y += y;
 }
 
-int Clamp(int v, int vmin, int vmax) {
-    if (v > vmax) {
-        return vmax;
-    }
-    if (v < vmin) {
-        return vmin;
-    }
-    return v;
-}
-
 int Scale(int v, i64 num, i64 den) {
     if (den == 0) {
         return 0;
@@ -125,12 +117,6 @@ Constraints ExpandHeight(int width) {
     return Constraints{min, max};
 }
 
-Constraints ExpandWidth(int height) {
-    Size min{0, height};
-    Size max{Inf, height};
-    return Constraints{min, max};
-}
-
 Constraints Loose(const Size size) {
     return Constraints{Size{}, size};
 }
@@ -139,55 +125,10 @@ Constraints Tight(const Size size) {
     return Constraints{size, size};
 }
 
-Constraints TightHeight(int height) {
-    Size min{0, height};
-    Size max{Inf, height};
-    return Constraints{min, max};
-}
-
 Size Constraints::Constrain(Size size) const {
-    int w = Clamp(size.dx, min.dx, max.dx);
-    int h = Clamp(size.dy, min.dy, max.dy);
+    int w = ClampI(size.dx, min.dx, max.dx);
+    int h = ClampI(size.dy, min.dy, max.dy);
     return Size{w, h};
-}
-
-Size Constraints::ConstrainAndAttemptToPreserveAspectRatio(const Size size) const {
-    if (IsTight()) {
-        return min;
-    }
-
-    int width = size.dx;
-    int height = size.dy;
-
-    if (width > max.dx) {
-        width = max.dx;
-        height = Scale(width, size.dy, size.dx);
-    }
-    if (height > max.dy) {
-        height = max.dy;
-        width = Scale(height, size.dx, size.dy);
-    }
-
-    if (width < min.dx) {
-        width = min.dx;
-        height = Scale(width, size.dy, size.dx);
-    }
-
-    if (height < min.dy) {
-        height = min.dy;
-        width = Scale(height, size.dx, size.dy);
-    }
-
-    Size c{width, height};
-    return Constrain(c);
-}
-
-int Constraints::ConstrainHeight(int height) const {
-    return Clamp(height, min.dy, max.dy);
-}
-
-int Constraints::ConstrainWidth(int width) const {
-    return Clamp(width, min.dx, max.dx);
 }
 
 bool Constraints::HasBoundedHeight() const {
@@ -221,19 +162,6 @@ Constraints Constraints::Inset(int width, int height) const {
     return Constraints{min2, max2};
 }
 
-bool Constraints::IsBounded() const {
-    return HasBoundedWidth() && HasBoundedHeight();
-}
-
-bool Constraints::IsNormalized() const {
-    return min.dx >= 0.0 && min.dx <= max.dx && min.dy >= 0.0 && min.dy <= max.dy;
-}
-
-bool Constraints::IsSatisfiedBy(Size size) const {
-    return min.dx <= size.dx && size.dx <= max.dx && min.dy <= size.dy && size.dy <= max.dy && size.dx != Inf &&
-           size.dy != Inf;
-}
-
 bool Constraints::IsTight() const {
     return HasTightWidth() && HasTightHeight();
 }
@@ -254,18 +182,9 @@ Constraints Constraints::LoosenWidth() const {
     return Constraints{Size{0, min.dy}, max};
 }
 
-Constraints Constraints::Tighten(Size size) const {
-    Constraints bc = *this;
-    bc.min.dx = Clamp(size.dx, bc.min.dx, bc.max.dx);
-    bc.max.dx = bc.min.dx;
-    bc.min.dy = Clamp(size.dy, bc.min.dy, bc.max.dy);
-    bc.max.dy = bc.min.dy;
-    return bc;
-}
-
 Constraints Constraints::TightenHeight(int height) const {
     Constraints bc = *this;
-    bc.min.dy = Clamp(height, bc.min.dy, bc.max.dy);
+    bc.min.dy = ClampI(height, bc.min.dy, bc.max.dy);
     bc.max.dy = bc.min.dy;
     return bc;
 }
@@ -273,7 +192,7 @@ Constraints Constraints::TightenHeight(int height) const {
 Constraints Constraints::TightenWidth(int width) const {
     Constraints bc = *this;
 
-    bc.min.dx = Clamp(width, bc.min.dx, bc.max.dx);
+    bc.min.dx = ClampI(width, bc.min.dx, bc.max.dx);
     bc.max.dx = bc.min.dx;
     return bc;
 }
@@ -290,22 +209,9 @@ void ILayout::SetBounds(Rect bounds) {
     lastBounds = bounds;
 }
 
-bool IsLayoutOfKind(ILayout* l, Kind kind) {
-    if (l == nullptr) {
-        return false;
-    }
-    return l->GetKind() == kind;
-}
-
 // padding.go
 
 static Kind paddingKind = "padding";
-bool IsPadding(Kind kind) {
-    return kind == paddingKind;
-}
-bool IsPadding(ILayout* l) {
-    return IsLayoutOfKind(l, paddingKind);
-}
 
 int Padding::LayoutChildCount() {
     return child ? 1 : 0;
@@ -326,8 +232,8 @@ Padding::~Padding() {
 
 // ILayout
 Size Padding::Layout(const Constraints bc) {
-    dbglayout("Padding::Layout() ");
-    LogConstraints(bc, "\n");
+    dbglayout(StrL("Padding::Layout() "));
+    LogConstraints(bc, StrL("\n"));
 
     auto hinset = insets.left + insets.right;
     auto vinset = insets.top + insets.bottom;
@@ -360,6 +266,12 @@ void Padding::SetBounds(Rect bounds) {
     child->SetBounds(bounds);
 }
 
+static void DeleteChildLayouts(Vec<boxElementInfo>& children) {
+    for (auto& c : children) {
+        delete c.layout;
+    }
+}
+
 // vbox.go
 
 static Kind kindVBox = "vbox";
@@ -369,9 +281,7 @@ VBox::VBox() {
 }
 
 VBox::~VBox() {
-    for (auto& c : children) {
-        delete c.layout;
-    }
+    DeleteChildLayouts(children);
 }
 
 int VBox::LayoutChildCount() {
@@ -386,7 +296,20 @@ int VBox::ChildrenCount() const {
     return len(children);
 }
 
-int VBox::NonCollapsedChildrenCount() {
+static boxElementInfo& AddBoxChild(ILayout* self, Vec<boxElementInfo>& children, ILayout* child, int flex) {
+    if (LayoutTreeContains(child, self)) {
+        ReportIf(true);
+        return gRefusedBoxElement;
+    }
+    boxElementInfo v{};
+    v.layout = child;
+    v.flex = flex;
+    VecAppend(children, v);
+    auto n = len(children);
+    return children[n - 1];
+}
+
+static int CountNonCollapsed(const Vec<boxElementInfo>& children) {
     int n = 0;
     for (const auto& c : children) {
         if (!IsCollapsed(c.layout)) {
@@ -394,6 +317,10 @@ int VBox::NonCollapsedChildrenCount() {
         }
     }
     return n;
+}
+
+int VBox::NonCollapsedChildrenCount() {
+    return CountNonCollapsed(children);
 }
 
 static int updateFlex(Vec<boxElementInfo>& children, MainAxisAlign alignMain) {
@@ -452,7 +379,7 @@ Size VBox::Layout(const Constraints bc) {
     totalFlex = updateFlex(children, alignMain);
 
     dbglayout(fmt("VBox::Layout() %d children, %d totalFlex ", n, totalFlex));
-    LogConstraints(bc, "\n");
+    LogConstraints(bc, StrL("\n"));
 
     // Determine the constraints for layout of child elements.
     auto cbc = bc;
@@ -490,7 +417,7 @@ Size VBox::Layout(const Constraints bc) {
 
         // Perform layout of the element.  Track impact on width and height.
         auto size = v.layout->Layout(cbc);
-        v.size = size; // TODO: does that work?
+        v.size = size;
         height += size.dy;
         width = std::max(width, size.dx);
     }
@@ -587,7 +514,7 @@ int VBox::MinIntrinsicHeight(int width) {
             }
         }
     }
-    return size + gap * (count - 1);
+    return size + (gap * (count - 1));
 }
 
 void VBox::SetBounds(Rect bounds) {
@@ -702,16 +629,7 @@ void VBox::SetBoundsForChild(int i, ILayout* v, int posX, int posY, int posX2, i
 }
 
 boxElementInfo& VBox::AddChild(ILayout* child, int flex) {
-    if (LayoutTreeContains(child, this)) {
-        ReportIf(true);
-        return gRefusedBoxElement;
-    }
-    boxElementInfo v{};
-    v.layout = child;
-    v.flex = flex;
-    children.Append(v);
-    auto n = len(children);
-    return children[n - 1];
+    return AddBoxChild(this, children, child, flex);
 }
 
 boxElementInfo& VBox::AddChild(ILayout* child) {
@@ -734,9 +652,7 @@ ILayout* HBox::LayoutChildAt(int idx) {
 }
 
 HBox::~HBox() {
-    for (auto& c : children) {
-        delete c.layout;
-    }
+    DeleteChildLayouts(children);
 }
 
 int HBox::ChildrenCount() const {
@@ -744,13 +660,7 @@ int HBox::ChildrenCount() const {
 }
 
 int HBox::NonCollapsedChildrenCount() {
-    int n = 0;
-    for (const auto& c : children) {
-        if (!IsCollapsed(c.layout)) {
-            n++;
-        }
-    }
-    return n;
+    return CountNonCollapsed(children);
 }
 
 Size HBox::Layout(const Constraints bc) {
@@ -762,7 +672,7 @@ Size HBox::Layout(const Constraints bc) {
     }
     totalFlex = updateFlex(children, alignMain);
     dbglayout(fmt("HBox::Layout() %d children, %d totalFlex ", n, totalFlex));
-    LogConstraints(bc, "\n");
+    LogConstraints(bc, StrL("\n"));
 
     // Determine the constraints for layout of child elements.
     auto cbc = bc;
@@ -855,9 +765,9 @@ Size HBox::Layout(const Constraints bc) {
     }
 
     if (alignCross == CrossAxisAlign::Stretch) {
-        return bc.Constrain(Size{width, cbc.min.dy});
+        return bc.Constrain(Size{width, std::max(cbc.min.dy, minDy)});
     }
-    return bc.Constrain(Size{width, height});
+    return bc.Constrain(Size{width, std::max(height, minDy)});
 }
 
 int HBox::MinIntrinsicHeight(int width) {
@@ -872,7 +782,7 @@ int HBox::MinIntrinsicHeight(int width) {
     } else {
         width = Inf;
     }
-    int size = 0;
+    int size = minDy;
     for (auto& v : children) {
         if (!IsCollapsed(v.layout)) {
             size = std::max(size, v.layout->MinIntrinsicHeight(width));
@@ -903,7 +813,7 @@ int HBox::MinIntrinsicWidth(int height) {
             }
         }
     }
-    return size + gap * (count - 1);
+    return size + (gap * (count - 1));
 }
 
 // mirror a child's x against the original HBox so MainStart packs to the right
@@ -1033,16 +943,7 @@ void HBox::SetBoundsForChild(int i, ILayout* v, int posX, int posY, int posX2, i
 }
 
 boxElementInfo& HBox::AddChild(ILayout* child, int flex) {
-    if (LayoutTreeContains(child, this)) {
-        ReportIf(true);
-        return gRefusedBoxElement;
-    }
-    boxElementInfo v{};
-    v.layout = child;
-    v.flex = flex;
-    children.Append(v);
-    auto n = len(children);
-    return children[n - 1];
+    return AddBoxChild(this, children, child, flex);
 }
 
 boxElementInfo& HBox::AddChild(ILayout* child) {
@@ -1072,8 +973,8 @@ Align::~Align() {
 
 // ILayout
 Size Align::Layout(const Constraints bc) {
-    dbglayout("Align::Layout() ");
-    LogConstraints(bc, "\n");
+    dbglayout(StrL("Align::Layout() "));
+    LogConstraints(bc, StrL("\n"));
 
     Size size = Child->Layout(bc.Loosen());
     childSize = size;
@@ -1151,13 +1052,13 @@ void Table::SetSize(int nRows, int nCols) {
     RemoveAllCells();
     rows = nRows;
     cols = nCols;
-    cells.Clear();
+    VecClear(cells);
     TableCell empty;
     for (int i = 0; i < rows * cols; i++) {
-        cells.Append(empty);
+        VecAppend(cells, empty);
     }
-    colWidths.Clear();
-    rowHeights.Clear();
+    VecClear(colWidths);
+    VecClear(rowHeights);
 }
 
 void Table::MarkCovered(int row, int col, int rowSpan, int colSpan, bool covered) {
@@ -1258,9 +1159,17 @@ static int TracksSize(Vec<int>& tracks, int start, int span, int gap) {
     if (span < 1) {
         return 0;
     }
-    int size = gap * (span - 1);
+    int size = 0;
+    int n = 0;
     for (int i = start; i < start + span; i++) {
+        if (tracks[i] <= 0) {
+            continue;
+        }
+        if (n > 0) {
+            size += gap;
+        }
         size += tracks[i];
+        n++;
     }
     return size;
 }
@@ -1268,8 +1177,19 @@ static int TracksSize(Vec<int>& tracks, int start, int span, int gap) {
 // where track idx starts, relative to the first track
 static int TracksStart(Vec<int>& tracks, int idx, int gap) {
     int pos = 0;
+    int n = 0;
     for (int i = 0; i < idx; i++) {
-        pos += tracks[i] + gap;
+        if (tracks[i] <= 0) {
+            continue;
+        }
+        if (n > 0) {
+            pos += gap;
+        }
+        pos += tracks[i];
+        n++;
+    }
+    if (n > 0 && idx < len(tracks) && tracks[idx] > 0) {
+        pos += gap;
     }
     return pos;
 }
@@ -1278,10 +1198,10 @@ static int TracksStart(Vec<int>& tracks, int idx, int gap) {
 // that span several tracks are applied afterwards, so they only stretch the
 // tracks they span when what those already give them isn't enough
 void Table::Measure() {
-    colWidths.Clear();
-    colWidths.AppendBlanks(cols);
-    rowHeights.Clear();
-    rowHeights.AppendBlanks(rows);
+    VecClear(colWidths);
+    VecAppendBlanks(colWidths, cols);
+    VecClear(rowHeights);
+    VecAppendBlanks(rowHeights, rows);
 
     Constraints loose = ExpandInf();
     for (int row = 0; row < rows; row++) {
@@ -1379,6 +1299,10 @@ void Table::SetBounds(Rect r) {
         // SetBounds() without a preceding Layout()
         Measure();
     }
+    int extraDx = ContentRect().dx - TracksSize(colWidths, 0, cols, colGap);
+    if (extraDx > 0 && cols > 0) {
+        colWidths[cols - 1] += extraDx;
+    }
     for (int row = 0; row < rows; row++) {
         for (int col = 0; col < cols; col++) {
             TableCell& cell = cells[CellIdx(row, col)];
@@ -1391,21 +1315,6 @@ void Table::SetBounds(Rect r) {
     }
 }
 
-void LayoutAndSizeToContent(ILayout* layout, int minDx, int minDy, HWND hwnd) {
-    DpiSetFromHwnd(hwnd);
-    dbglayout(fmt("\nLayoutAndSizeToContent() %d,%d\n", minDx, minDy));
-
-    Constraints c = ExpandInf();
-    c.min = {minDx, minDy};
-    auto size = layout->Layout(c);
-    Point min{0, 0};
-    Point max{size.dx, size.dy};
-    Rect bounds{min, max};
-    layout->SetBounds(bounds);
-    ResizeHwndToClientArea(hwnd, size.dx, size.dy, false);
-    HwndScheduleRepaint(hwnd);
-}
-
 Size LayoutToSize(ILayout* layout, const Size size) {
     dbglayout(fmt("\nLayoutToSize() %d,%d\n", size.dx, size.dy));
     auto c = Tight(size);
@@ -1415,7 +1324,6 @@ Size LayoutToSize(ILayout* layout, const Size size) {
     return newSize;
 }
 
-// TODO: probably not needed
 Insets DefaultInsets() {
     const int padding = 8;
     return Insets{padding, padding, padding, padding};
@@ -1473,51 +1381,6 @@ void Spacer::SetBounds(Rect bounds) {
     lastBounds = bounds;
 }
 
-//--- HwndSlot
-
-static Kind kindHwndSlot = "hwnd-slot";
-
-HwndSlot::HwndSlot(HWND hwndIn, int dxIn, int dyIn) {
-    kind = kindHwndSlot;
-    hwnd = hwndIn;
-    dx = dxIn;
-    dy = dyIn;
-}
-
-HwndSlot::~HwndSlot() {
-    // does not own hwnd
-}
-
-Size HwndSlot::Layout(const Constraints bc) {
-    return bc.Constrain({dx, dy});
-}
-
-int HwndSlot::MinIntrinsicHeight(int /*width*/) {
-    return dy;
-}
-
-int HwndSlot::MinIntrinsicWidth(int /*height*/) {
-    return dx;
-}
-
-// Move the HWND into bounds (batched when winPos is set). A null or collapsed
-// slot still records lastBounds so callers can place a lazily-created window.
-void HwndSlot::SetBounds(Rect bounds) {
-    lastBounds = bounds;
-    if (!hwnd || IsCollapsed(this)) {
-        return;
-    }
-    if (mapRtlX) {
-        HWND parent = GetParent(hwnd);
-        bounds.x = HwndMapChildXForRtlParent(parent, bounds.x, bounds.dx);
-    }
-    if (winPos) {
-        winPos->MoveWindow(hwnd, bounds);
-        return;
-    }
-    HwndMoveWindow(hwnd, &bounds);
-}
-
 //--- Overlay
 
 static Kind kindOverlay = "overlay";
@@ -1555,7 +1418,7 @@ OverlayChild& Overlay::AddChild(ILayout* child, CrossAxisAlign alignH, CrossAxis
     v.child = child;
     v.alignH = alignH;
     v.alignV = alignV;
-    children.Append(v);
+    VecAppend(children, v);
     return children[len(children) - 1];
 }
 
@@ -1632,9 +1495,7 @@ Wrap::Wrap() {
 }
 
 Wrap::~Wrap() {
-    for (auto& c : children) {
-        delete c.layout;
-    }
+    DeleteChildLayouts(children);
 }
 
 int Wrap::LayoutChildCount() {
@@ -1657,7 +1518,7 @@ boxElementInfo& Wrap::AddChild(ILayout* child, int flex) {
     boxElementInfo v{};
     v.layout = child;
     v.flex = flex;
-    children.Append(v);
+    VecAppend(children, v);
     return children[len(children) - 1];
 }
 
@@ -1667,7 +1528,7 @@ boxElementInfo& Wrap::AddChild(ILayout* child) {
 
 // greedy wrap of already-measured children into rows that fit maxWidth
 void Wrap::PackRows(int maxWidth) {
-    rows.Reset();
+    VecReset(rows);
     int n = ChildrenCount();
     Row cur{};
     bool have = false;
@@ -1678,7 +1539,7 @@ void Wrap::PackRows(int maxWidth) {
         }
         int nextW = have ? (cur.width + colGap + v.size.dx) : v.size.dx;
         if (have && maxWidth < Inf && nextW > maxWidth) {
-            rows.Append(cur);
+            VecAppend(rows, cur);
             cur = {};
             have = false;
         }
@@ -1695,12 +1556,12 @@ void Wrap::PackRows(int maxWidth) {
         }
     }
     if (have) {
-        rows.Append(cur);
+        VecAppend(rows, cur);
     }
 }
 
 Size Wrap::Layout(const Constraints bc) {
-    rows.Reset();
+    VecReset(rows);
     int n = ChildrenCount();
     if (n == 0) {
         return bc.Constrain(Size{});
@@ -1853,379 +1714,110 @@ void Wrap::SetBounds(Rect bounds) {
     }
 }
 
-#if defined(DEBUG)
-// must be last: UtAssert.h over-writes assert()
-#include "base/UtAssert.h"
+void LayoutAndSizeToContent(ILayout* layout, int minDx, int minDy, HWND hwnd) {
+    DpiSetFromHwnd(hwnd);
+    dbglayout(fmt("\nLayoutAndSizeToContent() %d,%d\n", minDx, minDy));
 
-// Unit tests for the core layout engine. They use Spacer as a pure, HWND-free
-// leaf (fixed intrinsic size, and its SetBounds records lastBounds), so whole
-// layout trees can be exercised and their computed geometry asserted.
-
-static bool LayoutRectEq(const Rect& r, int x, int y, int dx, int dy) {
-    return r.x == x && r.y == y && r.dx == dx && r.dy == dy;
+    Constraints c = ExpandInf();
+    c.min = {minDx, minDy};
+    auto size = layout->Layout(c);
+    Point min{0, 0};
+    Point max{size.dx, size.dy};
+    Rect bounds{min, max};
+    layout->SetBounds(bounds);
+    HwndResizeClientSize(hwnd, size.dx, size.dy);
+    HwndScheduleRepaint(hwnd);
 }
 
-static void Layout_TestPrimitives() {
-    utassert(Clamp(5, 0, 10) == 5);
-    utassert(Clamp(-3, 0, 10) == 0);
-    utassert(Clamp(50, 0, 10) == 10);
+static Kind kindHwndSlot = "hwnd-slot";
 
-    utassert(Scale(10, 3, 2) == 15);
-    utassert(Scale(10, 1, 0) == 0);   // divide-by-zero is guarded
-    utassert(Scale(100, 1, 3) == 33); // truncates toward zero
-
-    utassert(GuardInf(Inf, 5) == Inf);
-    utassert(GuardInf(3, 5) == 5);
-
-    Constraints t = Tight(Size{100, 50});
-    utassert(t.IsTight() && t.HasBoundedWidth() && t.HasBoundedHeight());
-    Size ts = t.Constrain(Size{999, 1});
-    utassert(ts.dx == 100 && ts.dy == 50); // tight clamps both ways
-
-    Constraints l = Loose(Size{100, 50});
-    utassert(!l.IsTight());
-    Size ls = l.Constrain(Size{200, 10});
-    utassert(ls.dx == 100 && ls.dy == 10);
-
-    Constraints e = ExpandInf();
-    utassert(!e.HasBoundedWidth() && !e.HasBoundedHeight());
-
-    Constraints tw = Loose(Size{100, 50}).TightenWidth(40);
-    utassert(tw.min.dx == 40 && tw.max.dx == 40 && tw.max.dy == 50);
-
-    // Inset shrinks max, leaving Inf as Inf
-    Constraints ins = ExpandInf().Inset(20, 10);
-    utassert(!ins.HasBoundedWidth() && !ins.HasBoundedHeight());
-    Constraints ins2 = Loose(Size{100, 80}).Inset(20, 10);
-    utassert(ins2.max.dx == 80 && ins2.max.dy == 70);
+HwndSlot::HwndSlot(HWND hwndIn, int dxIn, int dyIn) {
+    kind = kindHwndSlot;
+    hwnd = hwndIn;
+    dx = dxIn;
+    dy = dyIn;
 }
 
-static void Layout_TestSpacer() {
-    Spacer s(30, 20);
-    Size sz = s.Layout(Loose(Size{100, 100}));
-    utassert(sz.dx == 30 && sz.dy == 20);
-    Size sz2 = s.Layout(Tight(Size{50, 60}));
-    utassert(sz2.dx == 50 && sz2.dy == 60); // tight constraints win
-    // regression: SetBounds must record lastBounds (used to be a no-op, which
-    // left the AI chat panel's webview slot sized 0x0)
-    s.SetBounds(Rect{5, 6, 40, 41});
-    utassert(LayoutRectEq(s.lastBounds, 5, 6, 40, 41));
+HwndSlot::~HwndSlot() {
+    // does not own hwnd
 }
 
-static void Layout_TestPadding() {
-    auto* sp = new Spacer(40, 20);
-    auto* pad = new Padding(sp, Insets{5, 10, 5, 10}); // top,right,bottom,left
-    Size sz = pad->Layout(Loose(Size{200, 200}));
-    utassert(sz.dx == 60 && sz.dy == 30); // child + horizontal/vertical insets
-    pad->SetBounds(Rect{0, 0, 60, 30});
-    utassert(LayoutRectEq(sp->lastBounds, 10, 5, 40, 20)); // inset by left/top
-    delete pad;
+Size HwndSlot::Layout(const Constraints bc) {
+    return bc.Constrain({dx, dy});
 }
 
-static void Layout_TestVBoxFixed() {
-    auto* s0 = new Spacer(50, 10);
-    auto* s1 = new Spacer(30, 20);
-    auto* vb = new VBox();
-    vb->AddChild(s0);
-    vb->AddChild(s1);
-    LayoutToSize(vb, Size{100, 100});
-    // CrossStart (default): natural width, x=0, stacked vertically
-    utassert(LayoutRectEq(s0->lastBounds, 0, 0, 50, 10));
-    utassert(LayoutRectEq(s1->lastBounds, 0, 10, 30, 20));
-    delete vb;
+int HwndSlot::MinIntrinsicHeight(int /*width*/) {
+    return dy;
 }
 
-static void Layout_TestVBoxAlign() {
-    // CrossStretch: children stretched to full width
-    {
-        auto* s0 = new Spacer(50, 10);
-        auto* s1 = new Spacer(30, 20);
-        auto* vb = new VBox();
-        vb->alignCross = CrossAxisAlign::Stretch;
-        vb->AddChild(s0);
-        vb->AddChild(s1);
-        LayoutToSize(vb, Size{100, 100});
-        utassert(LayoutRectEq(s0->lastBounds, 0, 0, 100, 10));
-        utassert(LayoutRectEq(s1->lastBounds, 0, 10, 100, 20));
-        delete vb;
+int HwndSlot::MinIntrinsicWidth(int /*height*/) {
+    return dx;
+}
+
+// Move the HWND into bounds (batched when winPos is set). A null or collapsed
+// slot still records lastBounds so callers can place a lazily-created window.
+void HwndSlot::SetBounds(Rect bounds) {
+    lastBounds = bounds;
+    if (!hwnd || IsCollapsed(this)) {
+        return;
     }
-    // MainCenter: total height 30 centered in 100 -> offset 35
-    {
-        auto* s0 = new Spacer(50, 10);
-        auto* s1 = new Spacer(30, 20);
-        auto* vb = new VBox();
-        vb->alignMain = MainAxisAlign::MainCenter;
-        vb->AddChild(s0);
-        vb->AddChild(s1);
-        LayoutToSize(vb, Size{100, 100});
-        utassert(s0->lastBounds.y == 35 && s1->lastBounds.y == 45);
-        delete vb;
+    if (mapRtlX) {
+        HWND parent = GetParent(hwnd);
+        bounds.x = HwndMapChildXForRtlParent(parent, bounds.x, bounds.dx);
     }
-    // MainEnd: bottom-aligned
-    {
-        auto* s0 = new Spacer(50, 10);
-        auto* s1 = new Spacer(30, 20);
-        auto* vb = new VBox();
-        vb->alignMain = MainAxisAlign::MainEnd;
-        vb->AddChild(s0);
-        vb->AddChild(s1);
-        LayoutToSize(vb, Size{100, 100});
-        utassert(s0->lastBounds.y == 70 && s1->lastBounds.y == 80);
-        delete vb;
+    // A no-op SetWindowPos still sends WM_WINDOWPOSCHANGED and the TOC tree
+    // shimmers 1-2px. Window resize must not touch the sidebar when its
+    // client rect did not change (width is independent of the frame).
+    if (ChildPosWithinParent(hwnd) == bounds) {
+        return;
+    }
+    if (winPos) {
+        winPos->MoveWindow(hwnd, bounds);
+        return;
+    }
+    HwndMoveWindow(hwnd, &bounds);
+}
+
+MinDxBox::MinDxBox(ILayout* c, int dxIn) {
+    child = c;
+    dx = dxIn;
+}
+
+MinDxBox::~MinDxBox() {
+    delete child;
+}
+
+int MinDxBox::LayoutChildCount() {
+    return child ? 1 : 0;
+}
+
+ILayout* MinDxBox::LayoutChildAt(int) {
+    return child;
+}
+
+int MinDxBox::MinIntrinsicWidth(int) {
+    return dx;
+}
+
+int MinDxBox::MinIntrinsicHeight(int width) {
+    return child ? child->MinIntrinsicHeight(width) : 0;
+}
+
+Size MinDxBox::Layout(const Constraints bc) {
+    int w = MinIntrinsicWidth(0);
+    if (bc.min.dx > w) {
+        w = bc.min.dx;
+    }
+    if (bc.HasBoundedWidth() && bc.max.dx < w) {
+        w = bc.max.dx;
+    }
+    Size s = child ? child->Layout(bc.TightenWidth(w)) : Size{};
+    return {w, s.dy};
+}
+
+void MinDxBox::SetBounds(Rect r) {
+    lastBounds = r;
+    if (child) {
+        child->SetBounds(r);
     }
 }
-
-static void Layout_TestVBoxFlex() {
-    // one flex slot fills the remaining height (the AI chat panel layout)
-    {
-        auto* top = new Spacer(0, 10);
-        auto* slot = new Spacer(0, 0);
-        auto* bottom = new Spacer(0, 10);
-        auto* vb = new VBox();
-        vb->alignCross = CrossAxisAlign::Stretch;
-        vb->AddChild(top);
-        vb->AddChild(slot, 1);
-        vb->AddChild(bottom);
-        LayoutToSize(vb, Size{200, 100});
-        utassert(LayoutRectEq(top->lastBounds, 0, 0, 200, 10));
-        utassert(LayoutRectEq(slot->lastBounds, 0, 10, 200, 80));
-        utassert(LayoutRectEq(bottom->lastBounds, 0, 90, 200, 10));
-        delete vb;
-    }
-    // two flex children with non-zero natural height split the extra evenly
-    {
-        auto* a = new Spacer(0, 10);
-        auto* b = new Spacer(0, 30);
-        auto* vb = new VBox();
-        vb->AddChild(a, 1);
-        vb->AddChild(b, 1);
-        LayoutToSize(vb, Size{50, 100});
-        // extra = 100-40 = 60, split 30/30 -> 40 and 60
-        utassert(a->lastBounds.y == 0 && a->lastBounds.dy == 40);
-        utassert(b->lastBounds.y == 40 && b->lastBounds.dy == 60);
-        delete vb;
-    }
-}
-
-static void Layout_TestHBoxFlex() {
-    // two flex children with non-zero natural width split the extra evenly.
-    // Regression: the old grow formula Scale(w+extra, flex, total) under-filled
-    // when flex children had non-zero natural widths.
-    auto* a = new Spacer(10, 0);
-    auto* b = new Spacer(30, 0);
-    auto* hb = new HBox();
-    hb->AddChild(a, 1);
-    hb->AddChild(b, 1);
-    LayoutToSize(hb, Size{100, 20});
-    // extra = 100-40 = 60, split 30/30 -> 40 and 60
-    utassert(a->lastBounds.x == 0 && a->lastBounds.dx == 40);
-    utassert(b->lastBounds.x == 40 && b->lastBounds.dx == 60);
-    delete hb;
-}
-
-static void Layout_TestHBoxCrossCenter() {
-    auto* a = new Spacer(20, 10);
-    auto* b = new Spacer(30, 40);
-    auto* hb = new HBox();
-    hb->alignCross = CrossAxisAlign::CrossCenter;
-    hb->AddChild(a);
-    hb->AddChild(b);
-    LayoutToSize(hb, Size{100, 50});
-    // a: height 10 vertically centered in 50 -> y=20; b: height 40 -> y=5
-    utassert(LayoutRectEq(a->lastBounds, 0, 20, 20, 10));
-    utassert(LayoutRectEq(b->lastBounds, 20, 5, 30, 40));
-    delete hb;
-}
-
-static void Layout_TestBoxGap() {
-    {
-        auto* a = new Spacer(20, 10);
-        auto* b = new Spacer(30, 20);
-        auto* hb = new HBox();
-        hb->gap = 7;
-        hb->AddChild(a);
-        hb->AddChild(b);
-        Size size = hb->Layout(Loose(Size{100, 100}));
-        utassert(size.dx == 57 && size.dy == 20);
-        hb->SetBounds(Rect{0, 0, size.dx, size.dy});
-        utassert(LayoutRectEq(a->lastBounds, 0, 0, 20, 10));
-        utassert(LayoutRectEq(b->lastBounds, 27, 0, 30, 20));
-        delete hb;
-    }
-    {
-        auto* a = new Spacer(20, 10);
-        auto* collapsed = new Spacer(40, 40);
-        auto* b = new Spacer(30, 20);
-        auto* vb = new VBox();
-        vb->gap = 7;
-        vb->AddChild(a);
-        vb->AddChild(collapsed);
-        vb->AddChild(b);
-        collapsed->SetVisibility(Visibility::Collapse);
-        Size size = vb->Layout(Loose(Size{100, 100}));
-        utassert(size.dx == 30 && size.dy == 37);
-        vb->SetBounds(Rect{0, 0, size.dx, size.dy});
-        utassert(LayoutRectEq(a->lastBounds, 0, 0, 20, 10));
-        utassert(LayoutRectEq(b->lastBounds, 0, 17, 30, 20));
-        delete vb;
-    }
-    {
-        auto* a = new Spacer(20, 10);
-        auto* b = new Spacer(30, 10);
-        auto* hb = new HBox();
-        hb->alignMain = MainAxisAlign::Homogeneous;
-        hb->gap = 10;
-        hb->AddChild(a);
-        hb->AddChild(b);
-        LayoutToSize(hb, Size{100, 10});
-        utassert(LayoutRectEq(a->lastBounds, 0, 0, 45, 10));
-        utassert(LayoutRectEq(b->lastBounds, 55, 0, 45, 10));
-        delete hb;
-    }
-}
-
-static void Layout_TestCollapsed() {
-    auto* s0 = new Spacer(50, 10);
-    auto* s1 = new Spacer(50, 20);
-    auto* s2 = new Spacer(50, 30);
-    auto* vb = new VBox();
-    vb->AddChild(s0);
-    vb->AddChild(s1);
-    vb->AddChild(s2);
-    s1->SetVisibility(Visibility::Collapse);
-    LayoutToSize(vb, Size{50, 40});
-    // collapsed s1 takes no space; s2 stacks right after s0
-    utassert(LayoutRectEq(s0->lastBounds, 0, 0, 50, 10));
-    utassert(s2->lastBounds.y == 10 && s2->lastBounds.dy == 30);
-    utassert(LayoutRectEq(s1->lastBounds, 0, 0, 0, 0)); // never positioned
-    delete vb;
-}
-
-static void Layout_TestAlign() {
-    auto* child = new Spacer(20, 10);
-    auto* al = new Align(child);
-    al->HAlign = AlignCenter;
-    al->VAlign = AlignCenter;
-    al->Layout(Loose(Size{100, 100}));
-    al->SetBounds(Rect{0, 0, 100, 100});
-    // 20x10 centered in 100x100 -> x=40, y=45
-    utassert(LayoutRectEq(child->lastBounds, 40, 45, 20, 10));
-    delete al;
-}
-
-static void Layout_TestHwndSlot() {
-    // no HWND: same as Spacer (records lastBounds, preferred size)
-    HwndSlot slot(nullptr, 30, 20);
-    Size sz = slot.Layout(Loose(Size{100, 100}));
-    utassert(sz.dx == 30 && sz.dy == 20);
-    slot.SetBounds(Rect{5, 6, 40, 41});
-    utassert(LayoutRectEq(slot.lastBounds, 5, 6, 40, 41));
-}
-
-static void Layout_TestOverlay() {
-    auto* body = new Spacer(80, 20);
-    auto* close = new Spacer(10, 10);
-    auto* ov = new Overlay();
-    ov->AddChild(body);
-    ov->AddChild(close, CrossAxisAlign::CrossEnd, CrossAxisAlign::CrossCenter);
-    LayoutToSize(ov, Size{80, 20});
-    // body fills the overlay; close sits at the right, vertically centered
-    utassert(LayoutRectEq(body->lastBounds, 0, 0, 80, 20));
-    utassert(LayoutRectEq(close->lastBounds, 70, 5, 10, 10));
-    delete ov;
-}
-
-static void Layout_TestWrap() {
-    // three 40-wide children in a 90-wide box wrap to two + one
-    {
-        auto* a = new Spacer(40, 10);
-        auto* b = new Spacer(40, 10);
-        auto* c = new Spacer(40, 10);
-        auto* w = new Wrap();
-        w->AddChild(a);
-        w->AddChild(b);
-        w->AddChild(c);
-        LayoutToSize(w, Size{90, 100});
-        utassert(LayoutRectEq(a->lastBounds, 0, 0, 40, 10));
-        utassert(LayoutRectEq(b->lastBounds, 40, 0, 40, 10));
-        utassert(LayoutRectEq(c->lastBounds, 0, 10, 40, 10));
-        delete w;
-    }
-    // flex extra on a row goes to the flex child
-    {
-        auto* a = new Spacer(40, 10);
-        auto* b = new Spacer(40, 10);
-        auto* w = new Wrap();
-        w->AddChild(a, 1);
-        w->AddChild(b);
-        LayoutToSize(w, Size{100, 20});
-        utassert(LayoutRectEq(a->lastBounds, 0, 0, 60, 10));
-        utassert(LayoutRectEq(b->lastBounds, 60, 0, 40, 10));
-        delete w;
-    }
-    // rtl: each row packs from the right
-    {
-        auto* a = new Spacer(40, 10);
-        auto* b = new Spacer(40, 10);
-        auto* c = new Spacer(40, 10);
-        auto* w = new Wrap();
-        w->rtl = true;
-        w->AddChild(a);
-        w->AddChild(b);
-        w->AddChild(c);
-        LayoutToSize(w, Size{90, 100});
-        utassert(LayoutRectEq(a->lastBounds, 50, 0, 40, 10));
-        utassert(LayoutRectEq(b->lastBounds, 10, 0, 40, 10));
-        utassert(LayoutRectEq(c->lastBounds, 50, 10, 40, 10));
-        delete w;
-    }
-}
-
-static void Layout_TestHBoxRtl() {
-    // MainStart packs to the right: first child at the right edge
-    {
-        auto* a = new Spacer(20, 10);
-        auto* b = new Spacer(30, 10);
-        auto* hb = new HBox();
-        hb->rtl = true;
-        hb->AddChild(a);
-        hb->AddChild(b);
-        LayoutToSize(hb, Size{100, 10});
-        utassert(LayoutRectEq(a->lastBounds, 80, 0, 20, 10));
-        utassert(LayoutRectEq(b->lastBounds, 50, 0, 30, 10));
-        delete hb;
-    }
-    // MainEnd packs toward the left (the RTL end)
-    {
-        auto* a = new Spacer(20, 10);
-        auto* b = new Spacer(30, 10);
-        auto* hb = new HBox();
-        hb->rtl = true;
-        hb->alignMain = MainAxisAlign::MainEnd;
-        hb->AddChild(a);
-        hb->AddChild(b);
-        LayoutToSize(hb, Size{100, 10});
-        utassert(LayoutRectEq(a->lastBounds, 30, 0, 20, 10));
-        utassert(LayoutRectEq(b->lastBounds, 0, 0, 30, 10));
-        delete hb;
-    }
-}
-
-void Layout_UnitTests() {
-    Layout_TestPrimitives();
-    Layout_TestSpacer();
-    Layout_TestPadding();
-    Layout_TestVBoxFixed();
-    Layout_TestVBoxAlign();
-    Layout_TestVBoxFlex();
-    Layout_TestHBoxFlex();
-    Layout_TestHBoxCrossCenter();
-    Layout_TestBoxGap();
-    Layout_TestCollapsed();
-    Layout_TestAlign();
-    Layout_TestHwndSlot();
-    Layout_TestOverlay();
-    Layout_TestWrap();
-    Layout_TestHBoxRtl();
-}
-#endif

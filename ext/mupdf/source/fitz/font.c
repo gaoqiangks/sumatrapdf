@@ -305,7 +305,7 @@ struct fz_font_context
 	/* Cached fallback fonts */
 	fz_font *base14[14];
 	fz_font *cjk[4];
-	struct { fz_font *serif, *sans; } fallback[256];
+	struct { fz_font *serif, *sans, *serif_bold, *sans_bold; } fallback[256];
 	fz_font *symbol1, *symbol2, *math, *music, *boxes;
 	fz_font *emoji;
 };
@@ -412,6 +412,8 @@ void fz_drop_font_context(fz_context *ctx)
 		{
 			fz_drop_font(ctx, ctx->font->fallback[i].serif);
 			fz_drop_font(ctx, ctx->font->fallback[i].sans);
+			fz_drop_font(ctx, ctx->font->fallback[i].serif_bold);
+			fz_drop_font(ctx, ctx->font->fallback[i].sans_bold);
 		}
 		fz_drop_font(ctx, ctx->font->symbol1);
 		fz_drop_font(ctx, ctx->font->symbol2);
@@ -498,6 +500,7 @@ fz_font *fz_load_system_fallback_font(fz_context *ctx, int script, int language,
 fz_font *fz_load_fallback_font(fz_context *ctx, int script, int language, int serif, int bold, int italic)
 {
 	fz_font **fontp;
+	fz_font **boldp = NULL;
 	const unsigned char *data;
 	int ordering = FZ_ADOBE_JAPAN;
 	int index;
@@ -507,7 +510,7 @@ fz_font *fz_load_fallback_font(fz_context *ctx, int script, int language, int se
 	if (script < 0 || script >= (int)nelem(ctx->font->fallback))
 		return NULL;
 
-	/* TODO: bold and italic */
+	/* TODO: italic */
 
 	index = script;
 	if (script == UCDN_SCRIPT_HAN)
@@ -531,9 +534,21 @@ fz_font *fz_load_fallback_font(fz_context *ctx, int script, int language, int se
 	else
 		fontp = &ctx->font->fallback[index].sans;
 
+	/* SumatraPDF: cache bold apart, or the first bold heading makes all later
+	   regular text in that script bold (#6420). Without a bold system font it
+	   shares the regular one. */
+	if (bold)
+	{
+		boldp = serif ? &ctx->font->fallback[index].serif_bold : &ctx->font->fallback[index].sans_bold;
+		if (!*boldp)
+			*boldp = fz_load_system_fallback_font(ctx, script, language, serif, bold, italic);
+		if (*boldp)
+			fontp = boldp;
+	}
+
 	if (!*fontp)
 	{
-		*fontp = fz_load_system_fallback_font(ctx, script, language, serif, bold, italic);
+		*fontp = fz_load_system_fallback_font(ctx, script, language, serif, 0, italic);
 		if (!*fontp)
 		{
 			data = fz_lookup_noto_font(ctx, script, language, &size, &subfont);
@@ -545,6 +560,8 @@ fz_font *fz_load_fallback_font(fz_context *ctx, int script, int language, int se
 			}
 		}
 	}
+	if (boldp && !*boldp)
+		*boldp = fz_keep_font(ctx, *fontp);
 
 	switch (script)
 	{
@@ -723,6 +740,9 @@ fz_new_font_from_buffer(fz_context *ctx, const char *name, fz_buffer *buffer, in
 	FT_UShort flags;
 	char namebuf[sizeof(font->name)];
 	fz_ascdesc_source ascdesc_src = FZ_ASCDESC_FROM_FONT;
+
+	if (index < 0)
+		fz_throw(ctx, FZ_ERROR_ARGUMENT, "Font index must be non-negative");
 
 	fz_keep_freetype(ctx);
 
@@ -2363,9 +2383,14 @@ fz_extract_ttf_from_ttc(fz_context *ctx, fz_font *font)
 			fz_write_uint32_be(ctx, out, fz_read_uint32(ctx, stream)); /* checksum */
 			bd[i].offset = fz_read_uint32(ctx, stream);
 			fz_write_uint32_be(ctx, out, start_pos);
+			bd[i].length = fz_read_uint32(ctx, stream);
 			if (tag == CHR('h','e','a','d'))
+			{
+				if (bd[i].length < 12)
+					fz_throw(ctx, FZ_ERROR_FORMAT, "head block of font is illegally short");
 				csumpos = start_pos + 8;
-			fz_write_uint32_be(ctx, out, bd[i].length = fz_read_uint32(ctx, stream));
+			}
+			fz_write_uint32_be(ctx, out, bd[i].length);
 			start_pos += (bd[i].length + 3) & ~3;
 		}
 

@@ -24,6 +24,7 @@
 
 #include "context-imp.h"
 #include "image-imp.h"
+#include "load-jxl.h"
 #include "pixmap-imp.h"
 
 #include <string.h>
@@ -791,6 +792,7 @@ fz_is_lossy_image(fz_context *ctx, fz_image *image)
 		case FZ_IMAGE_JPEG:
 		case FZ_IMAGE_JPX:
 		case FZ_IMAGE_JXR:
+		case FZ_IMAGE_JXL:
 			return 1;
 		}
 	}
@@ -830,6 +832,9 @@ compressed_image_get_pixmap(fz_context *ctx, fz_image *image_, fz_irect *subarea
 	case FZ_IMAGE_BMP:
 		tile = fz_load_bmp(ctx, image->buffer->buffer->data, image->buffer->buffer->len);
 		break;
+	case FZ_IMAGE_WEBP:
+		tile = fz_load_webp(ctx, image->buffer->buffer->data, image->buffer->buffer->len);
+		break;
 	case FZ_IMAGE_TIFF:
 		tile = fz_load_tiff(ctx, image->buffer->buffer->data, image->buffer->buffer->len);
 		break;
@@ -839,8 +844,12 @@ compressed_image_get_pixmap(fz_context *ctx, fz_image *image_, fz_irect *subarea
 	case FZ_IMAGE_JXR:
 		tile = fz_load_jxr(ctx, image->buffer->buffer->data, image->buffer->buffer->len);
 		break;
+	case FZ_IMAGE_JXL:
 	case FZ_IMAGE_JPX:
-		tile = fz_load_jpx(ctx, image->buffer->buffer->data, image->buffer->buffer->len, image->super.colorspace);
+		if (image->buffer->params.type == FZ_IMAGE_JXL)
+			tile = fz_load_jxl(ctx, image->buffer->buffer->data, image->buffer->buffer->len, image->super.colorspace);
+		else
+			tile = fz_load_jpx(ctx, image->buffer->buffer->data, image->buffer->buffer->len, image->super.colorspace);
 		if (image->super.use_colorkey)
 		{
 			size_t len;
@@ -1018,7 +1027,7 @@ fz_find_image_tile(fz_context *ctx, fz_image *image, fz_image_key *key, fz_matri
 fz_pixmap *
 fz_get_pixmap_from_image(fz_context *ctx, fz_image *image, const fz_irect *subarea, fz_matrix *ctm, int *dw, int *dh)
 {
-	fz_pixmap *tile;
+	fz_pixmap *tile = NULL;
 	int l2factor, l2factor_remaining;
 	fz_image_key key;
 	fz_image_key *keyp = NULL;
@@ -1026,6 +1035,7 @@ fz_get_pixmap_from_image(fz_context *ctx, fz_image *image, const fz_irect *subar
 	int h;
 
 	fz_var(keyp);
+	fz_var(tile);
 
 	if (!image)
 		return NULL;
@@ -1049,9 +1059,15 @@ fz_get_pixmap_from_image(fz_context *ctx, fz_image *image, const fz_irect *subar
 		if (subarea)
 			subarea_copy = *subarea;
 		l2factor_remaining = 0;
+		/* SumatraPDF: render at the device size, not the fixed 96 dpi layout size (#6330). */
+		if (ctm)
+		{
+			w = fz_maxi(w, 1);
+			h = fz_maxi(h, 1);
+		}
 		if (dw) *dw = w;
 		if (dh) *dh = h;
-		return image->get_pixmap(ctx, image, subarea ? &subarea_copy : NULL, image->w, image->h, &l2factor_remaining);
+		return image->get_pixmap(ctx, image, subarea ? &subarea_copy : NULL, w, h, &l2factor_remaining);
 	}
 
 	/* Clamp requested image size, since we never want to magnify images here. */
@@ -1431,6 +1447,8 @@ fz_image_type_name(int type)
 	case FZ_IMAGE_PNG: return "png";
 	case FZ_IMAGE_PNM: return "pnm";
 	case FZ_IMAGE_TIFF: return "tiff";
+	case FZ_IMAGE_WEBP: return "webp";
+	case FZ_IMAGE_JXL: return "jxl";
 	}
 }
 
@@ -1453,11 +1471,13 @@ fz_lookup_image_type(const char *type)
 	if (!strcmp(type, "png")) return FZ_IMAGE_PNG;
 	if (!strcmp(type, "pnm")) return FZ_IMAGE_PNM;
 	if (!strcmp(type, "tiff")) return FZ_IMAGE_TIFF;
+	if (!strcmp(type, "webp")) return FZ_IMAGE_WEBP;
+	if (!strcmp(type, "jxl")) return FZ_IMAGE_JXL;
 	return FZ_IMAGE_UNKNOWN;
 }
 
 int
-fz_recognize_image_format(fz_context *ctx, unsigned char p[8])
+fz_recognize_image_format(fz_context *ctx, unsigned char p[12])
 {
 	if (p[0] == 'P' && p[1] >= '1' && p[1] <= '7')
 		return FZ_IMAGE_PNM;
@@ -1490,6 +1510,12 @@ fz_recognize_image_format(fz_context *ctx, unsigned char p[8])
 		return FZ_IMAGE_JBIG2;
 	if (p[0] == '8' && p[1] == 'B' && p[2] == 'P' && p[3] == 'S')
 		return FZ_IMAGE_PSD;
+	if (p[0] == 'R' && p[1] == 'I' && p[2] == 'F' && p[3] == 'F' &&
+		p[8] == 'W' && p[9] == 'E' && p[10] == 'B' && p[11] == 'P')
+		return FZ_IMAGE_WEBP;
+	if ((p[0] == 0xff && p[1] == 0x0a) ||
+		!memcmp(p, "\0\0\0\x0cJXL \r\n\x87\n", 12))
+		return FZ_IMAGE_JXL;
 	return FZ_IMAGE_UNKNOWN;
 }
 
@@ -1509,7 +1535,14 @@ fz_new_image_from_buffer(fz_context *ctx, fz_buffer *buffer)
 	if (len < 8)
 		fz_throw(ctx, FZ_ERROR_FORMAT, "unknown image file format");
 
-	type = fz_recognize_image_format(ctx, buf);
+	if (len < 12)
+	{
+		unsigned char head[12] = {0};
+		memcpy(head, buf, len);
+		type = fz_recognize_image_format(ctx, head);
+	}
+	else
+		type = fz_recognize_image_format(ctx, buf);
 	bpc = 8;
 	switch (type)
 	{
@@ -1543,6 +1576,12 @@ fz_new_image_from_buffer(fz_context *ctx, fz_buffer *buffer)
 	case FZ_IMAGE_JBIG2:
 		fz_load_jbig2_info(ctx, buf, len, &w, &h, &xres, &yres, &cspace);
 		bpc = 1;
+		break;
+	case FZ_IMAGE_JXL:
+		fz_load_jxl_info(ctx, buf, len, &w, &h, &xres, &yres, &cspace);
+		break;
+	case FZ_IMAGE_WEBP:
+		fz_load_webp_info(ctx, buf, len, &w, &h, &xres, &yres, &cspace);
 		break;
 	default:
 		fz_throw(ctx, FZ_ERROR_FORMAT, "unknown image file format");
@@ -1836,4 +1875,105 @@ fz_image *fz_new_image_from_display_list(fz_context *ctx, float w, float h, fz_d
 	image->list = fz_keep_display_list(ctx, list);
 
 	return &image->super;
+}
+
+/* SumatraPDF: a display-list image (an SVG) that is one raster and nothing
+ * else. Save Image then keeps the raster's bytes and resolution (#6330). */
+typedef struct
+{
+	fz_device super;
+	fz_image *image;
+	fz_matrix ctm;
+	int images;
+	int other;
+} unwrap_device;
+
+static void
+unwrap_fill_image(fz_context *ctx, fz_device *dev_, fz_image *img, fz_matrix ctm, float alpha, fz_color_params color_params)
+{
+	unwrap_device *dev = (unwrap_device *)dev_;
+	if (dev->images++ > 0 || alpha != 1)
+	{
+		dev->other = 1;
+		return;
+	}
+	dev->image = fz_keep_image(ctx, img);
+	dev->ctm = ctm;
+}
+
+static void
+unwrap_other(unwrap_device *dev)
+{
+	dev->other = 1;
+}
+
+static void unwrap_fill_path(fz_context *ctx, fz_device *dev, const fz_path *path, int even_odd, fz_matrix ctm, fz_colorspace *cs, const float *color, float alpha, fz_color_params cp) { unwrap_other((unwrap_device *)dev); }
+static void unwrap_stroke_path(fz_context *ctx, fz_device *dev, const fz_path *path, const fz_stroke_state *ss, fz_matrix ctm, fz_colorspace *cs, const float *color, float alpha, fz_color_params cp) { unwrap_other((unwrap_device *)dev); }
+static void unwrap_clip_path(fz_context *ctx, fz_device *dev, const fz_path *path, int even_odd, fz_matrix ctm, fz_rect scissor) { unwrap_other((unwrap_device *)dev); }
+static void unwrap_clip_stroke_path(fz_context *ctx, fz_device *dev, const fz_path *path, const fz_stroke_state *ss, fz_matrix ctm, fz_rect scissor) { unwrap_other((unwrap_device *)dev); }
+static void unwrap_fill_text(fz_context *ctx, fz_device *dev, const fz_text *text, fz_matrix ctm, fz_colorspace *cs, const float *color, float alpha, fz_color_params cp) { unwrap_other((unwrap_device *)dev); }
+static void unwrap_stroke_text(fz_context *ctx, fz_device *dev, const fz_text *text, const fz_stroke_state *ss, fz_matrix ctm, fz_colorspace *cs, const float *color, float alpha, fz_color_params cp) { unwrap_other((unwrap_device *)dev); }
+static void unwrap_clip_text(fz_context *ctx, fz_device *dev, const fz_text *text, fz_matrix ctm, fz_rect scissor) { unwrap_other((unwrap_device *)dev); }
+static void unwrap_clip_stroke_text(fz_context *ctx, fz_device *dev, const fz_text *text, const fz_stroke_state *ss, fz_matrix ctm, fz_rect scissor) { unwrap_other((unwrap_device *)dev); }
+static void unwrap_fill_shade(fz_context *ctx, fz_device *dev, fz_shade *shd, fz_matrix ctm, float alpha, fz_color_params cp) { unwrap_other((unwrap_device *)dev); }
+static void unwrap_fill_image_mask(fz_context *ctx, fz_device *dev, fz_image *img, fz_matrix ctm, fz_colorspace *cs, const float *color, float alpha, fz_color_params cp) { unwrap_other((unwrap_device *)dev); }
+static void unwrap_clip_image_mask(fz_context *ctx, fz_device *dev, fz_image *img, fz_matrix ctm, fz_rect scissor) { unwrap_other((unwrap_device *)dev); }
+static void unwrap_begin_mask(fz_context *ctx, fz_device *dev, fz_rect area, int luminosity, fz_colorspace *cs, const float *bc, fz_color_params cp) { unwrap_other((unwrap_device *)dev); }
+static void unwrap_begin_group(fz_context *ctx, fz_device *dev, fz_rect area, fz_colorspace *cs, int isolated, int knockout, int blendmode, float alpha) { unwrap_other((unwrap_device *)dev); }
+static int unwrap_begin_tile(fz_context *ctx, fz_device *dev, fz_rect area, fz_rect view, float xstep, float ystep, fz_matrix ctm, int id, int doc_id) { unwrap_other((unwrap_device *)dev); return 0; }
+
+static void
+unwrap_drop_device(fz_context *ctx, fz_device *dev_)
+{
+	unwrap_device *dev = (unwrap_device *)dev_;
+	fz_drop_image(ctx, dev->image);
+}
+
+fz_image *
+fz_unwrap_display_list_image(fz_context *ctx, fz_image *image_, fz_matrix *ctm)
+{
+	fz_display_list_image *image = (fz_display_list_image *)image_;
+	unwrap_device *dev = NULL;
+	fz_image *found = NULL;
+
+	if (!image_ || image_->get_pixmap != display_list_image_get_pixmap)
+		return NULL;
+
+	fz_var(dev);
+	fz_try(ctx)
+	{
+		dev = fz_new_derived_device(ctx, unwrap_device);
+		dev->super.drop_device = unwrap_drop_device;
+		dev->super.fill_path = unwrap_fill_path;
+		dev->super.stroke_path = unwrap_stroke_path;
+		dev->super.clip_path = unwrap_clip_path;
+		dev->super.clip_stroke_path = unwrap_clip_stroke_path;
+		dev->super.fill_text = unwrap_fill_text;
+		dev->super.stroke_text = unwrap_stroke_text;
+		dev->super.clip_text = unwrap_clip_text;
+		dev->super.clip_stroke_text = unwrap_clip_stroke_text;
+		dev->super.fill_shade = unwrap_fill_shade;
+		dev->super.fill_image = unwrap_fill_image;
+		dev->super.fill_image_mask = unwrap_fill_image_mask;
+		dev->super.clip_image_mask = unwrap_clip_image_mask;
+		dev->super.begin_mask = unwrap_begin_mask;
+		dev->super.begin_group = unwrap_begin_group;
+		dev->super.begin_tile = unwrap_begin_tile;
+		fz_run_display_list(ctx, image->list, &dev->super, fz_identity, fz_infinite_rect, NULL);
+		fz_close_device(ctx, &dev->super);
+		if (dev->image && !dev->other)
+		{
+			/* raster unit square -> list coordinates -> this image's unit square */
+			*ctm = fz_concat(dev->ctm, image->transform);
+			found = fz_keep_image(ctx, dev->image);
+		}
+	}
+	fz_always(ctx)
+		fz_drop_device(ctx, &dev->super);
+	fz_catch(ctx)
+	{
+		fz_drop_image(ctx, found);
+		fz_rethrow(ctx);
+	}
+	return found;
 }

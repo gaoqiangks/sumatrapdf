@@ -4,6 +4,15 @@
 #include "base/Base.h"
 #include "base/Crypto.h"
 
+#if OS_LINUX && defined(SUMATRA_HAVE_OPENSSL)
+#include <openssl/err.h>
+#include <openssl/pkcs7.h>
+#elif OS_DARWIN
+#include "base/MacTypesHide.h"
+#include <Security/CMSDecoder.h>
+#include "base/MacTypesShow.h"
+#endif
+
 #if OS_DARWIN
 #include <CommonCrypto/CommonDigest.h>
 
@@ -53,7 +62,7 @@ static void Md5Transform(u32 state[4], const u8 block[64]) {
     u32 a = state[0], b = state[1], c = state[2], d = state[3];
     u32 x[16];
     for (int i = 0; i < 16; i++) {
-        x[i] = LoadLE32(block + i * 4);
+        x[i] = LoadLE32(block + (i * 4));
     }
 #define MD5_F(x, y, z) ((x & y) | (~x & z))
 #define MD5_G(x, y, z) ((x & z) | (y & ~z))
@@ -159,14 +168,14 @@ static void HashMd5(const u8* data, size_t len, u8 digest[16]) {
     StoreLE32(block + 60, (u32)(bits >> 32));
     Md5Transform(state, block);
     for (int k = 0; k < 4; k++) {
-        StoreLE32(digest + k * 4, state[k]);
+        StoreLE32(digest + (k * 4), state[k]);
     }
 }
 
 static void Sha1Transform(u32 state[5], const u8 block[64]) {
     u32 w[80];
     for (int i = 0; i < 16; i++) {
-        w[i] = LoadBE32(block + i * 4);
+        w[i] = LoadBE32(block + (i * 4));
     }
     for (int i = 16; i < 80; i++) {
         w[i] = Rol32(w[i - 3] ^ w[i - 8] ^ w[i - 14] ^ w[i - 16], 1);
@@ -223,7 +232,7 @@ static void HashSha1(const u8* data, size_t len, u8 digest[20]) {
     StoreBE32(block + 60, (u32)bits);
     Sha1Transform(state, block);
     for (int k = 0; k < 5; k++) {
-        StoreBE32(digest + k * 4, state[k]);
+        StoreBE32(digest + (k * 4), state[k]);
     }
 }
 
@@ -241,7 +250,7 @@ static const u32 kSha256K[64] = {
 static void Sha256Transform(u32 state[8], const u8 block[64]) {
     u32 w[64];
     for (int i = 0; i < 16; i++) {
-        w[i] = LoadBE32(block + i * 4);
+        w[i] = LoadBE32(block + (i * 4));
     }
     for (int i = 16; i < 64; i++) {
         u32 s0 = Rol32(w[i - 15], 25) ^ Rol32(w[i - 15], 14) ^ (w[i - 15] >> 3);
@@ -298,7 +307,7 @@ static void HashSha256(const u8* data, size_t len, u8 digest[32]) {
     StoreBE32(block + 60, (u32)bits);
     Sha256Transform(state, block);
     for (int k = 0; k < 8; k++) {
-        StoreBE32(digest + k * 4, state[k]);
+        StoreBE32(digest + (k * 4), state[k]);
     }
 }
 
@@ -316,13 +325,67 @@ void CalcSHA2Digest(Str data, u8 digest[32]) {
 
 #endif
 
-bool VerifySHA1Signature(Str /*data*/, Str /*hexSignature*/, Str /*pubkey*/) {
-    return false;
-}
-
-// extracts the content (e.g. PDF) from a PKCS#7 / .p7m wrapper using Win32 crypto APIs
-Str ExtractP7m(Str /*d*/) {
+// Extracts the embedded content from a signed PKCS#7 / .p7m wrapper.
+Str ExtractP7m(Str d) {
+#if OS_LINUX && defined(SUMATRA_HAVE_OPENSSL)
+    if (len(d) == 0) {
+        return {};
+    }
+    const unsigned char* p = (const unsigned char*)d.s;
+    PKCS7* p7 = d2i_PKCS7(nullptr, &p, len(d));
+    if (!p7) {
+        ERR_clear_error();
+        return {};
+    }
+    BIO* content = BIO_new(BIO_s_mem());
+    int flags = PKCS7_NOVERIFY | PKCS7_NOSIGS | PKCS7_BINARY;
+    if (!content || PKCS7_verify(p7, nullptr, nullptr, nullptr, content, flags) != 1) {
+        BIO_free(content);
+        PKCS7_free(p7);
+        ERR_clear_error();
+        return {};
+    }
+    char* data = nullptr;
+    long dataLen = BIO_get_mem_data(content, &data);
+    Str out = dataLen > 0 && dataLen <= INT_MAX ? str::Dup(Str(data, (int)dataLen)) : Str{};
+    BIO_free(content);
+    PKCS7_free(p7);
+    ERR_clear_error();
+    return out;
+#elif OS_DARWIN
+    if (len(d) == 0) {
+        return {};
+    }
+    CMSDecoderRef decoder = nullptr;
+    OSStatus status = CMSDecoderCreate(&decoder);
+    if (status == errSecSuccess) {
+        status = CMSDecoderUpdateMessage(decoder, d.s, (size_t)len(d));
+    }
+    if (status == errSecSuccess) {
+        status = CMSDecoderFinalizeMessage(decoder);
+    }
+    CFDataRef content = nullptr;
+    if (status == errSecSuccess) {
+        status = CMSDecoderCopyContent(decoder, &content);
+    }
+    Str out;
+    if (status == errSecSuccess && content) {
+        CFIndex n = CFDataGetLength(content);
+        if (n > 0 && n <= INT_MAX) {
+            out = str::Dup(Str((const char*)CFDataGetBytePtr(content), (int)n));
+        }
+    }
+    if (content) {
+        CFRelease(content);
+    }
+    if (decoder) {
+        CFRelease(decoder);
+    }
+    return out;
+#else
+    (void)d;
     return {};
+#endif
 }
 
 // Authenticode / PE signature helpers (Windows only; stubs return false/null on POSIX)

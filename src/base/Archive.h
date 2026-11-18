@@ -42,8 +42,8 @@ struct Archive {
         // internal use
         i64 filePos = 0;
         char* data = nullptr;
-
-        FILETIME GetWinFileTime() const;
+        // a thread is extracting it; others wait on Archive::extracted_
+        bool extracting = false;
     };
 
     Archive();
@@ -52,7 +52,7 @@ struct Archive {
     Format format = Format::Unknown;
 
     bool Open(Str path, bool eagerLoad, FileType hintType, const ArchiveExtractProgressCb& cbProgress);
-    bool OpenFromData(Str data);
+    bool OpenFromData(Str data, bool eagerLoad = true);
 
     Vec<FileInfo*> const& GetFileInfos();
 
@@ -61,6 +61,10 @@ struct Archive {
     FileInfo* GetFileDataByName(Str filename);
     FileInfo* GetFileDataById(int fileId);
     Str GetFileDataPartById(int fileId, int sizeHint);
+    // guards FileInfo::data / failed / extracting; extraction itself runs
+    // unlocked so threads reading different entries don't wait for each other
+    Mutex extractLock_;
+    ConditionVariable extracted_;
 
     // password for encrypted archives (owned by this object)
     Str password;
@@ -73,6 +77,8 @@ struct Archive {
     Vec<FileInfo*> fileInfos_;
 
     Str archivePath_;
+    // compressed bytes when opened from memory; kept so we can re-open for lazy extract
+    Str archiveData_;
 
     // only set when we loaded file infos using unrar.dll fallback
     Str rarFilePath_;
@@ -81,9 +87,9 @@ struct Archive {
     bool ParseEntries(struct archive* a, bool eagerLoad, const ArchiveExtractProgressCb& cbProgress);
 
     bool OpenUnrarFallback(Str rarPathUtf, bool eagerLoad, const ArchiveExtractProgressCb& cbProgress);
-    void LoadFileDataByIdUnrarDll(int fileId);
-    void LoadFileDataByIdLibarchive(int fileId);
-    Str GetFileDataPartByIdUnrarDll(int fileId, int sizeHint);
+    Str ReadUnrarEntry(FileInfo* fi, int toRead, bool* permanent);
+    Str ReadLibarchiveEntry(FileInfo* fi, int toRead, bool* permanent);
+    Str ReadEntry(FileInfo* fi, int toRead, bool* permanent);
     bool LoadedUsingUnrarDll() const { return (bool)rarFilePath_; }
 };
 

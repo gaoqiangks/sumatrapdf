@@ -60,6 +60,11 @@ static char Peek(Str data, int i) {
     return data.s[i];
 }
 
+static bool IsLineEnd(Str data, int off) {
+    char c = Peek(data, off);
+    return !c || c == '\n';
+}
+
 static int SkipWs(Str data, int off, bool stopAtLineEnd = false) {
     for (;;) {
         char c = Peek(data, off);
@@ -83,7 +88,7 @@ static int SkipWsAndComments(Str data, int off) {
         off = SkipWs(data, off);
         char c = Peek(data, off);
         if (c == '#' || c == ';') {
-            for (; Peek(data, off) && Peek(data, off) != '\n'; off++) {
+            for (; !IsLineEnd(data, off); off++) {
                 ;
             }
         } else {
@@ -162,7 +167,7 @@ SquareTreeNode::~SquareTreeNode() {
 
 void SquareTreeNode::RemoveDataAt(int idx) {
     FreeDataItem(data[idx]);
-    data.RemoveAt(idx);
+    VecRemoveAt(data, idx);
 }
 
 // wantChild: match items with a child node; otherwise match value items (no child).
@@ -243,30 +248,31 @@ static LineScan ScanLine(Str data, int off) {
         }
         off++;
     }
-    if (!Peek(data, off) || Peek(data, off) == '\n') {
+    if (IsLineEnd(data, off)) {
         // use first whitespace as a fallback separator
         for (off = line.keyOff; Peek(data, off) && !str::IsWs(Peek(data, off)); off++) {
             ;
         }
     }
     line.sepOff = off;
-    if (Peek(data, off) && Peek(data, off) != '\n') {
+    if (!IsLineEnd(data, off)) {
         // skip to the first non-whitespace character on the same line (value)
         off = SkipWs(data, off + 1, true);
     }
     line.valOff = off;
-    for (; Peek(data, off) && Peek(data, off) != '\n'; off++) {
+    for (; !IsLineEnd(data, off); off++) {
         ;
     }
     line.lineEnd = off;
 
+    char sep = Peek(data, line.sepOff);
     if (IsNodeOpenLine(data, line.sepOff, line.valOff, line.lineEnd)) {
         line.kind = LineKind::NodeOpen;
     } else if (Peek(data, line.keyOff) == ']') {
         line.kind = LineKind::CloseBracket;
     } else if (IsIniSectionLine(data, line.keyOff, line.valOff, line.lineEnd)) {
         line.kind = LineKind::IniSection;
-    } else if ((line.lineEnd < data.len && Peek(data, line.sepOff) == '[') || Peek(data, line.sepOff) == ']') {
+    } else if ((line.lineEnd < data.len && sep == '[') || sep == ']') {
         line.kind = LineKind::Invalid;
     } else {
         line.kind = LineKind::KeyValue;
@@ -278,18 +284,18 @@ static SquareTreeNode* ParseSquareTreeRec(Str data, int& off, bool isTopLevel, i
 
 // Appends one or more child nodes under keyView. off is the first char after '['.
 static void AppendChildNodes(SquareTreeNode* node, Str data, Str keyView, int& off, int depth) {
-    node->data.Append(AllocDataItem(keyView, {}, ParseSquareTreeRec(data, off, false, depth + 1)));
+    VecAppend(node->data, AllocDataItem(keyView, {}, ParseSquareTreeRec(data, off, false, depth + 1)));
     // arrays: reuse key for more children, or concatenate ("[ \n ] [ \n ]")
     while (IsBracketLine(data, (off = SkipWsAndComments(data, off)))) {
         off++;
-        node->data.Append(AllocDataItem(keyView, {}, ParseSquareTreeRec(data, off, false, depth + 1)));
+        VecAppend(node->data, AllocDataItem(keyView, {}, ParseSquareTreeRec(data, off, false, depth + 1)));
     }
 }
 
 static void AppendKeyValue(SquareTreeNode* node, Str data, const LineScan& line) {
     Str keyView = ExtractTrimmed(data, line.keyOff, line.sepOff);
     Str valView = ExtractTrimmed(data, line.valOff, line.lineEnd);
-    node->data.Append(AllocDataItem(keyView, valView, nullptr));
+    VecAppend(node->data, AllocDataItem(keyView, valView, nullptr));
 }
 
 // [Section] at top level becomes Section [ ... ] until the next section or EOF.
@@ -299,7 +305,7 @@ static void AppendIniSection(SquareTreeNode* node, Str data, const LineScan& lin
     int nameEnd = SkipWsRev(data, nameStart, closeOff);
     Str sectionKey = Str(data.s + nameStart, nameEnd - nameStart);
     int sectionChildOff = line.lineEnd;
-    node->data.Append(AllocDataItem(sectionKey, {}, ParseSquareTreeRec(data, sectionChildOff, false, depth + 1)));
+    VecAppend(node->data, AllocDataItem(sectionKey, {}, ParseSquareTreeRec(data, sectionChildOff, false, depth + 1)));
     off = sectionChildOff;
 }
 
@@ -373,14 +379,14 @@ void SerializeSquareTreeNode(str::Builder& out, SquareTreeNode* node, Str indent
         AppendIndent(out, indentUnit, depth);
         out.Append(item->key);
         if (item->child) {
-            out.Append(" [");
+            out.Append(StrL(" ["));
             out.Append(lineEnd);
             SerializeSquareTreeNode(out, item->child, indentUnit, lineEnd, depth + 1);
             AppendIndent(out, indentUnit, depth);
-            out.Append("]");
+            out.Append(StrL("]"));
             out.Append(lineEnd);
         } else {
-            out.Append(" = ");
+            out.Append(StrL(" = "));
             if (item->str) {
                 out.Append(item->str);
             }
@@ -402,10 +408,13 @@ SquareTreeNode* ParseSquareTree(Str s) {
     if (str::IsNull(s)) {
         return nullptr;
     }
+    // strips a utf-8 / utf-16 BOM and gives us a private, writeable copy
     TempStr data = strconv::UnknownToUtf8Temp(s);
     if (str::IsNull(data)) {
         return nullptr;
     }
+    // on disk the file is CRLF; older builds wrote LF, and a hand edit can be CR
+    str::NormalizeNewlinesToLFInPlace(data);
     int off = 0;
     return ParseSquareTreeRec(data, off, true, 0);
 }

@@ -1,10 +1,20 @@
-import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { join, dirname, extname } from "node:path";
+import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { join, dirname, extname, resolve } from "node:path";
+
+// user docs live in the sumatra-website repo, checked out next to this one
+export const websiteDir = resolve(import.meta.dir, "..", "..", "hack", "webapps", "sumatra-website");
+export const websiteDocsDir = join(websiteDir, "www", "docs");
 
 const msBuildRelPath = String.raw`MSBuild\Current\Bin\MSBuild.exe`;
 // VS 2022 ships llvm tools in Llvm\bin, VS 18 in Llvm\x64\bin
-const clangFormatRelPaths = [String.raw`VC\Tools\Llvm\bin\clang-format.exe`, String.raw`VC\Tools\Llvm\x64\bin\clang-format.exe`];
-const clangTidyRelPaths = [String.raw`VC\Tools\Llvm\bin\clang-tidy.exe`, String.raw`VC\Tools\Llvm\x64\bin\clang-tidy.exe`];
+const clangFormatRelPaths = [
+  String.raw`VC\Tools\Llvm\bin\clang-format.exe`,
+  String.raw`VC\Tools\Llvm\x64\bin\clang-format.exe`,
+];
+const clangTidyRelPaths = [
+  String.raw`VC\Tools\Llvm\bin\clang-tidy.exe`,
+  String.raw`VC\Tools\Llvm\x64\bin\clang-tidy.exe`,
+];
 
 const vsEditions = ["Community", "Professional", "Enterprise"];
 
@@ -91,9 +101,58 @@ function findToolMulti(vsRoot: string, relPaths: string[]): string {
   return "";
 }
 
+const outDir = resolve(import.meta.dir, "..", "out");
+// the MSVC toolset the msbuild outputs under out/ were last compiled with
+const vcToolsStampPath = join(outDir, ".vctools-version");
+
+// msbuild directories under out/ hold precompiled headers in obj/<project> and obj-s/<project>
+function deleteMsbuildPchFiles(): void {
+  if (!existsSync(outDir)) return;
+  for (const cfg of readdirSync(outDir, { withFileTypes: true })) {
+    if (!cfg.isDirectory()) continue;
+    for (const objName of ["obj", "obj-s"]) {
+      const objDir = join(outDir, cfg.name, objName);
+      if (!existsSync(objDir)) continue;
+      for (const proj of readdirSync(objDir, { withFileTypes: true })) {
+        if (!proj.isDirectory()) continue;
+        const projDir = join(objDir, proj.name);
+        for (const f of readdirSync(projDir)) {
+          if (f.endsWith(".pch")) rmSync(join(projDir, f), { force: true });
+        }
+      }
+    }
+  }
+}
+
+// msbuild compiles with $(VCToolsVersion), which a developer prompt sets from
+// the environment. A stale prompt (e.g. VSCMD 17.14 pinning MSVC 14.44 while
+// 14.51 is the default) made builds from different shells use different
+// compilers on the same out/ dirs, and each one's .pch failed the other's
+// build with C1853. Always build with the installed default toolset, and drop
+// the .pch files when that toolset changes.
+function useDefaultVcToolset(vsRoot: string): void {
+  const defaultPath = join(vsRoot, "VC", "Auxiliary", "Build", "Microsoft.VCToolsVersion.default.txt");
+  if (!existsSync(defaultPath)) return;
+  const toolset = readFileSync(defaultPath, "utf8").trim();
+  const envToolset = process.env.VCToolsVersion;
+  if (envToolset && envToolset !== toolset) {
+    console.log(`ignoring VCToolsVersion=${envToolset} from the environment, building with MSVC ${toolset}`);
+    delete process.env.VCToolsVersion;
+    delete process.env.VCToolsInstallDir;
+    delete process.env.VCToolsRedistDir;
+  }
+  const last = existsSync(vcToolsStampPath) ? readFileSync(vcToolsStampPath, "utf8").trim() : "";
+  if (last === toolset) return;
+  console.log(`MSVC toolset changed (${last || "unknown"} -> ${toolset}), deleting stale .pch files`);
+  deleteMsbuildPchFiles();
+  mkdirSync(outDir, { recursive: true });
+  writeFileSync(vcToolsStampPath, `${toolset}\n`);
+}
+
 export function detectVisualStudioVer(ver: string): VisualStudioInfo | undefined {
   const vsRoot = findVsRootVer(ver);
   if (vsRoot == "") return;
+  useDefaultVcToolset(vsRoot);
 
   const msbuildPath = findTool(vsRoot, msBuildRelPath);
   if (!msbuildPath) {
@@ -132,9 +191,7 @@ export function detectVisualStudio2026(): VisualStudioInfo {
 export function detectVisualStudio(): VisualStudioInfo {
   let res = detectVisualStudioVer("2022");
   if (res) return res;
-  if (!res) {
-    res = detectVisualStudioVer("18");
-  }
+  res = detectVisualStudioVer("18");
   if (!res) {
     throw new Error(`couldn't find vs 2026 or vs 2022`);
   }
@@ -146,6 +203,7 @@ export async function runLogged(cmd: string, args: string[], cwd?: string): Prom
   console.log(`> ${short}`);
   const proc = Bun.spawn([cmd, ...args], {
     cwd,
+    env: process.env,
     stdout: "inherit",
     stderr: "inherit",
     stdin: "inherit",
@@ -156,12 +214,39 @@ export async function runLogged(cmd: string, args: string[], cwd?: string): Prom
   }
 }
 
+// Visual Studio ships clang-format on Windows; elsewhere it is on PATH or,
+// on mac, inside the Xcode toolchain.
+// msbuild arg passing #defines (PRE_RELEASE_VER, GIT_COMMIT_ID; see
+// src/shared/Version.h) to the projects calling build_defines() in premake5.lua
+// e.g. /p:SumatraBuildDefines=GIT_COMMIT_ID=70cdc0%3BPRE_RELEASE_VER=10175
+export function msbuildDefinesArg(defines: Record<string, string>): string {
+  const pairs = Object.entries(defines).map(([name, value]) => `${name}=${value}`);
+  // %3B: a raw ";" would start the next msbuild property
+  return "/p:SumatraBuildDefines=" + pairs.join("%3B");
+}
+
+export function preReleaseDefines(sha1: string, preRelVer: string): Record<string, string> {
+  return { GIT_COMMIT_ID: sha1, PRE_RELEASE_VER: preRelVer };
+}
+
+export function findClangFormat(): string {
+  if (process.platform === "win32") {
+    const { clangFormatPath } = detectVisualStudio();
+    if (clangFormatPath) return clangFormatPath;
+  }
+  const onPath = Bun.which("clang-format");
+  if (onPath) return onPath;
+  if (process.platform === "darwin") {
+    const r = Bun.spawnSync(["xcrun", "--find", "clang-format"], { stdout: "pipe", stderr: "ignore" });
+    const path = r.stdout.toString().trim();
+    if (r.exitCode === 0 && path) return path;
+  }
+  throw new Error("couldn't find clang-format (install LLVM or the Visual Studio C++ Clang tools)");
+}
+
 // clang-format every generated C++ file so gen-code output matches cmd/format.ts
 export async function clangFormatFiles(rootDir: string, relativePaths: string[]): Promise<void> {
-  const { clangFormatPath } = detectVisualStudio();
-  if (!clangFormatPath) {
-    throw new Error("couldn't find clang-format.exe");
-  }
+  const clangFormatPath = findClangFormat();
   for (const rel of [...new Set(relativePaths)]) {
     const path = join(rootDir, rel);
     await runLogged(clangFormatPath, ["-i", "-style=file", path]);
@@ -201,7 +286,7 @@ export async function getGitLinearVersion(): Promise<number> {
 }
 
 export function extractSumatraVersion(): string {
-  const path = join("src", "Version.h");
+  const path = join("src", "shared", "Version.h");
   const content = readFileSync(path, "utf-8");
   const prefix = "#define CURR_VERSION ";
   for (const line of content.split("\n")) {

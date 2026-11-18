@@ -69,7 +69,6 @@ typedef struct
 	 * to the most recently used html block here, thus
 	 * ensuring that the stored copy won't be evicted. */
 	fz_html *most_recent_html;
-
 } epub_document;
 
 struct epub_chapter
@@ -178,6 +177,9 @@ static fz_html *epub_get_laid_out_html(fz_context *ctx, epub_document *doc, epub
 
 static int count_laid_out_pages(fz_html *html)
 {
+	/* SumatraPDF: a fixed-layout chapter is one page; overflow is clipped (#1293) */
+	if (html->meta_w > 0 && html->meta_h > 0)
+		return 1;
 	if (html->tree.root->s.layout.b > 0)
 		return ceilf(html->tree.root->s.layout.b / html->page_h);
 	return 1;
@@ -715,13 +717,16 @@ path_from_prop(char *path, fz_xml *manifest, const char *base_uri, const char *p
 }
 
 static fz_outline *
-epub_parse_ncx_imp(fz_context *ctx, epub_document *doc, fz_xml *node, char *base_uri)
+epub_parse_ncx_imp(fz_context *ctx, epub_document *doc, fz_xml *node, char *base_uri, int depth)
 {
 	char path[2048];
 	fz_outline *outline, *head, **tailp;
 
 	head = NULL;
 	tailp = &head;
+
+	if (depth == 100)
+		fz_throw(ctx, FZ_ERROR_FORMAT, "Overly nested epub ncx");
 
 	node = fz_xml_find_down(node, "navPoint");
 	while (node)
@@ -743,7 +748,7 @@ epub_parse_ncx_imp(fz_context *ctx, epub_document *doc, fz_xml *node, char *base
 				outline->title = Memento_label(fz_strdup(ctx, text), "outline_title");
 				outline->uri = Memento_label(fz_strdup(ctx, path), "outline_uri");
 				outline->page = fz_make_location(-1, -1);
-				outline->down = epub_parse_ncx_imp(ctx, doc, node, base_uri);
+				outline->down = epub_parse_ncx_imp(ctx, doc, node, base_uri, depth+1);
 				outline->is_open = 1;
 			}
 			fz_catch(ctx)
@@ -774,7 +779,7 @@ epub_parse_ncx(fz_context *ctx, epub_document *doc, const char *path)
 		fz_dirname(base_uri, path, sizeof base_uri);
 		buf = fz_read_archive_entry(ctx, zip, path);
 		ncx = fz_parse_xml(ctx, buf, 0);
-		doc->outline = epub_parse_ncx_imp(ctx, doc, fz_xml_find_down(fz_xml_root(ncx), "navMap"), base_uri);
+		doc->outline = epub_parse_ncx_imp(ctx, doc, fz_xml_find_down(fz_xml_root(ncx), "navMap"), base_uri, 0);
 	}
 	fz_always(ctx)
 	{
@@ -786,7 +791,7 @@ epub_parse_ncx(fz_context *ctx, epub_document *doc, const char *path)
 }
 
 static fz_outline *
-epub_parse_nav_imp(fz_context *ctx, epub_document *doc, fz_xml *ol, char *base_uri)
+epub_parse_nav_imp(fz_context *ctx, epub_document *doc, fz_xml *ol, char *base_uri, int depth)
 {
 	/* see https://www.w3.org/TR/epub-33/#sec-nav
 
@@ -810,6 +815,9 @@ epub_parse_nav_imp(fz_context *ctx, epub_document *doc, fz_xml *ol, char *base_u
 
 	head = NULL;
 	tailp = &head;
+
+	if (depth >= 100)
+		fz_throw(ctx, FZ_ERROR_FORMAT, "Overly nested epub nav");
 
 	fz_try(ctx)
 	{
@@ -842,7 +850,7 @@ epub_parse_nav_imp(fz_context *ctx, epub_document *doc, fz_xml *ol, char *base_u
 			outline->title = fz_new_text_from_xml(ctx, li_a);
 
 			if (fz_xml_is_tag(li_ol, "ol"))
-				outline->down = epub_parse_nav_imp(ctx, doc, li_ol, base_uri);
+				outline->down = epub_parse_nav_imp(ctx, doc, li_ol, base_uri, depth+1);
 
 			li = fz_xml_find_next(li, "li");
 		}
@@ -874,7 +882,7 @@ epub_parse_nav(fz_context *ctx, epub_document *doc, const char *path)
 		nav_doc = fz_parse_xml(ctx, buf, 0);
 		nav = fz_xml_find_dfs(fz_xml_root(nav_doc), "nav", "epub:type", "toc");
 		if (nav)
-			doc->outline = epub_parse_nav_imp(ctx, doc, fz_xml_find_down(nav, "ol"), base_uri);
+			doc->outline = epub_parse_nav_imp(ctx, doc, fz_xml_find_down(nav, "ol"), base_uri, 0);
 	}
 	fz_always(ctx)
 	{
@@ -936,6 +944,53 @@ read_container_and_prefix(fz_context *ctx, fz_archive *zip, char *prefix, size_t
 	return fz_read_archive_entry(ctx, zip, "META-INF/container.xml");
 }
 
+static int
+itemref_is_linear(fz_xml *itemref)
+{
+	const char *linear = fz_xml_att(itemref, "linear");
+	return !linear || strcmp(linear, "no") != 0;
+}
+
+/* an XHTML manifest item no itemref names; the nav document is not a page */
+static int
+item_is_unspined_page(fz_xml *item, fz_xml *spine)
+{
+	const char *id = fz_xml_att(item, "id");
+	const char *type = fz_xml_att(item, "media-type");
+	const char *props = fz_xml_att(item, "properties");
+	fz_xml *itemref;
+	if (!id || !type || strcmp(type, "application/xhtml+xml") != 0)
+		return 0;
+	if (props && strstr(props, "nav"))
+		return 0;
+	for (itemref = fz_xml_find_down(spine, "itemref"); itemref; itemref = fz_xml_find_next(itemref, "itemref"))
+	{
+		const char *idref = fz_xml_att(itemref, "idref");
+		if (idref && !strcmp(idref, id))
+			return 0;
+	}
+	return 1;
+}
+
+/* loads chapter i from path s; returns the next index, or i if it failed */
+static int
+epub_load_spine_chapter(fz_context *ctx, epub_document *doc, const char *s, int i)
+{
+	fz_try(ctx)
+	{
+		doc->spine[i] = epub_load_chapter(ctx, doc, s, i);
+		i++;
+	}
+	fz_catch(ctx)
+	{
+		fz_rethrow_if(ctx, FZ_ERROR_TRYLATER);
+		fz_rethrow_if(ctx, FZ_ERROR_SYSTEM);
+		fz_report_error(ctx);
+		fz_warn(ctx, "ignoring chapter %s", s);
+	}
+	return i;
+}
+
 static void
 epub_parse_header(fz_context *ctx, epub_document *doc)
 {
@@ -945,14 +1000,14 @@ epub_parse_header(fz_context *ctx, epub_document *doc)
 	fz_xml_doc *container_xml = NULL;
 	fz_xml_doc *content_opf = NULL;
 	fz_xml *container, *rootfiles, *rootfile;
-	fz_xml *package, *manifest, *spine, *itemref, *metadata;
+	fz_xml *package, *manifest, *spine, *itemref, *item, *metadata;
 	char base_uri[2048];
 	const char *full_path;
 	const char *version;
 	char ncx[2048], s[2048];
 	char *prefixed_full_path = NULL;
 	size_t prefix_len;
-	int i;
+	int i, pass;
 
 	fz_var(buf);
 	fz_var(encryption_xml);
@@ -1047,30 +1102,39 @@ epub_parse_header(fz_context *ctx, epub_document *doc)
 				++i;
 			itemref = fz_xml_find_next(itemref, "itemref");
 		}
+		item = fz_xml_find_down(manifest, "item");
+		while (item)
+		{
+			if (item_is_unspined_page(item, spine))
+				++i;
+			item = fz_xml_find_next(item, "item");
+		}
 		doc->spine_len = i;
 
-		// load chapters
+		// load chapters: linear="no" items (footnotes, endnotes) are not
+		// part of the reading order, so they go after the linear ones,
+		// where links still reach them; pages only the manifest names
+		// (an aside a link points at) go last
 		doc->spine = fz_malloc_array(ctx, doc->spine_len, epub_chapter*);
-		itemref = fz_xml_find_down(spine, "itemref");
 		i = 0;
-		while (itemref)
+		for (pass = 0; pass < 2; ++pass)
 		{
-			if (path_from_idref(s, manifest, base_uri, fz_xml_att(itemref, "idref"), sizeof s))
+			itemref = fz_xml_find_down(spine, "itemref");
+			while (itemref)
 			{
-				fz_try(ctx)
-				{
-					doc->spine[i] = epub_load_chapter(ctx, doc, s, i);
-					i++;
-				}
-				fz_catch(ctx)
-				{
-					fz_rethrow_if(ctx, FZ_ERROR_TRYLATER);
-					fz_rethrow_if(ctx, FZ_ERROR_SYSTEM);
-					fz_report_error(ctx);
-					fz_warn(ctx, "ignoring chapter %s", s);
-				}
+				if (itemref_is_linear(itemref) == (pass == 0) &&
+					path_from_idref(s, manifest, base_uri, fz_xml_att(itemref, "idref"), sizeof s))
+					i = epub_load_spine_chapter(ctx, doc, s, i);
+				itemref = fz_xml_find_next(itemref, "itemref");
 			}
-			itemref = fz_xml_find_next(itemref, "itemref");
+		}
+		item = fz_xml_find_down(manifest, "item");
+		while (item)
+		{
+			if (item_is_unspined_page(item, spine) &&
+				path_from_idref(s, manifest, base_uri, fz_xml_att(item, "id"), sizeof s))
+				i = epub_load_spine_chapter(ctx, doc, s, i);
+			item = fz_xml_find_next(item, "item");
 		}
 		doc->spine_len = i;
 	}

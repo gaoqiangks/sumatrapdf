@@ -4,10 +4,11 @@
 #include "base/Base.h"
 #include "base/WinDynCalls.h"
 #include "base/Win.h"
-#include "uia/Provider.h"
 #include "uia/Constants.h"
+#include "uia/Common.h"
 #include "uia/DocumentProvider.h"
 #include "uia/StartPageProvider.h"
+#include "uia/Provider.h"
 
 SumatraUIAutomationProvider::SumatraUIAutomationProvider(HWND hwnd)
     : refCount(1), canvasHwnd(hwnd), startpage(nullptr), document(nullptr) {
@@ -21,6 +22,7 @@ SumatraUIAutomationProvider::~SumatraUIAutomationProvider() {
         document = nullptr;
     }
 
+    startpage->DetachRoot();
     startpage->Release();
     startpage = nullptr;
 }
@@ -67,12 +69,7 @@ ULONG STDMETHODCALLTYPE SumatraUIAutomationProvider::AddRef() {
 }
 
 ULONG STDMETHODCALLTYPE SumatraUIAutomationProvider::Release() {
-    LONG res = InterlockedDecrement(&refCount);
-    ReportIf(res < 0);
-    if (0 == res) {
-        delete this;
-    }
-    return res;
+    return ComRelease(&refCount, [this] { delete this; });
 }
 
 HRESULT STDMETHODCALLTYPE SumatraUIAutomationProvider::GetPatternProvider(__unused PATTERNID patternId,
@@ -114,11 +111,7 @@ HRESULT STDMETHODCALLTYPE SumatraUIAutomationProvider::get_HostRawElementProvide
 }
 
 HRESULT STDMETHODCALLTYPE SumatraUIAutomationProvider::get_ProviderOptions(ProviderOptions* pRetVal) {
-    if (pRetVal == nullptr) {
-        return E_POINTER;
-    }
-    *pRetVal = ProviderOptions_ServerSideProvider;
-    return S_OK;
+    return UiaProviderOptions(pRetVal);
 }
 
 HRESULT STDMETHODCALLTYPE SumatraUIAutomationProvider::Navigate(enum NavigateDirection direction,
@@ -150,23 +143,11 @@ HRESULT STDMETHODCALLTYPE SumatraUIAutomationProvider::Navigate(enum NavigateDir
 }
 
 HRESULT STDMETHODCALLTYPE SumatraUIAutomationProvider::GetRuntimeId(SAFEARRAY** pRetVal) {
-    if (pRetVal == nullptr) {
-        return E_POINTER;
-    }
-
-    // top-level elements should return nullptr
-    *pRetVal = nullptr;
-    return S_OK;
+    return UiaReturnNull(pRetVal);
 }
 
 HRESULT STDMETHODCALLTYPE SumatraUIAutomationProvider::GetEmbeddedFragmentRoots(SAFEARRAY** pRetVal) {
-    if (pRetVal == nullptr) {
-        return E_POINTER;
-    }
-
-    // no other roots => return nullptr
-    *pRetVal = nullptr;
-    return S_OK;
+    return UiaReturnNull(pRetVal);
 }
 
 HRESULT STDMETHODCALLTYPE SumatraUIAutomationProvider::SetFocus() {

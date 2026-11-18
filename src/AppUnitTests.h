@@ -1,10 +1,10 @@
 /* Copyright 2026 the SumatraPDF project authors (see AUTHORS file).
    License: GPLv3 */
 
-#if defined(DEBUG)
-int RunAppUnitTests();
+#if IS_DEBUG
+int RunAppUnitTests(bool forAi);
 #else
-constexpr int RunAppUnitTests() {
+constexpr int RunAppUnitTests(bool) {
     return 0;
 }
 #endif

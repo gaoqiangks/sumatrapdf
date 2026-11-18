@@ -6,8 +6,10 @@ import { join } from "node:path";
 // - Change: dialog to pick a new app/document preference or mode
 // - Set: dialog to assign an optional per-object value or integration string
 //
+// A removed command keeps its slot, with an empty name, so that the ids of the
+// commands after it don't shift (they are persisted in keyboard shortcuts).
 // prettier-ignore
-export const commands = [
+const commandsRaw = [
     "CmdOpenFile", "Open File...",
     "CmdClose", "Close Document",
     "CmdCloseCurrentDocument", "Close Current Document",
@@ -43,7 +45,7 @@ export const commands = [
     "CmdToggleMenuBar", "Toggle Menu Bar",
     "CmdCopySelection", "Copy Selection",
     "CmdTranslateSelectionWithGoogle", "Translate Selection with Google",
-    "CmdTranslateSelectionWithDeepL", "Translate Selection With DeepL",
+    "CmdTranslateSelectionWithDeepL", "Translate Selection with DeepL",
     "CmdSearchSelectionWithGoogle", "Search Selection with Google",
     "CmdSearchSelectionWithBing", "Search Selection with Bing",
     "CmdSearchSelectionWithWikipedia", "Search Selection with Wikipedia",
@@ -80,7 +82,6 @@ export const commands = [
     "CmdSaveAnnotations", "Save Annotations to existing PDF",
     "CmdSaveAnnotationsNewFile", "Save Annotations to a new PDF...",
     "CmdDiscardChanges", "Discard Changes",
-    "CmdEditAnnotations", "Edit Annotations...",
     "CmdDeleteAnnotation", "Delete Annotation",
     "CmdZoomFitPage", "Zoom: Fit Page",
     "CmdZoomActualSize", "Zoom: Actual Size",
@@ -107,19 +108,19 @@ export const commands = [
     "CmdZoomFitWidthAndContinuous", "Zoom: Fit Width And Continuous",
     "CmdZoomFitPageAndSinglePage", "Zoom: Fit Page and Single Page",
     "CmdContributeTranslation", "Contribute Translation",
-    "CmdOpenWithKnownExternalViewerFirst", "don't use",
+    "", "removed: CmdOpenWithKnownExternalViewerFirst",
     "CmdOpenWithExplorer", "Open Directory In Explorer",
     "CmdOpenWithDirectoryOpus", "Open Directory In Directory Opus",
     "CmdOpenWithTotalCommander", "Open Directory In Total Commander",
     "CmdOpenWithDoubleCommander", "Open Directory In Double Commander",
     "CmdOpenWithAcrobat", "Open in Adobe Acrobat",
-    "CmdOpenWithFoxIt", "Open in Foxit Reader",
-    "CmdOpenWithFoxItPhantom", "Open in Foxit PhantomPDF",
+    "CmdOpenWithFoxit", "Open in Foxit Reader",
+    "CmdOpenWithFoxitPhantom", "Open in Foxit PhantomPDF",
     "CmdOpenWithPdfXchange", "Open in PDF-XChange",
     "CmdOpenWithXpsViewer", "Open in Microsoft XPS Viewer",
     "CmdOpenWithHtmlHelp", "Open in Microsoft HTML Help",
     "CmdOpenWithPdfDjvuBookmarker", "Open With Pdf&Djvu Bookmarker",
-    "CmdOpenWithKnownExternalViewerLast", "don't use",
+    "", "removed: CmdOpenWithKnownExternalViewerLast",
     "CmdOpenSelectedDocument", "Open Selected Document",
     "CmdPinSelectedDocument", "Pin Selected Document",
     "CmdForgetSelectedDocument", "Remove Selected Document From History",
@@ -129,8 +130,8 @@ export const commands = [
     "CmdOpenEmbeddedPDF", "Open Embedded PDF",
     "CmdSaveAttachment", "Save Attachment...",
     "CmdOpenAttachment", "Open Attachment",
-    "CmdOptions", "Options...",
-    "CmdAdvancedOptions", "Advanced Options...",
+    "CmdOptions", "Settings...",
+    "", "removed: CmdAdvancedOptions",
     "CmdAdvancedSettings", "Advanced Settings...",
     "CmdChangeLanguage", "Change Language...",
     "CmdCheckUpdate", "Check For Updates",
@@ -195,12 +196,12 @@ export const commands = [
     "CmdToggleInverseSearch", "Toggle Inverse Search",
     "CmdDebugCorruptMemory", "Debug: Corrupt Memory",
     "CmdDebugCrashMe", "Debug: Crash Me",
-    "CmdDebugDownloadSymbols", "Debug: Download Symbols",
-    "CmdDebugTestApp", "Debug: Test App",
+    "", "removed: CmdDebugDownloadSymbols",
+    "", "removed: CmdDebugTestApp",
     "CmdDebugShowNotif", "Debug: Show Notification",
     "CmdDebugStartStressTest", "Debug: Start Stress Test",
     "CmdDebugTogglePredictiveRender", "Debug: Toggle Predictive Rendering",
-    "CmdDebugToggleRtl", "Debug: Toggle Rtl",
+    "CmdDebugToggleRtl", "Debug: Toggle RTL",
     // removed: CmdToggleHideScrollbar (replaced by CmdChangeScrollbar)
     "CmdListPrinters", "List Printers...",
     "CmdToggleWindowsPreviewer", "Toggle Windows Previewer",
@@ -218,15 +219,15 @@ export const commands = [
     "CmdPdfCompress", "Compress PDF...",
     "CmdPdfDecompress", "Decompress PDF...",
     "CmdPdfDeletePages", "Delete Pages From PDF...",
-    "CmdPdfExtractPages", "Extract Pages From PDF...",
+    "CmdPdfExtractPages", "Extract Pages...",
     "CmdPdfEncrypt", "Encrypt PDF...",
     "CmdPdfDecrypt", "Decrypt PDF...",
     "CmdPdfBake", "Bake PDF File...",
-    "CmdPdShowInfo", "Show PDF Info...",
+    "CmdPdfShowInfo", "Show PDF Info...",
     "CmdDocumentExtractText", "Extract Text From Document...",
     "CmdDocumentShowOutline", "Show Document Bookmarks...",
     "CmdSetScreenshotHotkey", "Set Screenshot Hotkey...",
-    "CmdReadAloud", "Read Aloud",
+    "CmdToggleReadAloud", "Toggle Read Aloud",
     "CmdPauseReadAloud", "Pause Reading",
     "CmdContinueReadAloud", "Continue Reading",
     "CmdStopReadAloud", "Stop Reading",
@@ -234,7 +235,7 @@ export const commands = [
     "CmdReadAloudSelection", "Start Reading Selection",
     "CmdToggleToolbarShowReadAloud", "Read Aloud: Show In Toolbar",
     "CmdRemoveDeletedFilesFromHistory", "Remove Deleted Files From History",
-    "CmdCommandPaletteTOC", "Command Palette: Table Of Contents",
+    "CmdNavigateTableOfContents", "Navigate Table Of Contents",
     "CmdDebugToggleRenderInfo", "Debug: Toggle Render Queue Info",
     "CmdConvertImageToPdf", "Convert Image To PDF...",
     "CmdExpandToCurrentPage", "Expand TOC to Current Page",
@@ -250,7 +251,7 @@ export const commands = [
     "CmdGoToPrevFavorite", "Go to Previous Favorite",
     "CmdCreateAnnotImageFromClipboard", "Create Image Annotation From Clipboard",
     "CmdSetInverseSearch", "Set Inverse Search Command Line...",
-    "CmdCommandPaletteFavorites", "Command Palette: Favorites",
+    "CmdNavigateFavorites", "Navigate Favorites",
     "CmdNavigateFilesInFolder", "Navigate Files in Folder...",
     "CmdDebugToggleCacheInfo", "Debug: Toggle Cache Info",
     "CmdToggleEngineeringDrawingEnhance", "Toggle Engineering Drawing Enhancement",
@@ -287,23 +288,126 @@ export const commands = [
     "CmdExtendSelectionWordRight", "Extend Selection One Word Right",
     "CmdToggleLaserPointer", "Toggle Laser Pointer",
     "CmdZoomToSelection", "Zoom: To Selection",
-    "CmdToggleHoverPreview", "Toggle Hover Preview",
+    "CmdToggleHoverPreview", "Toggle Citation Hover Preview",
     "CmdToggleDisableLinks", "Toggle Disable Links",
+    "CmdSignDocument", "Sign Document...",
+    "CmdInsertImage", "Insert Image...",
+    "CmdToggleHighlightFormFields", "Toggle Highlight Form Fields",
+    "CmdTogglePageBoxes", "Toggle Page Boxes",
+    "CmdConvertPdfToImages", "Convert to Images...",
+    "CmdToggleUniformPageWidth", "Toggle Uniform Page Width",
+    "CmdToggleTransparencyGrid", "Toggle Transparency Grid",
+    "CmdTogglePageGrid", "Toggle Page Grid",
+    "CmdConfigurePageGrid", "Configure Page Grid...",
+    "CmdToggleEditPDF", "Toggle Edit PDF",
+    "CmdApplyRedactions", "Apply Redactions",
+    "CmdUndo", "Undo",
+    "CmdRedo", "Redo",
+    "CmdCutAnnotation", "Cut Annotation",
+    "CmdCopyAnnotation", "Copy Annotation",
+    "CmdPasteAnnotation", "Paste Annotation",
+    "CmdSearchGoogleLens", "Search with Google Lens",
+    "CmdNavigateThumbnail", "Navigate Thumbnails",
+    "CmdShowAnnotationText", "Show Comment",
+    "CmdAnnotationHighlightBrush", "Highlighter",
+    "CmdFindAnnotation", "Find Annotation",
+    "CmdOpenFileNoHistory", "Open File Without History...",
+    "CmdCopySelectionAsImage", "Copy Selection As Image",
+    "CmdSearchGoogleLensPage", "Search Page with Google Lens",
+    "CmdSearchGoogleLensImage", "Search Image with Google Lens",
+    "CmdSaveSelectionAsImage", "Save As Image...",
+    "CmdToggleTrimEmptyMargins", "Toggle Trim Empty Margins",
+    "CmdCopyLocationToClipboard", "Copy Location To Clipboard",
+    "CmdToggleAutomaticallyScroll", "Automatically Scroll",
+    "CmdAutomaticallyScrollFaster", "Automatically Scroll Faster",
+    "CmdAutomaticallyScrollSlower", "Automatically Scroll Slower",
+    "CmdToggleReadingBar", "Reading Bar",
+    "CmdToggleReadingBarInvert", "Reading Bar Invert",
+    "CmdGoToHomePage", "Go To Home Page",
+    "CmdToggleFreePan", "Toggle Free Pan",
     "CmdNone", "Do nothing",
+    "CmdFileHistory", "Open Recent File",
+    "CmdFavorite", "Go to Favorite",
+    "CmdReadAloudFromCursorPosition", "Start Reading From Cursor Position",
+    "CmdToggleGrayscale", "Toggle Grayscale",
+    "CmdPrintSelection", "Print Selection...",
+    "CmdAutoGenerateTOC", "Generate Table Of Contents",
+    "CmdOpenSettingsFile", "Open Advanced Settings File...",
+    "CmdOpenFileWithSumatraFilePicker", "Open File With SumatraPDF File Picker...",
+    "CmdSelectCurrentPage", "Select Current Page",
+    "CmdZoomFitVisible", "Zoom: Fit Visible",
+    "CmdSignWithImage", "Sign With Image",
+    "CmdInsertTextSnippet", "Insert Text Snippet",
+    "CmdToggleThumbnails", "Toggle Thumbnails",
+    "CmdMergePDF", "Merge PDF...",
+    "CmdToggleAutoRotateWidePages", "Toggle Auto-Rotate Wide Pages",
+    "CmdNavigateTabs", "Navigate Tabs",
+    "CmdNavigateHistory", "Navigate History",
+    "CmdQuickEditSettings", "Quick Edit Settings",
+    "CmdConfigureRestrictedUse", "Configure Restricted Use...",
+    "CmdRunPDFScript", "Run PDF Script...",
+    "CmdToggleCaption", "Toggle Caption",
+    "CmdAdjustBrightness", "Adjust Brightness...",
+    "CmdAdjustContrast", "Adjust Contrast...",
+    "CmdToggleSidebarAutoHide", "Toggle Sidebar Auto-hide",
+    "CmdDebugShowCrashMiniDumps", "Debug: Show Crash Minidumps",
+    "CmdCopyTemporaryFileToNonTemporary", "Copy Temporary File to Permanent Folder",
+    "CmdConvertEpubToPdf", "Convert EPUB to PDF...",
+    "CmdConvertCajToPDF", "Convert CAJ to PDF...",
+    "CmdFindHistory", "Find History",
+    "CmdSumatraPDFWeb", "SumatraPDF Web...",
+    "CmdDebugSaveSettings", "Debug: Save Settings",
+    "CmdNewTab", "New Tab",
+    "CmdShowSignatures", "Show Signatures",
+    "CmdOpenFromURL", "Open from URL...",
+    "CmdGoToPrevChapter", "Previous Chapter",
+    "CmdGoToNextChapter", "Next Chapter",
+    "CmdToggleLayers", "Toggle Layers",
+    "CmdToggleFacingStepOne", "Toggle Facing: Step One Page",
+    "CmdCountWords", "Count Words",
+    "CmdMinimizeWindow", "Minimize Window",
+    "CmdShowSelectedText", "Show Selected Text",
+    "CmdToggleMirror", "Mirror Pages",
+    "CmdTrimPagesToSelection", "Trim Pages To Selection",
+    "CmdShowWholePages", "Show Whole Pages",
+    "CmdMeasure", "Measure",
+    "CmdReplaceImage", "Replace Image...",
+    "CmdEditImageExternally", "Edit Image in Another App",
+    "CmdToggleReadColumns", "Read Columns",
+    "CmdToggleColumnsWholePage", "Read Columns: Show Whole Page",
+    "CmdDebugShowDownloadedFonts", "Debug: Show Downloaded Fonts",
+    "CmdTocExpandChapter", "Bookmarks: Expand Chapter",
+    "CmdTocCollapseChapter", "Bookmarks: Collapse Chapter",
+    "CmdEditFavorites", "Edit Favorites...",
+    "CmdCloseMissingTabs", "Close Tabs of Missing Files",
+    "CmdViewAsHex", "View As Hex",
+    "CmdAIChatWithCustomAPI", "Custom AI chat...",
+    "CmdSaveTrimmedPagesAs", "Save Trimmed Pages As...",
+];
+
+// removed slots are dropped: nothing outside the generators should see them
+export const commands: string[] = commandsRaw.filter((_, i) => commandsRaw[i - (i % 2)] !== "");
+
+// Extra command palette texts for a command, so a different wording finds it
+// too. [command name, text]; a command may appear more than once.
+// prettier-ignore
+export const commandAltDescs: [string, string][] = [
+    ["CmdNavigateFilesInFolder", "Browse Files In Folder..."],
+    ["CmdAdvancedSettings", "Advanced Options..."],
 ];
 
 function getNames(): string[] {
   const names: string[] = [];
-  for (let i = 0; i < commands.length; i += 2) {
-    names.push(commands[i]);
+  for (let i = 0; i < commandsRaw.length; i += 2) {
+    names.push(commandsRaw[i]);
   }
   return names;
 }
 
 function getDescs(): string[] {
   const descs: string[] = [];
-  for (let i = 0; i < commands.length; i += 2) {
-    descs.push(commands[i + 1]);
+  for (let i = 0; i < commandsRaw.length; i += 2) {
+    descs.push(commandsRaw[i + 1]);
   }
   return descs;
 }
@@ -324,19 +428,14 @@ function generateEnum(): string {
   for (let i = 0; i < names.length; i++) {
     let cmd = names[i];
     let id = firstCmdId + i;
+    if (cmd === "") {
+      continue; // removed command, its id stays unused
+    }
     lines.push(`    ${cmd} = ${id},`);
   }
 
   lines.push("");
-  lines.push("    /* range for file history */");
-  lines.push("    CmdFileHistoryFirst,");
-  lines.push("    CmdFileHistoryLast = CmdFileHistoryFirst + 32,");
-  lines.push("");
-  lines.push("    /* range for favorites */");
-  lines.push("    CmdFavoriteFirst,");
-  lines.push("    CmdFavoriteLast = CmdFavoriteFirst + 256,");
-  lines.push("");
-  lines.push("    CmdLast = CmdFavoriteLast,");
+  lines.push(`    CmdLast = ${firstCmdId + names.length - 1},`);
   lines.push("    CmdFirstCustom = CmdLast + 100,");
   lines.push("");
   lines.push("    // aliases, at the end to not mess ordering");
@@ -348,6 +447,7 @@ function generateEnum(): string {
   lines.push("");
   lines.push("    CmdCreateAnnotFirst = CmdCreateAnnotText,");
   lines.push("    CmdCreateAnnotLast = CmdCreateAnnotFileAttachment,");
+  lines.push("    CmdTrimEmptyMargins = CmdToggleTrimEmptyMargins,");
   lines.push("};");
   lines.push("// clang-format on");
 
@@ -357,37 +457,32 @@ function generateEnum(): string {
 function generateArrays(): string {
   const names = getNames();
   const descs = getDescs();
+  const liveNames = names.filter((n) => n !== "");
+  const liveDescs = descs.filter((_, i) => names[i] !== "");
   const lines: string[] = [];
 
   lines.push("// clang-format off");
 
-  // gCommandNames: SeqStrings (null-separated, double-null terminated)
-  lines.push("static SeqStrings gCommandNames =");
-  for (let i = 0; i < names.length; i++) {
-    const chunk = names.slice(i, i + 1);
-    const parts = chunk.map((s) => `"${s}\\0"`).join(" ");
-    lines.push(`    ${parts}`);
-  }
-  lines.push(`    "\\0";`);
-  lines.push("");
-
-  // gCommandIds
-  lines.push("static i32 gCommandIds[] = {");
-  for (let i = 0; i < names.length; i++) {
-    const chunk = names.slice(i, i + 1).join(", ");
-    lines.push(`    ${chunk},`);
+  lines.push("const CommandInfo gCommands[] = {");
+  for (let i = 0; i < liveNames.length; i++) {
+    lines.push(`    {${liveNames[i]}, "${liveNames[i]}\\0", StrL("${liveDescs[i]}")},`);
   }
   lines.push("};");
+  lines.push("const int gCommandsCount = dimofi(gCommands);");
   lines.push("");
 
-  // gCommandDescriptions
-  lines.push("SeqStrings gCommandDescriptions =");
-  for (let i = 0; i < descs.length; i++) {
-    const chunk = descs.slice(i, i + 1);
-    const parts = chunk.map((s) => `"${s}\\0"`).join(" ");
-    lines.push(`    ${parts}`);
+  for (const [name] of commandAltDescs) {
+    if (!liveNames.includes(name)) {
+      console.error(`commandAltDescs: unknown command '${name}'`);
+      process.exit(1);
+    }
   }
-  lines.push(`    "\\0";`);
+  lines.push("const CommandInfo gCommandAltDescs[] = {");
+  for (const [name, desc] of commandAltDescs) {
+    lines.push(`    {${name}, "${name}\\0", StrL("${desc}")},`);
+  }
+  lines.push("};");
+  lines.push("const int gCommandAltDescsCount = dimofi(gCommandAltDescs);");
   lines.push("// clang-format on");
 
   return lines.join("\n");
@@ -407,8 +502,8 @@ function replaceBetweenMarkers(content: string, startMarker: string, endMarker: 
 
 export function main() {
   const rootDir = join(import.meta.dir, "..");
-  const headerPath = join(rootDir, "src", "Commands.h");
-  const cppPath = join(rootDir, "src", "Commands.cpp");
+  const headerPath = join(rootDir, "src", "shared", "Commands.h");
+  const cppPath = join(rootDir, "src", "shared", "Commands.cpp");
 
   let headerContent = readFileSync(headerPath, "utf-8");
   let cppContent = readFileSync(cppPath, "utf-8");
@@ -416,12 +511,12 @@ export function main() {
   const enumCode = generateEnum();
   headerContent = replaceBetweenMarkers(headerContent, "// @gen-start cmd-enum", "// @gen-end cmd-enum", enumCode);
   writeFileSync(headerPath, headerContent, "utf-8");
-  console.log("Generated enum in src/Commands.h");
+  console.log("Generated enum in src/shared/Commands.h");
 
   const arraysCode = generateArrays();
   cppContent = replaceBetweenMarkers(cppContent, "// @gen-start cmd-c", "// @gen-end cmd-c", arraysCode);
   writeFileSync(cppPath, cppContent, "utf-8");
-  console.log("Generated arrays in src/Commands.cpp");
+  console.log("Generated arrays in src/shared/Commands.cpp");
 }
 
 if (import.meta.main) {

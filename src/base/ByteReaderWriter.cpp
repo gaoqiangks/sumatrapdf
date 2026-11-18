@@ -78,7 +78,7 @@ u32 BitReader::Peek(int nBits) {
 // Unpacks a structure from the data according to the given format
 // e.g. the format "32b2w6d" unpacks 32 Bytes, 2 16-bit Words and 6 32-bit Dwords
 bool ByteReader::Unpack(void* strct, int size, Str format, int off, bool isBE) const {
-    if (!format) {
+    if (::len(format) == 0) {
         return false;
     }
     int repeat = 0;
@@ -138,22 +138,28 @@ ByteReader::ByteReader(Str data) : d((const u8*)data.s), len(data.len) {}
 
 ByteReader::ByteReader(const u8* data, int n) : d(data), len(n) {}
 
+// true if n bytes at off are inside the buffer. Compares against len - n
+// rather than off + n, which overflows for an off near INT_MAX
+bool ByteReader::CanRead(int off, int n) const {
+    return off >= 0 && n <= len && off <= len - n;
+}
+
 u8 ByteReader::UInt8(int off) const {
-    if (off >= 0 && off < len) {
+    if (CanRead(off, 1)) {
         return d[off];
     }
     return 0;
 }
 
 u16 ByteReader::UInt16LE(int off) const {
-    if (off >= 0 && off + 2 <= len) {
+    if (CanRead(off, 2)) {
         return d[off] | (d[off + 1] << 8);
     }
     return 0;
 }
 
 u16 ByteReader::UInt16BE(int off) const {
-    if (off >= 0 && off + 2 <= len) {
+    if (CanRead(off, 2)) {
         return (d[off] << 8) | d[off + 1];
     }
     return 0;
@@ -164,14 +170,14 @@ u16 ByteReader::UInt16(int off, bool isBE) const {
 }
 
 u32 ByteReader::UInt32LE(int off) const {
-    if (off >= 0 && off + 4 <= len) {
+    if (CanRead(off, 4)) {
         return d[off] | (d[off + 1] << 8) | (d[off + 2] << 16) | (d[off + 3] << 24);
     }
     return 0;
 }
 
 u32 ByteReader::UInt32BE(int off) const {
-    if (off >= 0 && off + 4 <= len) {
+    if (CanRead(off, 4)) {
         return (d[off] << 24) | (d[off + 1] << 16) | (d[off + 2] << 8) | d[off + 3];
     }
     return 0;
@@ -182,14 +188,14 @@ u32 ByteReader::UInt32(int off, bool isBE) const {
 }
 
 u64 ByteReader::UInt64LE(int off) const {
-    if (off >= 0 && off + 8 <= len) {
+    if (CanRead(off, 8)) {
         return UInt32LE(off) | ((u64)UInt32LE(off + 4) << 32);
     }
     return 0;
 }
 
 u64 ByteReader::UInt64BE(int off) const {
-    if (off >= 0 && off + 8 <= len) {
+    if (CanRead(off, 8)) {
         return ((u64)UInt32BE(off) << 32) | UInt32BE(off + 4);
     }
     return 0;
@@ -231,30 +237,6 @@ SEQUENTIAL_READ(UInt64BE, u64, 8)
 
 #undef SEQUENTIAL_READ
 
-i16 ByteReader::Int16LE() {
-    return (i16)UInt16LE();
-}
-
-i16 ByteReader::Int16BE() {
-    return (i16)UInt16BE();
-}
-
-i32 ByteReader::Int32LE() {
-    return (i32)UInt32LE();
-}
-
-i32 ByteReader::Int32BE() {
-    return (i32)UInt32BE();
-}
-
-i64 ByteReader::Int64LE() {
-    return (i64)UInt64LE();
-}
-
-i64 ByteReader::Int64BE() {
-    return (i64)UInt64BE();
-}
-
 void ByteReader::Bytes(void* dst, int n) {
     if (!ok || n < 0 || off > len - n) {
         ok = false;
@@ -295,14 +277,6 @@ const u8* ByteReader::Find(int off, u8 byte) const {
     return (const u8*)memchr(d + off, byte, (size_t)(len - off));
 }
 
-bool ByteReader::UnpackLE(void* strct, int size, Str format, int off) const {
-    return Unpack(strct, size, format, off, false);
-}
-
-bool ByteReader::UnpackBE(void* strct, int size, Str format, int off) const {
-    return Unpack(strct, size, format, off, true);
-}
-
 // Unpacks a structure from the data according to the given format
 // e.g. the format "32b2w6d" unpacks 32 Bytes, 2 16-bit Words and 6 32-bit Dwords
 bool ByteReader::Unpack(void* strct, int size, Str format, bool isBE, int off) const {
@@ -328,7 +302,9 @@ u32 UInt32LE(const u8* d) {
 // --- ByteWriter
 
 ByteWriter::ByteWriter(int sizeHint) {
-    d.cap = sizeHint;
+    if (sizeHint > 0) {
+        d.Reserve(sizeHint);
+    }
 }
 
 void ByteWriter::Write8(u8 b) {
@@ -364,18 +340,6 @@ void ByteWriter::Write32(u32 val) {
     Write8x2(b2, b1);
 }
 
-void ByteWriter::Write64(u64 val) {
-    u32 v1 = val & 0xFFFFFFFF;
-    u32 v2 = (val >> 32) & 0xFFFFFFFF;
-    if (isLE) {
-        Write32(v1);
-        Write32(v2);
-        return;
-    }
-    Write32(v2);
-    Write32(v1);
-}
-
 int ByteWriter::Size() const {
     return len(d);
 }
@@ -385,6 +349,8 @@ Str ByteWriter::AsByteSlice() const {
 }
 
 ByteWriterLE::ByteWriterLE(int sizeHint) {
-    d.cap = sizeHint;
     isLE = true;
+    if (sizeHint > 0) {
+        d.Reserve(sizeHint);
+    }
 }

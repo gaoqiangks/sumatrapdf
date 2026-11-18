@@ -3,26 +3,30 @@
  *
  * Local cache (gitignored via .work/):
  *   .work/translations.txt       languages complete enough for the binary
- *   (packed into .work/embedded.dat with marked/mermaid/manual via pack-embedded.ts)
+ *   (the build's prebuild, cmd/pack-embedded-prebuild.cmd, packs it with
+ *   markdown-it/pele/manual into out/<cfg>/embedded[-static].lzsa = IDR_EMBEDDED_PAK)
  *
  * Flow:
- *   1. Extract _TR* strings from src + command names
+ *   1. Extract Tr() / TrN() strings from src + command names + home page tips
  *   2. POST them to /api/dltransfor (marks active strings; returns sha1 + translations)
  *   3. Fix suspicious translations (trailing whitespace / \n / \r) via /api/edittranslation
  *      as user "ai fix"
- *   4. If any language is missing translations:
+ *   4. GET /api/dltranshist (every string the server ever had) and index it by
+ *      English text with '&' stripped: a string that only moved or lost its
+ *      access key reuses the old translations, submitted as user "ai auto"
+ *   5. If any language is still missing translations:
  *        - translate with Claude or Grok
  *        - submit each via /api/edittranslation as user "ai claude" / "ai grok"
  *          only when that lang+string has no translation yet (never overwrite)
- *   5. Re-download (should now include submitted translations)
- *   6. Write filtered .work/translations.txt and build .lzsa
+ *   6. Re-download (should now include submitted translations)
+ *   7. Write filtered .work/translations.txt
  *
  * Usage:
  *   bun cmd/trans-dl.ts                 # production apptranslator + Claude if key set
  *   bun cmd/trans-dl.ts --local         # http://127.0.0.1:9311
  *   bun cmd/trans-dl.ts --server URL
  *   bun cmd/trans-dl.ts --ai=claude|grok|none
- *   bun cmd/trans-dl.ts --no-ai         # download + fix suspicious + filter + lzsa (no AI fill)
+ *   bun cmd/trans-dl.ts --no-ai         # download + fix suspicious + filter (no AI fill)
  *   bun cmd/trans-dl.ts --lang de       # only fill missing for one language
  *   bun cmd/trans-dl.ts --lang br --retranslate  # refill AI/wrong br (not Breton)
  *   bun cmd/trans-dl.ts --max-submit N  # cap AI submissions (for testing; fixes always run)
@@ -32,11 +36,11 @@ import { readFileSync, writeFileSync, readdirSync, existsSync, mkdirSync } from 
 import { join, extname } from "node:path";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { commands } from "./gen-commands";
+import { commands, commandAltDescs } from "./gen-commands";
 
 // strings that should not be sent for translation
 // (e.g. command names whose display text is set dynamically)
-const translationBlacklist: string[] = ["don't use", "Toggle Windows Previewer", "Toggle Windows Search Filter"];
+const translationBlacklist: string[] = ["Toggle Windows Previewer", "Toggle Windows Search Filter"];
 
 const DEFAULT_SERVER = "https://www.apptranslator.org";
 const LOCAL_SERVER = "http://127.0.0.1:9311";
@@ -44,9 +48,8 @@ const APP_NAME = "SumatraPDF";
 
 const workDir = ".work";
 const translationsTxtPath = join(workDir, "translations.txt");
-// legacy path kept only for cleanup messaging; packing is pack-embedded.ts
 
-const translationPattern = /\b_TR[ANW]?\("(.*?)"\)/g;
+const translationPattern = /\b(?:TrN|Tr)\("(.*?)"\)/g;
 
 type AiProvider = "claude" | "grok" | "none";
 
@@ -55,7 +58,6 @@ interface CliArgs {
   ai: AiProvider;
   langs: Set<string> | null; // null = all
   maxSubmit: number; // 0 = unlimited
-  skipLzsa: boolean;
   retranslate: boolean; // refill existing AI/wrong translations for --lang
 }
 
@@ -64,7 +66,6 @@ function parseArgs(argv: string[]): CliArgs {
   let ai: AiProvider = "claude";
   let langs: Set<string> | null = null;
   let maxSubmit = 0;
-  let skipLzsa = false;
   let retranslate = false;
 
   for (let i = 0; i < argv.length; i++) {
@@ -91,8 +92,6 @@ function parseArgs(argv: string[]): CliArgs {
       maxSubmit = parseInt(argv[++i], 10) || 0;
     } else if (a.startsWith("--max-submit=")) {
       maxSubmit = parseInt(a.slice("--max-submit=".length), 10) || 0;
-    } else if (a === "--skip-lzsa") {
-      skipLzsa = true;
     } else if (a === "--retranslate") {
       retranslate = true;
     } else if (a === "--help" || a === "-h") {
@@ -103,8 +102,7 @@ function parseArgs(argv: string[]): CliArgs {
   --no-ai              same as --ai=none
   --lang CODE          only fill this language (repeatable; br-pt/pt-br → br)
   --retranslate        refill AI-authored (and Breton-looking br) strings; requires --lang
-  --max-submit N       stop after N AI submissions (testing)
-  --skip-lzsa          do not run MakeLZSA`);
+  --max-submit N       stop after N AI submissions (testing)`);
       process.exit(0);
     } else {
       throw new Error(`Unknown arg: ${a} (try --help)`);
@@ -113,7 +111,7 @@ function parseArgs(argv: string[]): CliArgs {
   if (retranslate && (!langs || langs.size === 0)) {
     throw new Error("--retranslate requires --lang");
   }
-  return { server: server.replace(/\/$/, ""), ai, langs, maxSubmit, skipLzsa, retranslate };
+  return { server: server.replace(/\/$/, ""), ai, langs, maxSubmit, retranslate };
 }
 
 // Project codes are not always ISO 639-1 (br = Brazilian Portuguese, not Breton).
@@ -133,17 +131,25 @@ function extractTranslations(s: string): string[] {
   for (const match of s.matchAll(translationPattern)) {
     res.push(match[1]);
   }
+  for (const match of s.matchAll(/\bHostTr\((?:StrL\()?"(.*?)"\)/g)) {
+    res.push(match[1]);
+  }
   return res;
 }
 
 function getFilesToProcess(): string[] {
   const res: string[] = [];
-  const entries = readdirSync("src", { withFileTypes: true });
-  for (const entry of entries) {
-    if (entry.isFile() && extname(entry.name).toLowerCase() === ".cpp") {
-      res.push(join("src", entry.name));
+  const walk = (dir: string) => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const path = join(dir, entry.name);
+      if (entry.isDirectory()) {
+        walk(path);
+      } else if (entry.isFile() && extname(entry.name).toLowerCase() === ".cpp") {
+        res.push(path);
+      }
     }
-  }
+  };
+  walk("src");
   return res;
 }
 
@@ -160,11 +166,35 @@ function extractStringsFromCFilesNoPaths(): string[] {
   return unique;
 }
 
-function extractStringsToTranslate(): string[] {
+// home page tips: one per line of the sumatraTips raw string, translated at
+// runtime with Tr(line). Their markup ([text](link), (Kbd/...)) must survive
+const tipsPattern = /^(?:static )?Str sumatraTips = StrL\(R"tips\(([\s\S]*?)\)tips"\);/m;
+
+function extractTips(): string[] {
+  const tips: string[] = [];
+  // orig and ng share the tips
+  {
+    const path = join("src", "shared", "HomePageCommon.cpp");
+    const m = tipsPattern.exec(readFileSync(path, "utf-8"));
+    if (!m) throw new Error(`sumatraTips not found in ${path}`);
+    tips.push(
+      ...m[1]
+        .split("\n")
+        .map((s) => s.trim())
+        .filter((s) => s.length > 0),
+    );
+  }
+  console.log(`${tips.length} tips`);
+  return tips;
+}
+
+export function extractStringsToTranslate(): string[] {
   const strs = extractStringsFromCFilesNoPaths();
+  strs.push(...extractTips());
   for (let i = 1; i < commands.length; i += 2) {
     strs.push(commands[i]);
   }
+  strs.push(...commandAltDescs.map(([, desc]) => desc));
   const unique = [...new Set(strs)];
   for (const bl of translationBlacklist) {
     if (!unique.includes(bl)) {
@@ -306,6 +336,25 @@ function fixTranslation(s: string): string {
   return s;
 }
 
+// command palette switches ("& Thumbnails"): the character and space are the
+// mode prefix and must start every translation. Translators took "&" for an
+// access key and dropped it ("Duimnaels", "サムネイル(&T)").
+const kPalettePrefixRe = /^([>@#$%&*=]) \S/;
+
+function fixPalettePrefix(english: string, line: string): string {
+  const m = kPalettePrefixRe.exec(english);
+  const colonIdx = line.indexOf(":");
+  if (!m || colonIdx < 0) return line;
+  const prefix = m[1] + " ";
+  let t = line.slice(colonIdx + 1);
+  if (t.startsWith(prefix)) return line;
+  // "&Vignette" => "Vignette", "サムネイル(&T)" => "サムネイル"
+  if (t.startsWith(m[1])) t = t.slice(1);
+  t = t.replace(/\s*\(&.\)$/, "").trim();
+  if (t.length === 0) return line;
+  return `${line.slice(0, colonIdx)}:${prefix}${t}`;
+}
+
 function fixTranslations(d: string): { fixed: string; badTranslations: BadTranslation[] } {
   const badTranslations: BadTranslation[] = [];
   const lines = d.split("\n");
@@ -318,7 +367,7 @@ function fixTranslations(d: string): { fixed: string; badTranslations: BadTransl
       result.push(line);
       continue;
     }
-    const fixed = fixTranslation(line);
+    const fixed = fixPalettePrefix(currString, fixTranslation(line));
     if (line !== fixed) {
       badTranslations.push({ currString, orig: line, fixed });
     }
@@ -432,40 +481,179 @@ function parseTranslations(d: string): ParsedTranslations {
   return { perLang, allStrings, fromServer: clonePerLang(perLang) };
 }
 
+function existingTranslation(
+  perLang: Map<string, Map<string, string>>,
+  lang: string,
+  english: string,
+): string | undefined {
+  const t = perLang.get(lang)?.get(english);
+  return t !== undefined && t.length > 0 ? t : undefined;
+}
+
 function stripAmpersand(s: string): string {
   return s.replaceAll("&", "");
 }
 
-/** Fill untranslated no-& strings from matching & translations (local only until submitted). */
-function autoAddNoPrefixTranslations(pt: ParsedTranslations): Map<string, Map<string, string>> {
+// RFC 4180: fields separated by ',', quoted with '"', '""' inside quotes is
+// a literal quote, newlines allowed inside quotes
+function parseCsv(text: string): string[][] {
+  const rows: string[][] = [];
+  let row: string[] = [];
+  let field = "";
+  let inQuotes = false;
+  const n = text.length;
+  for (let i = 0; i < n; i++) {
+    const c = text[i];
+    if (inQuotes) {
+      if (c !== '"') {
+        field += c;
+      } else if (text[i + 1] === '"') {
+        field += '"';
+        i++;
+      } else {
+        inQuotes = false;
+      }
+      continue;
+    }
+    if (c === '"') {
+      inQuotes = true;
+    } else if (c === ",") {
+      row.push(field);
+      field = "";
+    } else if (c === "\n" || c === "\r") {
+      if (c === "\r" && text[i + 1] === "\n") i++;
+      row.push(field);
+      rows.push(row);
+      row = [];
+      field = "";
+    } else {
+      field += c;
+    }
+  }
+  if (field.length > 0 || row.length > 0) {
+    row.push(field);
+    rows.push(row);
+  }
+  return rows;
+}
+
+// latest translation of every string the server ever had, active or not:
+// lang -> english -> translation. Empty translation means removed.
+type ServerHistory = Map<string, Map<string, string>>;
+
+const kHistoryRecordTrans = "t";
+const kHistoryRecordFields = 6; // t, time, user, lang, english, translation
+
+// GET /api/dltranshist returns the whole edits log, oldest first, so the
+// last edit of a (lang, english) pair wins
+async function downloadHistory(server: string): Promise<ServerHistory> {
+  const timeStart = performance.now();
+  const uri = `${server}/api/dltranshist?app=${encodeURIComponent(APP_NAME)}&size=0`;
+  const resp = await fetch(uri);
+  if (!resp.ok) {
+    const body = await resp.text();
+    throw new Error(`dltranshist HTTP ${resp.status}: ${body.slice(0, 200)}`);
+  }
+  const text = await resp.text();
+  const hist: ServerHistory = new Map();
+  let nEdits = 0;
+  for (const rec of parseCsv(text)) {
+    if (rec[0] !== kHistoryRecordTrans || rec.length !== kHistoryRecordFields) continue;
+    const [, , , lang, english, translation] = rec;
+    let m = hist.get(lang);
+    if (!m) {
+      m = new Map();
+      hist.set(lang, m);
+    }
+    m.set(english, translation);
+    nEdits++;
+  }
+  const elapsed = ((performance.now() - timeStart) / 1000).toFixed(1);
+  console.log(`history: ${nEdits} edits, ${hist.size} langs, ${text.length} bytes in ${elapsed}s`);
+  return hist;
+}
+
+// translations found under the same English text with '&' removed
+interface StrippedMatch {
+  english: string;
+  translation: string;
+}
+
+// lang -> english without '&' -> translated strings that share it
+type StrippedIndex = Map<string, Map<string, StrippedMatch[]>>;
+
+function addToIndex(index: StrippedIndex, lang: string, english: string, translation: string): void {
+  if (translation.length === 0) return;
+  let byStripped = index.get(lang);
+  if (!byStripped) {
+    byStripped = new Map();
+    index.set(lang, byStripped);
+  }
+  const key = stripAmpersand(english);
+  let matches = byStripped.get(key);
+  if (!matches) {
+    matches = [];
+    byStripped.set(key, matches);
+  }
+  const existing = matches.find((m) => m.english === english);
+  if (existing) {
+    existing.translation = translation;
+  } else {
+    matches.push({ english, translation });
+  }
+}
+
+// server history first, then the current download on top (it is newer)
+function buildStrippedIndex(hist: ServerHistory | null, pt: ParsedTranslations): StrippedIndex {
+  const index: StrippedIndex = new Map();
+  for (const [lang, m] of hist ?? []) {
+    for (const [english, translation] of m) addToIndex(index, lang, english, translation);
+  }
+  for (const [lang, m] of pt.fromServer) {
+    for (const [english, translation] of m) addToIndex(index, lang, english, translation);
+  }
+  return index;
+}
+
+// "Show &Toolbar" -> "Sh&ow Toolbar" keeps the translation as is (its own
+// '&' stays where the translator put it); "Show Toolbar" from "Show &Toolbar"
+// drops the '&'. A match whose '&' status equals ours is preferred.
+function pickStrippedMatch(english: string, matches: StrippedMatch[]): string | undefined {
+  const wantAmp = english.includes("&");
+  const others = matches.filter((m) => m.english !== english);
+  const same = others.filter((m) => m.english.includes("&") === wantAmp);
+  const m = same[same.length - 1] ?? others[others.length - 1];
+  if (!m) return undefined;
+  return wantAmp ? m.translation : stripAmpersand(m.translation);
+}
+
+/** Fill untranslated strings from translations of the same text modulo '&' (local only until submitted). */
+function autoAddStrippedMatches(pt: ParsedTranslations, index: StrippedIndex): Map<string, Map<string, string>> {
   const { perLang, allStrings } = pt;
   const added = new Map<string, Map<string, string>>();
   let nAdded = 0;
   for (const [lang, translations] of perLang) {
-    const cache = new Map<string, string>();
-    for (const [orig, trans] of translations) {
-      if (orig.includes("&")) {
-        cache.set(stripAmpersand(orig), stripAmpersand(trans));
-      }
-    }
+    if (lang === "en") continue;
+    const byStripped = index.get(lang);
+    if (!byStripped) continue;
     for (const s of allStrings) {
-      if (s.includes("&")) continue;
-      if (translations.has(s)) continue;
-      const trans = cache.get(s);
-      if (trans) {
-        translations.set(s, trans);
-        let m = added.get(lang);
-        if (!m) {
-          m = new Map();
-          added.set(lang, m);
-        }
-        m.set(s, trans);
-        nAdded++;
+      if (existingTranslation(perLang, lang, s) !== undefined) continue;
+      const matches = byStripped.get(stripAmpersand(s));
+      if (!matches) continue;
+      const trans = pickStrippedMatch(s, matches);
+      if (!trans) continue;
+      translations.set(s, trans);
+      let m = added.get(lang);
+      if (!m) {
+        m = new Map();
+        added.set(lang, m);
       }
+      m.set(s, trans);
+      nAdded++;
     }
   }
   if (nAdded > 0) {
-    console.log(`autoAddNoPrefixTranslations: ${nAdded} candidates to submit`);
+    console.log(`autoAddStrippedMatches: ${nAdded} candidates to submit`);
   }
   return added;
 }
@@ -733,15 +921,6 @@ function previewEnglish(s: string): string {
   return s.length > 70 ? s.slice(0, 70) + "…" : s;
 }
 
-function existingTranslation(
-  perLang: Map<string, Map<string, string>>,
-  lang: string,
-  english: string,
-): string | undefined {
-  const t = perLang.get(lang)?.get(english);
-  return t !== undefined && t.length > 0 ? t : undefined;
-}
-
 function setTranslation(
   perLang: Map<string, Map<string, string>>,
   lang: string,
@@ -821,7 +1000,9 @@ For each index i, output the marker <<<i>>> on its own line, then the translatio
 Do not put the marker inside the translation. Do not renumber. Do not skip indices.
 You may use quotes, newlines, and HTML freely inside translations — only the <<<i>>> lines are special.
 Keep placeholders like %s, %d, %1 unchanged.
+Some strings have markup: in [text](target) translate only the text and keep (target) as is; keep (Kbd/...) and (Key/...) unchanged.
 Keep access-key ampersands if present (e.g. "&File" → localized with & before the hotkey letter).
+A string that starts with one of > @ # $ % & * = and a space (e.g. "& Thumbnails") is a command palette mode: keep that character and space at the start and translate the rest ("& Miniaturen").
 No markdown fences. No explanation before or after.
 
 Input:
@@ -1074,14 +1255,14 @@ async function fillMissingWithAiAndSubmit(
   const user = args.ai === "grok" ? "ai grok" : "ai claude";
   const submitted = { n: 0 };
 
-  // submit auto-derived no-prefix translations in popularity order
+  // submit translations reused across '&' variants, in popularity order
   for (const lang of sortLangsByPopularity(autoAdded.keys())) {
     if (args.langs && !args.langs.has(lang)) continue;
     if (args.maxSubmit > 0 && submitted.n >= args.maxSubmit) break;
     const pairs = autoAdded.get(lang)!;
     const n = await submitMany(args.server, secret, "ai auto", lang, pairs, args.maxSubmit, submitted, pt);
     if (n > 0) {
-      console.log(`submitted ${n} auto no-prefix translations for ${lang}`);
+      console.log(`submitted ${n} reused translations for ${lang}`);
     }
   }
 
@@ -1215,15 +1396,6 @@ function writeTranslationsForBinary(pt: ParsedTranslations, downloadSha1: string
   console.log(`fully translated langs: ${fullyTranslated}`);
 }
 
-async function makeLzsa(): Promise<void> {
-  if (!existsSync(translationsTxtPath)) {
-    throw new Error(`missing ${translationsTxtPath}; run without --skip-lzsa after download`);
-  }
-  // pack translations into the combined embedded.dat (with marked/mermaid/manual)
-  const { packEmbedded } = await import("./pack-embedded");
-  await packEmbedded();
-}
-
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   console.log(`apptranslator server: ${args.server}`);
@@ -1235,9 +1407,6 @@ async function main() {
   if (!secret) {
     console.log("TRANS_UPLOAD_SECRET not set; skipping download/AI");
     writeEmptyTranslations();
-    if (!args.skipLzsa) {
-      await makeLzsa();
-    }
     return;
   }
 
@@ -1265,9 +1434,17 @@ async function main() {
   // 2) push cleaned suspicious translations back to apptranslator (always, even --no-ai)
   let nFixed = await submitFixedSuspicious(args.server, secret, badTranslations);
 
-  // parse + auto-fill no-prefix candidates
+  // parse + reuse translations of the same text modulo '&' (a renamed
+  // access key is a new string to the server, but the history has the old one)
   let pt = parseTranslations(fullText);
-  const autoAdded = autoAddNoPrefixTranslations(pt);
+  let hist: ServerHistory | null = null;
+  try {
+    hist = await downloadHistory(args.server);
+  } catch (e) {
+    console.log(`history download failed (${e}); reusing only from the current download`);
+  }
+  const index = buildStrippedIndex(hist, pt);
+  const autoAdded = autoAddStrippedMatches(pt, index);
 
   if (args.retranslate && args.langs) {
     await markRetranslateAsMissing(args.server, args.langs, pt);
@@ -1279,7 +1456,7 @@ async function main() {
   const ensureLangs =
     args.langs && args.langs.size > 0 ? [...args.langs] : pt.perLang.size > 0 ? [...pt.perLang.keys()] : null;
 
-  // missing after in-memory auto-fill (auto-added still need server submit)
+  // missing after in-memory reuse (reused ones still need server submit)
   const missingAfterAuto = findMissing(pt, args.langs, ensureLangs);
   let nMissing = 0;
   for (const list of missingAfterAuto.values()) nMissing += list.length;
@@ -1287,7 +1464,7 @@ async function main() {
   for (const m of autoAdded.values()) nAuto += m.size;
 
   console.log(
-    `missing after auto no-prefix: ${nMissing} across ${missingAfterAuto.size} langs (auto-derived to submit: ${nAuto}); supported=${supportedLangs.length}`,
+    `missing after reuse: ${nMissing} across ${missingAfterAuto.size} langs (auto-derived to submit: ${nAuto}); supported=${supportedLangs.length}`,
   );
 
   let nAiSubmitted = 0;
@@ -1298,7 +1475,7 @@ async function main() {
       );
     }
   } else if (nMissing > 0 || nAuto > 0) {
-    // 3) AI translate + submit (and auto no-prefix submit)
+    // 3) submit reused, then AI translate + submit
     nAiSubmitted = await fillMissingWithAiAndSubmit(args, secret, pt, autoAdded, ensureLangs);
   }
 
@@ -1313,16 +1490,14 @@ async function main() {
     }
     fullText = `AppTranslator: ${APP_NAME}\n${dl.sha1}\n${fixed2.fixed}\n`;
     pt = parseTranslations(fullText);
-    // local-only auto no-prefix for good subset (already on server if submitted above)
-    autoAddNoPrefixTranslations(pt);
+    // local-only reuse for what --max-submit left out (the rest is on the server now)
+    autoAddStrippedMatches(pt, buildStrippedIndex(hist, pt));
   }
 
-  // 5) write filtered translations for the binary + lzsa
+  // 5) write filtered translations for the binary; the exe's prebuild packs
+  //    them into IDR_EMBEDDED_PAK on the next build
   //    (sha1 line is the full download sha1 for cache comparison on next run)
   writeTranslationsForBinary(pt, dl.sha1);
-  if (!args.skipLzsa) {
-    await makeLzsa();
-  }
 }
 
-await main();
+if (import.meta.main) await main();

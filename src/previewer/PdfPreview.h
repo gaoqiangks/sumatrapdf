@@ -14,6 +14,7 @@ enum class PreviewType {
     Mobi,
     Cbx,
     Tga,
+    Ofd,
 };
 
 class PdfPreview : public IThumbnailProvider,
@@ -109,7 +110,7 @@ class PdfPreview : public IThumbnailProvider,
         if (!m_site) {
             return S_FALSE;
         }
-        ScopedComQIPtr<IPreviewHandlerFrame> frame(m_site);
+        AutoReleaseComQIPtr<IPreviewHandlerFrame> frame(m_site);
         if (!frame) {
             return S_FALSE;
         }
@@ -138,6 +139,10 @@ class PdfPreview : public IThumbnailProvider,
             DestroyWindow(m_hwnd);
             m_hwnd = nullptr;
         }
+        userZoom = 0;
+        panX = 0;
+        panY = 0;
+        panning = false;
         str::FreePtr(&m_data);
         if (m_engine) {
             m_engine->Release();
@@ -167,6 +172,12 @@ class PdfPreview : public IThumbnailProvider,
     }
 
     PageRenderer* renderer = nullptr;
+    // 0 = fit page; otherwise engine-scale zoom (1 = 100%)
+    float userZoom = 0.f;
+    int panX = 0;
+    int panY = 0;
+    bool panning = false;
+    Point panLast;
 
   protected:
     AtomicInt m_lRef = 1;
@@ -175,9 +186,9 @@ class PdfPreview : public IThumbnailProvider,
     // the file's bytes, owned; freed once the engine has been built from them
     Str m_data;
     EngineBase* m_engine = nullptr;
-    ScopedGdiPlus* m_gdiScope = nullptr;
+    AutoGdiPlusShutdown* m_gdiScope = nullptr;
     // state for IPreviewHandler
-    ScopedComPtr<IUnknown> m_site;
+    AutoReleaseComPtr<IUnknown> m_site;
     HWND m_hwnd = nullptr;
     HWND m_hwndParent = nullptr;
     Rect m_rcParent;

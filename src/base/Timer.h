@@ -24,11 +24,13 @@ inline TimeStamp TimeGet() {
 }
 
 inline double TimeSinceInMs(TimeStamp start) {
+    static LARGE_INTEGER freq = [] {
+        LARGE_INTEGER f;
+        QueryPerformanceFrequency(&f);
+        return f;
+    }();
     LARGE_INTEGER t = TimeGet();
-    LARGE_INTEGER freq;
-    QueryPerformanceFrequency(&freq);
-    double timeInSecs = (double)(t.QuadPart - start.QuadPart) / (double)freq.QuadPart;
-    return timeInSecs * 1000.0;
+    return (double)(t.QuadPart - start.QuadPart) * 1000.0 / (double)freq.QuadPart;
 }
 #else
 struct TimeStamp {

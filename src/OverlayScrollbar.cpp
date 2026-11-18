@@ -5,14 +5,14 @@
 #include "gui/Dpi.h"
 #include "base/Win.h"
 
-#include "OverlayScrollbar.h"
 #include "Theme.h"
+#include "OverlayScrollbar.h"
+#include "OverlayScrollbarCommon.h"
 
-#define OVERLAY_SCROLLBAR_CLASS L"SUMATRA_OVERLAY_SCROLLBAR"
+constexpr const WCHAR* kOverlayScrollbarClass = L"SUMATRA_OVERLAY_SCROLLBAR";
 
 static bool gScrollbarClassRegistered = false;
 
-bool gOverlayScrollbarSuppressThick = false;
 // if true, draw small filled triangles instead of chevrons
 static bool gThickArrows = true;
 
@@ -23,108 +23,13 @@ static Point gLastMousePos = {-1, -1};
 static constexpr UINT_PTR kMouseTrackTimerID = 100;
 static constexpr int kMouseTrackIntervalMs = 50;
 
-// Derive scrollbar colors from current theme
-static Color ThemeTrackColor() {
-    Color bg = ThemeControlBackgroundColor();
-    return bg;
+// the names ng uses for these, so the code below is the same in both
+bool IsAlwaysThickMode(OverlayScrollbar* sb) {
+    return sb->mode == OverlayScrollbar::Mode::Thick;
 }
 
-static Color ThemeThumbColor() {
-    Color bg = ThemeControlBackgroundColor();
-    return AccentColor(bg, 100);
-}
-
-static Color ThemeThumbHoverColor() {
-    Color bg = ThemeControlBackgroundColor();
-    return AccentColor(bg, 140);
-}
-
-static constexpr int kMinThumbSize = 20;
-static constexpr u8 kAlphaThin = 180;
-static constexpr u8 kAlphaThick = 220;
-
-using State = OverlayScrollbar::State;
-
-static bool IsThick(OverlayScrollbar* sb) {
-    return sb->state == State::SmartThick || sb->state == State::AlwaysThick;
-}
-
-static bool IsVisible(OverlayScrollbar* sb) {
-    return sb->state == State::SmartThin || sb->state == State::SmartThick || sb->state == State::AlwaysThick;
-}
-
-// scrollbar is active: shown or auto-hidden but ready to appear
-static bool IsActive(OverlayScrollbar* sb) {
-    return sb->state != State::Hidden;
-}
-
-static int ScaledWidth(OverlayScrollbar* sb, bool thick) {
-    return thick ? sb->thickWidth : sb->thinWidth;
-}
-
-static bool IsVert(OverlayScrollbar* sb) {
-    return sb->type == OverlayScrollbar::Type::Vert;
-}
-
-// Get the track rect in client coords of the scrollbar window
-static Rect GetTrackRect(OverlayScrollbar* sb) {
-    Rect rc = HwndClientRect(sb->hwnd);
-    int arrowSize = 0;
-    int gap = 0;
-    if (IsThick(sb)) {
-        arrowSize = IsVert(sb) ? rc.dx : rc.dy;
-        gap = DpiScale(2);
-    }
-    int total = arrowSize + gap;
-    if (IsVert(sb)) {
-        return {0, total, rc.dx, rc.dy - (2 * total)};
-    }
-    return {total, 0, rc.dx - (2 * total), rc.dy};
-}
-
-// Calculate thumb rect within the track
-static Rect GetThumbRect(OverlayScrollbar* sb) {
-    Rect track = GetTrackRect(sb);
-    int range = sb->nMax - sb->nMin + 1;
-    if (range <= 0 || (int)sb->nPage >= range) {
-        return track;
-    }
-
-    int trackLen = IsVert(sb) ? track.dy : track.dx;
-    int thumbLen = MulDiv(trackLen, (int)sb->nPage, range);
-    thumbLen = std::max(thumbLen, DpiScale(kMinThumbSize));
-
-    int scrollableTrack = trackLen - thumbLen;
-    int scrollableRange = range - (int)sb->nPage;
-    int pos = sb->isDragging ? sb->nTrackPos : sb->nPos;
-    int thumbOffset = 0;
-    if (scrollableRange > 0) {
-        thumbOffset = MulDiv(pos - sb->nMin, scrollableTrack, scrollableRange);
-    }
-    thumbOffset = setMinMax(thumbOffset, 0, scrollableTrack);
-
-    if (IsVert(sb)) {
-        return {track.x, track.y + thumbOffset, track.dx, thumbLen};
-    }
-    return {track.x + thumbOffset, track.y, thumbLen, track.dy};
-}
-
-static Rect GetArrowTopRect(OverlayScrollbar* sb) {
-    Rect rc = HwndClientRect(sb->hwnd);
-    int arrowSize = IsVert(sb) ? rc.dx : rc.dy;
-    if (IsVert(sb)) {
-        return {0, 0, rc.dx, arrowSize};
-    }
-    return {0, 0, arrowSize, rc.dy};
-}
-
-static Rect GetArrowBottomRect(OverlayScrollbar* sb) {
-    Rect rc = HwndClientRect(sb->hwnd);
-    int arrowSize = IsVert(sb) ? rc.dx : rc.dy;
-    if (IsVert(sb)) {
-        return {0, rc.dy - arrowSize, rc.dx, arrowSize};
-    }
-    return {rc.dx - arrowSize, 0, arrowSize, rc.dy};
+Rect ClientRect(OverlayScrollbar* sb) {
+    return HwndClientRect(sb->hwnd);
 }
 
 static void SendScrollMsg(OverlayScrollbar* sb, UINT scrollMsg, WPARAM wp) {
@@ -156,6 +61,50 @@ static bool IsOrIsParentOf(HWND hwnd, HWND child) {
         child = GetParent(child);
     }
     return false;
+}
+
+// Sit just above the owner frame, so the bar is seen but doesn't cover the
+// windows floating over the canvas (the annotation property row, the command
+// palette). SetWindowPos inserts *after* the window it is given, so that is
+// the one directly above the frame, not the frame itself (issue #6093).
+static HWND ScrollbarZOrderAfter(OverlayScrollbar* sb) {
+    HWND root = sb->hwndOwner ? GetAncestor(sb->hwndOwner, GA_ROOT) : nullptr;
+    if (!root) {
+        return HWND_TOP;
+    }
+    HWND above = GetWindow(root, GW_HWNDPREV);
+    // skip ourselves: we are what is directly above the frame once shown
+    while (above == sb->hwnd) {
+        above = GetWindow(above, GW_HWNDPREV);
+    }
+    return above ? above : HWND_TOP;
+}
+
+static void ShowScrollbarHwnd(OverlayScrollbar* sb) {
+    SetWindowPos(sb->hwnd, ScrollbarZOrderAfter(sb), 0, 0, 0, 0,
+                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW | SWP_NOOWNERZORDER);
+}
+
+// Cursor is over the owner canvas, not over another top-level window covering it
+static bool MouseOverOwnerSurface(OverlayScrollbar* sb, Point pt) {
+    Rect ownerRc = HwndWindowRect(sb->hwndOwner);
+    if (!ownerRc.Contains(pt)) {
+        return false;
+    }
+    POINT p{pt.x, pt.y};
+    HWND hit = WindowFromPoint(p);
+    if (!hit) {
+        return false;
+    }
+    if (hit == sb->hwnd) {
+        return true;
+    }
+    HWND ownerRoot = GetAncestor(sb->hwndOwner, GA_ROOT);
+    HWND hitRoot = GetAncestor(hit, GA_ROOT);
+    if (ownerRoot && hitRoot && hitRoot != ownerRoot) {
+        return false;
+    }
+    return true;
 }
 
 // Update the layered window with the current appearance
@@ -372,7 +321,7 @@ static void MakeLayeredWindowTransparent(HWND hwnd) {
     UpdateLayeredWindow(hwnd, nullptr, nullptr, nullptr, nullptr, nullptr, 0, &blend, ULW_ALPHA);
 }
 
-static void SetState(OverlayScrollbar* sb, State newState) {
+void SetState(OverlayScrollbar* sb, State newState) {
     if (sb->state == newState) {
         return;
     }
@@ -383,7 +332,7 @@ static void SetState(OverlayScrollbar* sb, State newState) {
     OverlayScrollbarUpdatePos(sb);
     if (nowVisible) {
         if (!wasVisible) {
-            ShowWindow(sb->hwnd, SW_SHOWNOACTIVATE);
+            ShowScrollbarHwnd(sb);
         }
         PaintScrollbar(sb);
     } else {
@@ -399,34 +348,11 @@ static void SetState(OverlayScrollbar* sb, State newState) {
     }
 }
 
-static void ShowScrollbarWindow(OverlayScrollbar* sb, bool thick) {
-    // Don't revert to thin while user is dragging the thumb
-    if (sb->isDragging && !thick) {
-        return;
-    }
-    if (sb->mode == OverlayScrollbar::Mode::Thick) {
-        SetState(sb, State::AlwaysThick);
-    } else {
-        SetState(sb, thick ? State::SmartThick : State::SmartThin);
-    }
-}
-
-static void HideScrollbarWindow(OverlayScrollbar* sb) {
-    // Don't hide while user is dragging the thumb
-    if (sb->isDragging) {
-        return;
-    }
-    if (sb->mode == OverlayScrollbar::Mode::Thick) {
-        return; // never hide in Thick mode
-    }
-    SetState(sb, State::SmartInvisible);
-}
-
 // Restart the thin-bar auto-hide countdown (showAfterScrollMs). SetState only
 // arms the timer on a state transition, so continuous scroll while already
 // SmartThin would otherwise let the earlier mouse-stop / first-reveal timer
 // fire and hide the bar mid-scroll.
-static void RestartSmartThinAutoHide(OverlayScrollbar* sb) {
+void RestartSmartThinAutoHide(OverlayScrollbar* sb) {
     if (!sb->hwnd || sb->state != State::SmartThin) {
         return;
     }
@@ -470,15 +396,15 @@ static void CALLBACK MouseTrackTimerProc(HWND /*hwnd*/, UINT /*msg*/, UINT_PTR /
             continue;
         }
 
-        // Check if mouse is over the owner window's client area
-        Rect ownerRc = HwndWindowRect(sb->hwndOwner);
-        bool overOwner = ownerRc.Contains(pt);
+        // Check if mouse is over the owner window's client area, and not over a
+        // different top-level window covering it (edit annotations, etc.)
+        bool overOwner = MouseOverOwnerSurface(sb, pt);
 
         // Is the mouse over the band the thick scrollbar occupies? Being merely
         // near it isn't enough: the thick bar used to pop out while the mouse
         // was still over the page, which is distracting while reading
         Rect sbRect = GetScrollbarScreenRect(sb);
-        bool overScrollbar = sbRect.Contains(pt);
+        bool overScrollbar = sbRect.Contains(pt) && overOwner;
 
         if (sb->isDragging) {
             // Don't change state while dragging
@@ -536,6 +462,20 @@ static void StopMouseTracking() {
 
 // ---- WndProc for scrollbar window (handles clicks, drag, wheel) ----
 
+// the left button is up or the capture is gone: stop auto-repeat, finish a drag
+static void EndScrollbarPress(OverlayScrollbar* sb) {
+    if (sb->repeatScrollCode != 0) {
+        sb->repeatScrollCode = 0;
+        KillTimer(sb->hwnd, OverlayScrollbar::kTimerRepeatScroll);
+    }
+    if (sb->isDragging) {
+        sb->isDragging = false;
+        sb->nPos = sb->nTrackPos;
+        PaintScrollbar(sb);
+        SendScrollMsg(sb, ScrollMsgForType(sb), MAKEWPARAM(SB_THUMBPOSITION, sb->nPos));
+    }
+}
+
 static LRESULT CALLBACK WndProcOverlayScrollbar(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     OverlayScrollbar* sb = (OverlayScrollbar*)GetWindowLongPtrW(hwnd, GWLP_USERDATA);
     if (!sb) {
@@ -577,10 +517,8 @@ static LRESULT CALLBACK WndProcOverlayScrollbar(HWND hwnd, UINT msg, WPARAM wp, 
                 int ptInTrack = IsVert(sb) ? my : mx;
                 Rect track = GetTrackRect(sb);
                 int range = sb->nMax - sb->nMin + 1;
-                int thumbLen = MulDiv(IsVert(sb) ? track.dy : track.dx, (int)sb->nPage, range);
-                int minThumb = DpiScale(kMinThumbSize);
-                thumbLen = std::max(thumbLen, minThumb);
                 int trackLen = IsVert(sb) ? track.dy : track.dx;
+                int thumbLen = ThumbLen(sb, trackLen);
                 int scrollableTrack = trackLen - thumbLen;
                 int scrollableRange = range - (int)sb->nPage;
 
@@ -647,21 +585,7 @@ static LRESULT CALLBACK WndProcOverlayScrollbar(HWND hwnd, UINT msg, WPARAM wp, 
 
             // Shift+click: jump thumb center to click position
             if (GetKeyState(VK_SHIFT) & 0x8000) {
-                Rect track = GetTrackRect(sb);
-                int range = sb->nMax - sb->nMin + 1;
-                int trackLen = IsVert(sb) ? track.dy : track.dx;
-                int thumbLen = MulDiv(trackLen, (int)sb->nPage, range);
-                int minThumb = DpiScale(kMinThumbSize);
-                thumbLen = std::max(thumbLen, minThumb);
-                int scrollableTrack = trackLen - thumbLen;
-                int scrollableRange = range - (int)sb->nPage;
-                int clickInTrack = (IsVert(sb) ? my : mx) - (IsVert(sb) ? track.y : track.x);
-                int thumbOffset = clickInTrack - (thumbLen / 2);
-                thumbOffset = setMinMax(thumbOffset, 0, scrollableTrack);
-                int newPos = sb->nMin;
-                if (scrollableTrack > 0 && scrollableRange > 0) {
-                    newPos = sb->nMin + MulDiv(thumbOffset, scrollableRange, scrollableTrack);
-                }
+                int newPos = PosForThumbCenteredAt(sb, IsVert(sb) ? my : mx);
                 sb->nTrackPos = newPos;
                 PaintScrollbar(sb);
                 SendScrollMsg(sb, ScrollMsgForType(sb), MAKEWPARAM(SB_THUMBTRACK, newPos));
@@ -704,17 +628,14 @@ static LRESULT CALLBACK WndProcOverlayScrollbar(HWND hwnd, UINT msg, WPARAM wp, 
         }
 
         case WM_LBUTTONUP:
-            if (sb->repeatScrollCode != 0) {
-                sb->repeatScrollCode = 0;
-                KillTimer(hwnd, OverlayScrollbar::kTimerRepeatScroll);
-            }
-            if (sb->isDragging) {
-                sb->isDragging = false;
-                sb->nPos = sb->nTrackPos;
-                PaintScrollbar(sb);
-                SendScrollMsg(sb, ScrollMsgForType(sb), MAKEWPARAM(SB_THUMBPOSITION, sb->nPos));
-            }
+            EndScrollbarPress(sb);
             ReleaseCapture();
+            return 0;
+
+        // capture taken away (Alt+Tab, a dialog) while an arrow or the thumb is
+        // held: no button-up will come, so end the auto-repeat and the drag now
+        case WM_CAPTURECHANGED:
+            EndScrollbarPress(sb);
             return 0;
 
         case WM_MOUSEWHEEL:
@@ -755,7 +676,7 @@ static void RegisterScrollbarClass() {
     wcex.lpfnWndProc = WndProcOverlayScrollbar;
     wcex.hInstance = GetModuleHandleW(nullptr);
     wcex.hCursor = GetCachedCursor(IDC_ARROW);
-    wcex.lpszClassName = OVERLAY_SCROLLBAR_CLASS;
+    wcex.lpszClassName = kOverlayScrollbarClass;
     RegisterClassExW(&wcex);
     gScrollbarClassRegistered = true;
 }
@@ -779,12 +700,12 @@ OverlayScrollbar* OverlayScrollbarCreate(HWND hwndOwner, OverlayScrollbar::Type 
     // use the top-level ancestor as owner so the scrollbar stays above its
     // own window but doesn't cover other application windows
     HWND hwndTopLevel = GetAncestor(hwndOwner, GA_ROOT);
-    sb->hwnd = CreateWindowExW(exStyle, OVERLAY_SCROLLBAR_CLASS, nullptr, style, 0, 0, 1, 1, hwndTopLevel, nullptr,
+    sb->hwnd = CreateWindowExW(exStyle, kOverlayScrollbarClass, nullptr, style, 0, 0, 1, 1, hwndTopLevel, nullptr,
                                GetModuleHandleW(nullptr), nullptr);
     SetWindowLongPtrW(sb->hwnd, GWLP_USERDATA, (LONG_PTR)sb);
 
     // Register for global mouse tracking
-    gAllScrollbars.Append(sb);
+    VecAppend(gAllScrollbars, sb);
     StartMouseTracking();
 
     return sb;
@@ -796,7 +717,7 @@ void OverlayScrollbarDestroy(OverlayScrollbar* sb) {
     }
 
     // Unregister from global mouse tracking
-    gAllScrollbars.Remove(sb);
+    VecRemove(gAllScrollbars, sb);
     if (len(gAllScrollbars) == 0) {
         StopMouseTracking();
     }
@@ -846,26 +767,6 @@ void OverlayScrollbarSetInfo(OverlayScrollbar* sb, const SCROLLINFO* si, bool re
         } else {
             ShowScrollbarWindow(sb, false);
         }
-    }
-}
-
-// Show the thin smart overlay after scroll activity (mouse wheel, keys, etc.).
-// Unlike mouse-move tracking, this does not require cursor motion (#5859).
-void OverlayScrollbarNotifyScroll(OverlayScrollbar* sb) {
-    if (!sb || !IsActive(sb) || sb->isDragging) {
-        return;
-    }
-    if (sb->mode == OverlayScrollbar::Mode::Thick) {
-        return;
-    }
-    // Leave thick-from-proximity alone; only (re)show the thin indicator.
-    if (IsThick(sb)) {
-        return;
-    }
-    if (sb->state != State::SmartThin) {
-        ShowScrollbarWindow(sb, false);
-    } else {
-        RestartSmartThinAutoHide(sb);
     }
 }
 
@@ -932,20 +833,20 @@ void OverlayScrollbarUpdatePos(OverlayScrollbar* sb) {
     }
     SetWindowLongPtrW(sb->hwnd, GWL_EXSTYLE, exStyle);
 
-    UINT swpFlags = SWP_NOACTIVATE;
+    // SWP_NOOWNERZORDER: raising an owned popup otherwise raises the owner
+    // frame over other top-level windows (command palette, annotations).
+    UINT swpFlags = SWP_NOACTIVATE | SWP_NOOWNERZORDER;
+    HWND insertAfter = nullptr;
     // re-show the window if the state says it should be visible
     // (RelayoutFrame hides overlay scrollbar windows with SW_HIDE
     // to prevent them from appearing at stale positions)
     if (IsVisible(sb) && !HwndIsVisible(sb->hwnd)) {
         swpFlags |= SWP_SHOWWINDOW;
-    }
-    // When not visible, don't change Z-order — HWND_TOP on an owned popup
-    // brings the owner (frame) to the top too, which can hide other popups
-    // like the command palette
-    if (!IsVisible(sb)) {
+        insertAfter = ScrollbarZOrderAfter(sb);
+    } else {
         swpFlags |= SWP_NOZORDER;
     }
-    SetWindowPos(sb->hwnd, IsVisible(sb) ? HWND_TOP : nullptr, x, y, w, h, swpFlags);
+    SetWindowPos(sb->hwnd, insertAfter, x, y, w, h, swpFlags);
 }
 
 // Hide the scrollbar window without stealing activation from other windows.
@@ -983,29 +884,6 @@ void OverlayScrollbarShow(OverlayScrollbar* sb, bool show) {
     }
     // re-show if window was temporarily hidden (e.g. during relayout)
     OverlayScrollbarUpdatePos(sb);
-    ShowWindow(sb->hwnd, SW_SHOWNOACTIVATE);
+    ShowScrollbarHwnd(sb);
     PaintScrollbar(sb);
-}
-
-// Change the scrollbar mode (Smart vs Thick)
-void OverlayScrollbarSetMode(OverlayScrollbar* sb, OverlayScrollbar::Mode mode) {
-    if (!sb || sb->mode == mode) {
-        return;
-    }
-    sb->mode = mode;
-    if (!IsActive(sb)) {
-        return;
-    }
-    // transition to the appropriate state for the new mode
-    if (mode == OverlayScrollbar::Mode::Thick) {
-        SetState(sb, State::AlwaysThick);
-    } else {
-        // Smart mode: start as thin, will auto-hide
-        SetState(sb, State::SmartThin);
-    }
-}
-
-// returns true if scrollbar is visible (thin, thick, or always thick)
-bool IsOverlayScrollbarVisible(OverlayScrollbar* sb) {
-    return sb && IsVisible(sb);
 }

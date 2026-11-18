@@ -29,9 +29,11 @@
 /* default page size */
 #define DEF_WIDTH 612
 #define DEF_HEIGHT 792
-#define DEF_FONTSIZE 12
+#define DEF_FONTSIZE 16
 
 #define MAX_USE_DEPTH 100
+
+typedef struct svg_text_path svg_text_path;
 
 typedef struct svg_state
 {
@@ -49,16 +51,151 @@ typedef struct svg_state
 	int fill_is_set;
 	float fill_color[3];
 	float fill_opacity;
+	float fill_alpha; /* SumatraPDF: of an rgba() fill (#6339) */
 
 	int stroke_is_set;
 	float stroke_color[3];
 	float stroke_opacity;
+	float stroke_alpha; /* SumatraPDF: of an rgba() stroke (#6339) */
 
 	const char *font_family;
 	int is_bold;
 	int is_italic;
 	int text_anchor;
+	const svg_text_path *text_path; /* SumatraPDF: inside <textPath> */
 } svg_state;
+
+/* SumatraPDF: text on a path (#6332). The referenced path flattened to line
+ * segments; glyphs are placed by their distance along it. */
+typedef struct
+{
+	float x0, y0, x1, y1, len, start;
+} svg_text_path_seg;
+
+struct svg_text_path
+{
+	svg_text_path_seg *segs;
+	int n, cap;
+	float cur_x, cur_y, sub_x, sub_y, total;
+};
+
+static void
+svg_text_path_add(fz_context *ctx, svg_text_path *tp, float x, float y)
+{
+	float dx = x - tp->cur_x, dy = y - tp->cur_y;
+	float len = sqrtf(dx * dx + dy * dy);
+	if (len > 0)
+	{
+		svg_text_path_seg *seg;
+		if (tp->n == tp->cap)
+		{
+			int cap = tp->cap ? tp->cap * 2 : 64;
+			tp->segs = fz_realloc_array(ctx, tp->segs, cap, svg_text_path_seg);
+			tp->cap = cap;
+		}
+		seg = &tp->segs[tp->n++];
+		seg->x0 = tp->cur_x;
+		seg->y0 = tp->cur_y;
+		seg->x1 = x;
+		seg->y1 = y;
+		seg->len = len;
+		seg->start = tp->total;
+		tp->total += len;
+	}
+	tp->cur_x = x;
+	tp->cur_y = y;
+}
+
+static void
+svg_text_path_moveto(fz_context *ctx, void *arg, float x, float y)
+{
+	svg_text_path *tp = arg;
+	tp->cur_x = tp->sub_x = x;
+	tp->cur_y = tp->sub_y = y;
+}
+
+static void
+svg_text_path_lineto(fz_context *ctx, void *arg, float x, float y)
+{
+	svg_text_path_add(ctx, arg, x, y);
+}
+
+static void
+svg_text_path_curveto(fz_context *ctx, void *arg, float x1, float y1, float x2, float y2, float x3, float y3)
+{
+	svg_text_path *tp = arg;
+	float x0 = tp->cur_x, y0 = tp->cur_y;
+	int i, n = 16;
+	for (i = 1; i <= n; i++)
+	{
+		float t = (float)i / n, u = 1 - t;
+		float x = u * u * u * x0 + 3 * u * u * t * x1 + 3 * u * t * t * x2 + t * t * t * x3;
+		float y = u * u * u * y0 + 3 * u * u * t * y1 + 3 * u * t * t * y2 + t * t * t * y3;
+		svg_text_path_add(ctx, tp, x, y);
+	}
+}
+
+static void
+svg_text_path_closepath(fz_context *ctx, void *arg)
+{
+	svg_text_path *tp = arg;
+	svg_text_path_add(ctx, tp, tp->sub_x, tp->sub_y);
+}
+
+static const fz_path_walker svg_text_path_walker = {
+	svg_text_path_moveto,
+	svg_text_path_lineto,
+	svg_text_path_curveto,
+	svg_text_path_closepath,
+};
+
+/* point and unit tangent at distance d along the path; 0 when d is off it */
+static int
+svg_text_path_at(const svg_text_path *tp, float d, float *x, float *y, float *tx, float *ty)
+{
+	int i;
+	if (tp->n == 0 || d < 0 || d > tp->total)
+		return 0;
+	for (i = 0; i < tp->n; i++)
+	{
+		const svg_text_path_seg *seg = &tp->segs[i];
+		if (d <= seg->start + seg->len || i == tp->n - 1)
+		{
+			float t = (d - seg->start) / seg->len;
+			*x = seg->x0 + (seg->x1 - seg->x0) * t;
+			*y = seg->y0 + (seg->y1 - seg->y0) * t;
+			*tx = (seg->x1 - seg->x0) / seg->len;
+			*ty = (seg->y1 - seg->y0) / seg->len;
+			return 1;
+		}
+	}
+	return 0;
+}
+
+/* Like fz_show_string, but trm.e is the distance along the path and each
+ * glyph is rotated to the tangent at its midpoint. */
+static fz_matrix
+svg_show_string_on_path(fz_context *ctx, fz_text *text, fz_font *user_font, fz_matrix trm, const char *s, const svg_text_path *tp)
+{
+	float fs = trm.a;
+	while (*s)
+	{
+		fz_font *font;
+		int ucs, gid;
+		float adv, w, x, y, tx, ty;
+		s += fz_chartorune(&ucs, s);
+		gid = fz_encode_character_with_fallback(ctx, user_font, ucs, 0, FZ_LANG_UNSET, &font);
+		adv = gid >= 0 ? fz_advance_glyph(ctx, font, gid, 0) : 0;
+		w = adv * fs;
+		if (svg_text_path_at(tp, trm.e + w / 2, &x, &y, &tx, &ty))
+		{
+			fz_matrix gm = { fs * tx, fs * ty, fs * ty, -fs * tx, x - tx * w / 2, y - ty * w / 2 };
+			fz_show_glyph_aux(ctx, text, font, gm, adv, gid, ucs, ucs, 0, 0, FZ_BIDI_LTR, FZ_LANG_UNSET);
+		}
+		trm.e += w;
+	}
+	return trm;
+}
 
 static void svg_parse_common(fz_context *ctx, svg_document *doc, fz_xml *node, svg_state *state);
 static void svg_run_element(fz_context *ctx, fz_device *dev, svg_document *doc, fz_xml *root, const svg_state *state);
@@ -97,14 +234,14 @@ static void svg_end_state(fz_context *ctx, svg_state *child)
 
 static void svg_fill(fz_context *ctx, fz_device *dev, svg_document *doc, fz_path *path, svg_state *state)
 {
-	float opacity = state->opacity * state->fill_opacity;
+	float opacity = state->opacity * state->fill_opacity * state->fill_alpha;
 	if (path)
 		fz_fill_path(ctx, dev, path, state->fill_rule, state->transform, fz_device_rgb(ctx), state->fill_color, opacity, fz_default_color_params);
 }
 
 static void svg_stroke(fz_context *ctx, fz_device *dev, svg_document *doc, fz_path *path, svg_state *state)
 {
-	float opacity = state->opacity * state->stroke_opacity;
+	float opacity = state->opacity * state->stroke_opacity * state->stroke_alpha;
 	if (path)
 		fz_stroke_path(ctx, dev, path, state->stroke, state->transform, fz_device_rgb(ctx), state->stroke_color, opacity, fz_default_color_params);
 }
@@ -241,7 +378,7 @@ svg_run_circle(fz_context *ctx, fz_device *dev, svg_document *doc, fz_xml *node,
 
 		if (cx_att) cx = svg_parse_length(cx_att, local_state.viewbox_w, local_state.fontsize);
 		if (cy_att) cy = svg_parse_length(cy_att, local_state.viewbox_h, local_state.fontsize);
-		if (r_att) r = svg_parse_length(r_att, local_state.viewbox_size, 12);
+		if (r_att) r = svg_parse_length(r_att, local_state.viewbox_size, local_state.fontsize);
 
 		if (r > 0)
 		{
@@ -1041,17 +1178,75 @@ svg_parse_viewbox(fz_context *ctx, svg_document *doc, fz_xml *node, svg_state *s
 static const char *linecap_table[] = { "butt", "round", "square" };
 static const char *linejoin_table[] = { "miter", "round", "bevel" };
 
+/* SumatraPDF: minimal CSS class support (#2155) */
+static int
+svg_has_class(const char *class_att, const char *name)
+{
+	size_t n = strlen(name);
+	const char *p = class_att;
+
+	while (*p)
+	{
+		while (*p && svg_is_whitespace(*p))
+			++p;
+		if (!strncmp(p, name, n) && (!p[n] || svg_is_whitespace(p[n])))
+			return 1;
+		while (*p && !svg_is_whitespace(*p))
+			++p;
+	}
+
+	return 0;
+}
+
+/* Splice the declarations of the element's classes onto its style attribute.
+ * The svg_parse_*_from_style() lookups take the first match, so the inline
+ * style comes first and the class rules follow in cascade order.
+ * Returns NULL (use style_att as is) when no class rule applies. */
+static char *
+svg_style_with_classes(fz_context *ctx, svg_document *doc, fz_xml *node, const char *style_att)
+{
+	const char *class_att = fz_xml_att(node, "class");
+	svg_class *cls;
+	size_t n = 1;
+	char *s, *p;
+
+	if (!class_att || !doc->classes)
+		return NULL;
+
+	for (cls = doc->classes; cls; cls = cls->next)
+		if (svg_has_class(class_att, cls->name))
+			n += strlen(cls->decl) + 1;
+	if (n == 1)
+		return NULL;
+	if (style_att)
+		n += strlen(style_att) + 1;
+
+	p = s = fz_malloc(ctx, n);
+	if (style_att)
+	{
+		p += fz_strlcpy(p, style_att, n);
+		*p++ = ';';
+	}
+	for (cls = doc->classes; cls; cls = cls->next)
+		if (svg_has_class(class_att, cls->name))
+		{
+			p += fz_strlcpy(p, cls->decl, n - (p - s));
+			*p++ = ';';
+		}
+	*p = 0;
+
+	return s;
+}
+
 /* parse transform and presentation attributes */
 static void
-svg_parse_common(fz_context *ctx, svg_document *doc, fz_xml *node, svg_state *state)
+svg_parse_common_imp(fz_context *ctx, svg_document *doc, fz_xml *node, svg_state *state, char *style_att)
 {
 	fz_stroke_state *stroke = state->stroke = fz_unshare_stroke_state(ctx, state->stroke);
 
 	char *transform_att = fz_xml_att(node, "transform");
 
 	char *font_size_att = fz_xml_att(node, "font-size");
-
-	char *style_att = fz_xml_att(node, "style");
 
 	// TODO: clip, clip-path, clip-rule
 
@@ -1111,6 +1306,7 @@ svg_parse_common(fz_context *ctx, svg_document *doc, fz_xml *node, svg_state *st
 		{
 			state->fill_is_set = 1;
 			svg_parse_color(ctx, doc, fill_att, state->fill_color);
+			state->fill_alpha = svg_parse_color_alpha(fill_att);
 		}
 	}
 
@@ -1135,6 +1331,7 @@ svg_parse_common(fz_context *ctx, svg_document *doc, fz_xml *node, svg_state *st
 		{
 			state->stroke_is_set = 1;
 			svg_parse_color(ctx, doc, stroke_att, state->stroke_color);
+			state->stroke_alpha = svg_parse_color_alpha(stroke_att);
 		}
 	}
 
@@ -1200,9 +1397,22 @@ svg_parse_common(fz_context *ctx, svg_document *doc, fz_xml *node, svg_state *st
 }
 
 static void
-svg_parse_font_attributes(fz_context *ctx, svg_document *doc, fz_xml *node, svg_state *state, char *buf, int buf_size)
+svg_parse_common(fz_context *ctx, svg_document *doc, fz_xml *node, svg_state *state)
 {
 	char *style_att = fz_xml_att(node, "style");
+	char *expanded = svg_style_with_classes(ctx, doc, node, style_att);
+
+	fz_try(ctx)
+		svg_parse_common_imp(ctx, doc, node, state, expanded ? expanded : style_att);
+	fz_always(ctx)
+		fz_free(ctx, expanded);
+	fz_catch(ctx)
+		fz_rethrow(ctx);
+}
+
+static void
+svg_parse_font_attributes_imp(fz_context *ctx, svg_document *doc, fz_xml *node, svg_state *state, char *buf, int buf_size, char *style_att)
+{
 	char *font_family_att = fz_xml_att(node, "font-family");
 	char *font_weight_att = fz_xml_att(node, "font-weight");
 	char *font_style_att = fz_xml_att(node, "font-style");
@@ -1261,6 +1471,20 @@ svg_parse_font_attributes(fz_context *ctx, svg_document *doc, fz_xml *node, svg_
 }
 
 static void
+svg_parse_font_attributes(fz_context *ctx, svg_document *doc, fz_xml *node, svg_state *state, char *buf, int buf_size)
+{
+	char *style_att = fz_xml_att(node, "style");
+	char *expanded = svg_style_with_classes(ctx, doc, node, style_att);
+
+	fz_try(ctx)
+		svg_parse_font_attributes_imp(ctx, doc, node, state, buf, buf_size, expanded ? expanded : style_att);
+	fz_always(ctx)
+		fz_free(ctx, expanded);
+	fz_catch(ctx)
+		fz_rethrow(ctx);
+}
+
+static void
 svg_run_svg(fz_context *ctx, fz_device *dev, svg_document *doc, fz_xml *root, const svg_state *inherit_state)
 {
 	svg_state local_state;
@@ -1300,14 +1524,12 @@ svg_run_g(fz_context *ctx, fz_device *dev, svg_document *doc, fz_xml *root, cons
 {
 	svg_state local_state;
 	fz_xml *node;
-	/* SumatraPDF */
 	char font_family[100];
 
 	svg_begin_state(ctx, &local_state, inherit_state);
 	fz_try(ctx)
 	{
 		svg_parse_common(ctx, doc, root, &local_state);
-		/* SumatraPDF */
 		svg_parse_font_attributes(ctx, doc, root, &local_state, font_family, sizeof font_family);
 
 		for (node = fz_xml_down(root); node; node = fz_xml_next(node))
@@ -1410,15 +1632,145 @@ svg_run_use(fz_context *ctx, fz_device *dev, svg_document *doc, fz_xml *root, co
 		fz_rethrow(ctx);
 }
 
+/* SumatraPDF: load the raster an <image> points at. NULL if it cannot be read. */
+static const char *
+svg_image_data_uri(const char *href)
+{
+	static const char *jpeg_uri = "data:image/jpeg";
+	static const char *png_uri = "data:image/png";
+	const char *meta;
+	const char *comma;
+
+	if (!strncmp(href, jpeg_uri, strlen(jpeg_uri)))
+		meta = href + strlen(jpeg_uri);
+	else if (!strncmp(href, png_uri, strlen(png_uri)))
+		meta = href + strlen(png_uri);
+	else
+		return NULL;
+
+	comma = strchr(meta, ',');
+	if (!comma)
+		return NULL;
+
+	while (meta < comma)
+	{
+		const char *next;
+		if (*meta++ != ';')
+			return NULL;
+		next = strchr(meta, ';');
+		if (!next || next > comma)
+			next = comma;
+		if (next - meta == 6 && !strncmp(meta, "base64", 6))
+			return comma + 1;
+		meta = next;
+	}
+
+	return NULL;
+}
+
+static fz_image *
+svg_load_image_href(fz_context *ctx, svg_document *doc, const char *href)
+{
+	const char *data = svg_image_data_uri(href);
+	fz_buffer *buf = NULL;
+	fz_image *img = NULL;
+
+	fz_var(buf);
+	fz_var(img);
+	fz_try(ctx)
+	{
+		if (data)
+			buf = fz_new_buffer_from_base64(ctx, data, 0);
+		else if (doc->zip)
+		{
+			char path[2048];
+			fz_strlcpy(path, doc->base_uri, sizeof path);
+			fz_strlcat(path, "/", sizeof path);
+			fz_strlcat(path, href, sizeof path);
+			fz_urldecode(path);
+			buf = fz_read_archive_entry(ctx, doc->zip, path);
+		}
+		if (buf)
+			img = fz_new_image_from_buffer(ctx, buf);
+	}
+	fz_always(ctx)
+		fz_drop_buffer(ctx, buf);
+	fz_catch(ctx)
+	{
+		fz_rethrow_if(ctx, FZ_ERROR_SYSTEM);
+		fz_report_error(ctx);
+		img = NULL;
+	}
+	return img;
+}
+
+/* Fill in a missing width or height from the raster. Both missing -> pixel size. */
+static void
+svg_image_intrinsic_size(fz_image *img, float *w, float *h)
+{
+	float iw = img->w;
+	float ih = img->h;
+
+	if (iw <= 0 || ih <= 0)
+		return;
+	if (*w <= 0 && *h <= 0)
+	{
+		*w = iw;
+		*h = ih;
+	}
+	else if (*w <= 0)
+		*w = iw * (*h) / ih;
+	else if (*h <= 0)
+		*h = ih * (*w) / iw;
+}
+
+static int
+svg_length_is_auto(const char *att)
+{
+	return att == NULL || strchr(att, '%') != NULL;
+}
+
+/* First <image> with no width and no height. Nested <svg> is its own viewport. */
+static int
+svg_unsized_image_box(fz_context *ctx, svg_document *doc, fz_xml *node, float *w, float *h)
+{
+	fz_xml *child;
+
+	for (child = fz_xml_down(node); child; child = fz_xml_next(child))
+	{
+		if (fz_xml_is_tag(child, "image"))
+		{
+			char *wa = fz_xml_att(child, "width");
+			char *ha = fz_xml_att(child, "height");
+			char *href = fz_xml_att_alt(child, "xlink:href", "href");
+			fz_image *img;
+
+			if (wa || ha || !href)
+				continue;
+			img = svg_load_image_href(ctx, doc, href);
+			if (!img)
+				continue;
+			*w = img->w;
+			*h = img->h;
+			fz_drop_image(ctx, img);
+			if (*w > 0 && *h > 0)
+				return 1;
+		}
+		else if (!fz_xml_is_tag(child, "svg"))
+		{
+			if (svg_unsized_image_box(ctx, doc, child, w, h))
+				return 1;
+		}
+	}
+	return 0;
+}
+
 static void
 svg_run_image(fz_context *ctx, fz_device *dev, svg_document *doc, fz_xml *root, const svg_state *inherit_state)
 {
 	svg_state local_state;
 	float x=0, y=0, w=0, h=0;
-	const char *data;
-
-	static const char *jpeg_uri = "data:image/jpeg;base64,";
-	static const char *png_uri = "data:image/png;base64,";
+	fz_image *img = NULL;
 
 	char *href_att = fz_xml_att_alt(root, "xlink:href", "href");
 	char *x_att = fz_xml_att(root, "x");
@@ -1427,6 +1779,7 @@ svg_run_image(fz_context *ctx, fz_device *dev, svg_document *doc, fz_xml *root, 
 	char *h_att = fz_xml_att(root, "height");
 
 	svg_begin_state(ctx, &local_state, inherit_state);
+	fz_var(img);
 	fz_try(ctx)
 	{
 		svg_parse_common(ctx, doc, root, &local_state);
@@ -1435,103 +1788,86 @@ svg_run_image(fz_context *ctx, fz_device *dev, svg_document *doc, fz_xml *root, 
 		if (w_att) w = svg_parse_length(w_att, local_state.viewbox_w, local_state.fontsize);
 		if (h_att) h = svg_parse_length(h_att, local_state.viewbox_h, local_state.fontsize);
 
-		if (w <= 0 || h <= 0)
+		if (!href_att)
 			break; // out of try-catch
 
-		if (!href_att)
+		img = svg_load_image_href(ctx, doc, href_att);
+		if (!img)
+		{
+			fz_warn(ctx, "svg: ignoring image '%s'", href_att);
+			break; // out of try-catch
+		}
+
+		/* SumatraPDF: omitted width/height is the raster's pixel size (#6266) */
+		if (w <= 0 || h <= 0)
+			svg_image_intrinsic_size(img, &w, &h);
+		if (w <= 0 || h <= 0)
 			break; // out of try-catch
 
 		local_state.transform = fz_concat(fz_translate(x, y), local_state.transform);
 		local_state.transform = fz_concat(fz_scale(w, h), local_state.transform);
-
-		if (!strncmp(href_att, jpeg_uri, strlen(jpeg_uri)))
-			data = href_att + strlen(jpeg_uri);
-		else if (!strncmp(href_att, png_uri, strlen(png_uri)))
-			data = href_att + strlen(png_uri);
-		else
-			data = NULL;
-		if (data)
-		{
-			fz_image *img = NULL;
-			fz_buffer *buf;
-
-			fz_var(img);
-
-			buf = fz_new_buffer_from_base64(ctx, data, 0);
-			fz_try(ctx)
-			{
-				fz_matrix orient;
-				img = fz_new_image_from_buffer(ctx, buf);
-				orient = fz_image_orientation_matrix(ctx, img);
-				local_state.transform = fz_concat(orient, local_state.transform);
-				fz_fill_image(ctx, dev, img, local_state.transform, 1, fz_default_color_params);
-			}
-			fz_always(ctx)
-			{
-				fz_drop_buffer(ctx, buf);
-				fz_drop_image(ctx, img);
-			}
-			fz_catch(ctx)
-			{
-				fz_rethrow_if(ctx, FZ_ERROR_SYSTEM);
-				fz_report_error(ctx);
-				fz_warn(ctx, "svg: ignoring embedded image '%s'", href_att);
-			}
-		}
-		else if (doc->zip)
-		{
-			char path[2048];
-			fz_buffer *buf = NULL;
-			fz_image *img = NULL;
-
-			fz_var(buf);
-			fz_var(img);
-
-			fz_strlcpy(path, doc->base_uri, sizeof path);
-			fz_strlcat(path, "/", sizeof path);
-			fz_strlcat(path, href_att, sizeof path);
-			fz_urldecode(path);
-
-			fz_try(ctx)
-			{
-				fz_matrix orient;
-				buf = fz_read_archive_entry(ctx, doc->zip, path);
-				img = fz_new_image_from_buffer(ctx, buf);
-				orient = fz_image_orientation_matrix(ctx, img);
-				local_state.transform = fz_concat(orient, local_state.transform);
-				fz_fill_image(ctx, dev, img, local_state.transform, 1, fz_default_color_params);
-			}
-			fz_always(ctx)
-			{
-				fz_drop_buffer(ctx, buf);
-				fz_drop_image(ctx, img);
-			}
-			fz_catch(ctx)
-			{
-				fz_rethrow_if(ctx, FZ_ERROR_SYSTEM);
-				fz_report_error(ctx);
-				fz_warn(ctx, "svg: ignoring external image '%s'", href_att);
-			}
-		}
-		else
-		{
-			fz_warn(ctx, "svg: ignoring external image '%s'", href_att);
-		}
-
+		local_state.transform = fz_concat(fz_image_orientation_matrix(ctx, img), local_state.transform);
+		fz_fill_image(ctx, dev, img, local_state.transform, 1, fz_default_color_params);
 	}
 	fz_always(ctx)
+	{
+		fz_drop_image(ctx, img);
 		svg_end_state(ctx, &local_state);
+	}
 	fz_catch(ctx)
 		fz_rethrow(ctx);
 }
 
+/* SumatraPDF: an @font-face font named in the font-family list, preferring
+ * the face whose weight and style match (#6339). */
 static fz_font *
-svg_load_font(fz_context *ctx, const svg_state *state)
+svg_find_font_face(fz_context *ctx, svg_document *doc, const svg_state *state)
+{
+	const char *p = state->font_family;
+	char name[100];
+	svg_font_face *face, *found;
+	int n;
+
+	while (*p)
+	{
+		while (*p == ',' || *p == '"' || *p == '\'' || svg_is_whitespace(*p))
+			++p;
+		n = 0;
+		while (*p && *p != ',' && *p != '"' && *p != '\'')
+		{
+			if (n < (int)sizeof name - 1)
+				name[n++] = *p;
+			++p;
+		}
+		while (n > 0 && svg_is_whitespace(name[n - 1]))
+			--n;
+		name[n] = 0;
+
+		found = NULL;
+		for (face = doc->fonts; face; face = face->next)
+		{
+			if (fz_strcasecmp(face->family, name))
+				continue;
+			if (!found || (face->is_bold == state->is_bold && face->is_italic == state->is_italic))
+				found = face;
+		}
+		if (found)
+			return fz_keep_font(ctx, found->font);
+	}
+	return NULL;
+}
+
+static fz_font *
+svg_load_font(fz_context *ctx, svg_document *doc, const svg_state *state)
 {
 	int bold = state->is_bold;
 	int italic = state->is_italic;
 	int mono = 0;
 	int serif = 1;
+	fz_font *font = svg_find_font_face(ctx, doc, state);
+
+	if (font)
+		return font;
 
 	/* scan font-family property for common fallback names */
 
@@ -1570,7 +1906,7 @@ svg_load_font(fz_context *ctx, const svg_state *state)
 }
 
 static fz_matrix
-svg_run_text_string(fz_context *ctx, fz_device *dev, fz_matrix trm, const char *s, const svg_state *state)
+svg_run_text_string(fz_context *ctx, fz_device *dev, svg_document *doc, fz_matrix trm, const char *s, const svg_state *state)
 {
 	fz_font *font = NULL;
 	fz_text *text = NULL;
@@ -1580,7 +1916,7 @@ svg_run_text_string(fz_context *ctx, fz_device *dev, fz_matrix trm, const char *
 
 	fz_try(ctx)
 	{
-		font = svg_load_font(ctx, state);
+		font = svg_load_font(ctx, doc, state);
 		text = fz_new_text(ctx);
 
 		if (state->text_anchor > 0)
@@ -1592,20 +1928,23 @@ svg_run_text_string(fz_context *ctx, fz_device *dev, fz_matrix trm, const char *
 				trm.e -= (adv.e - trm.e);
 		}
 
-		trm = fz_show_string(ctx, text, font, trm, s, 0, 0, FZ_BIDI_LTR, FZ_LANG_UNSET);
+		if (state->text_path)
+			trm = svg_show_string_on_path(ctx, text, font, trm, s, state->text_path);
+		else
+			trm = fz_show_string(ctx, text, font, trm, s, 0, 0, FZ_BIDI_LTR, FZ_LANG_UNSET);
 
 		if (state->fill_is_set)
 			fz_fill_text(ctx, dev, text,
 				state->transform,
 				fz_device_rgb(ctx), state->fill_color,
-				state->opacity,
+				state->opacity * state->fill_opacity * state->fill_alpha,
 				fz_default_color_params);
 		if (state->stroke_is_set)
 			fz_stroke_text(ctx, dev, text,
 				state->stroke,
 				state->transform,
 				fz_device_rgb(ctx), state->stroke_color,
-				state->opacity,
+				state->opacity * state->stroke_opacity * state->stroke_alpha,
 				fz_default_color_params);
 		if (!state->fill_is_set && !state->stroke_is_set)
 			fz_ignore_text(ctx, dev, text, state->transform);
@@ -1659,6 +1998,10 @@ svg_run_text(fz_context *ctx, fz_device *dev, svg_document *doc, fz_xml *root, c
 	char *y_att = fz_xml_att(root, "y");
 	char *dx_att = fz_xml_att(root, "dx");
 	char *dy_att = fz_xml_att(root, "dy");
+	svg_text_path tp = { 0 };
+	fz_path *path = NULL;
+
+	fz_var(path);
 
 	svg_begin_state(ctx, &local_state, inherit_state);
 	fz_try(ctx)
@@ -1669,6 +2012,26 @@ svg_run_text(fz_context *ctx, fz_device *dev, svg_document *doc, fz_xml *root, c
 		trm = fz_scale(local_state.fontsize, -local_state.fontsize);
 		trm.e = x;
 		trm.f = y;
+
+		/* SumatraPDF: text on a path (#6332) */
+		if (fz_xml_is_tag(root, "textPath"))
+		{
+			char *href_att = fz_xml_att_alt(root, "xlink:href", "href");
+			char *offset_att = fz_xml_att(root, "startOffset");
+			fz_xml *linked = (href_att && href_att[0] == '#') ? fz_tree_lookup(ctx, doc->idmap, href_att + 1) : NULL;
+			char *d_att = linked ? fz_xml_att(linked, "d") : NULL;
+			if (d_att)
+			{
+				path = fz_new_path(ctx);
+				svg_parse_path_data(ctx, path, d_att);
+				fz_walk_path(ctx, path, &svg_text_path_walker, &tp);
+				fz_drop_path(ctx, path);
+				path = NULL;
+				local_state.text_path = &tp;
+				trm.e = offset_att ? svg_parse_length(offset_att, tp.total, local_state.fontsize) : 0;
+				trm.f = 0;
+			}
+		}
 
 		if (x_att) trm.e = svg_parse_length(x_att, local_state.viewbox_w, local_state.fontsize);
 		if (y_att) trm.f = svg_parse_length(y_att, local_state.viewbox_h, local_state.fontsize);
@@ -1684,7 +2047,7 @@ svg_run_text(fz_context *ctx, fz_device *dev, svg_document *doc, fz_xml *root, c
 			if (text)
 			{
 				svg_collapse_whitespace(text, cif, cil);
-				trm = svg_run_text_string(ctx, dev, trm, text, &local_state);
+				trm = svg_run_text_string(ctx, dev, doc, trm, text, &local_state);
 			}
 			else if (fz_xml_is_tag(node, "tspan"))
 				trm = svg_run_text(ctx, dev, doc, node, &local_state, trm.e, trm.f, cif, cil);
@@ -1694,7 +2057,11 @@ svg_run_text(fz_context *ctx, fz_device *dev, svg_document *doc, fz_xml *root, c
 		}
 	}
 	fz_always(ctx)
+	{
+		fz_drop_path(ctx, path);
+		fz_free(ctx, tp.segs);
 		svg_end_state(ctx, &local_state);
+	}
 	fz_catch(ctx)
 		fz_rethrow(ctx);
 
@@ -1792,6 +2159,18 @@ svg_parse_document_bounds(fz_context *ctx, svg_document *doc, fz_xml *root)
 		if (h_att)
 			doc->height = svg_parse_length(h_att, doc->height, DEF_FONTSIZE);
 	}
+
+	/* SumatraPDF: no viewBox and a percentage size. An unsized <image>
+	 * was skipped, leaving a blank letter page. Use its pixel size (#6266). */
+	if (!viewbox_att && svg_length_is_auto(w_att) && svg_length_is_auto(h_att))
+	{
+		float iw = 0, ih = 0;
+		if (svg_unsized_image_box(ctx, doc, root, &iw, &ih))
+		{
+			doc->width = iw;
+			doc->height = ih;
+		}
+	}
 }
 
 void
@@ -1813,7 +2192,7 @@ svg_run_document(fz_context *ctx, svg_document *doc, fz_xml *root, fz_device *de
 	state.viewbox_h = DEF_HEIGHT;
 	state.viewbox_size = sqrtf(DEF_WIDTH*DEF_WIDTH + DEF_HEIGHT*DEF_HEIGHT) / sqrtf(2);
 
-	state.fontsize = 12;
+	state.fontsize = DEF_FONTSIZE;
 
 	state.opacity = 1;
 
@@ -1824,17 +2203,20 @@ svg_run_document(fz_context *ctx, svg_document *doc, fz_xml *root, fz_device *de
 	state.fill_color[1] = 0;
 	state.fill_color[2] = 0;
 	state.fill_opacity = 1;
+	state.fill_alpha = 1;
 
 	state.stroke_is_set = 0;
 	state.stroke_color[0] = 0;
 	state.stroke_color[1] = 0;
 	state.stroke_color[2] = 0;
 	state.stroke_opacity = 1;
+	state.stroke_alpha = 1;
 
 	state.font_family = "serif";
 	state.is_bold = 0;
 	state.is_italic = 0;
 	state.text_anchor = 0;
+	state.text_path = NULL;
 
 	fz_try(ctx)
 	{

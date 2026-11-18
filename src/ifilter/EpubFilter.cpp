@@ -2,7 +2,7 @@
    License: GPLv3 */
 
 #include "base/Base.h"
-#include "base/ScopedWin.h"
+#include "base/AutoWin.h"
 #include "base/Archive.h"
 #include "base/HtmlTags.h"
 #include "base/Win.h"
@@ -14,7 +14,6 @@
 #include "EngineBase.h"
 #include "EbookBase.h"
 #include "EbookDoc.h"
-#include "GumboHelpers.h"
 #include "GumboHtmlParser.h"
 
 #include "FilterBase.h"
@@ -22,7 +21,7 @@
 #include "EpubFilter.h"
 
 VOID EpubFilter::CleanUp() {
-    log("EpubFilter::Cleanup()\n");
+    log(StrL("EpubFilter::Cleanup()\n"));
     if (m_epubDoc) {
         delete m_epubDoc;
         m_epubDoc = nullptr;
@@ -31,7 +30,7 @@ VOID EpubFilter::CleanUp() {
 }
 
 HRESULT EpubFilter::OnInit() {
-    log("EpubFilter::OnInit()\n");
+    log(StrL("EpubFilter::OnInit()\n"));
 
     CleanUp();
 
@@ -47,7 +46,7 @@ HRESULT EpubFilter::OnInit() {
     return S_OK;
 }
 
-// copied from SumatraProperties.cpp
+// copied from DocumentProperties.cpp
 static bool IsoDateParse(Str isoDate, SYSTEMTIME* timeOut) {
     ZeroMemory(timeOut, sizeof(SYSTEMTIME));
     int year = 0, month = 0, day = 0;
@@ -68,32 +67,23 @@ static bool IsoDateParse(Str isoDate, SYSTEMTIME* timeOut) {
     // don't bother about the day of week, we won't display it anyway
 }
 
-static void TrimHtmlTextToken(Str& tokText) {
-    while (len(tokText) > 0 && str::IsWs(tokText.s[0])) {
-        tokText.s++;
-        tokText.len--;
-    }
-    while (len(tokText) > 0 && str::IsWs(tokText.s[tokText.len - 1])) {
-        tokText.len--;
-    }
-}
-
 static WStr ExtractHtmlText(EpubDoc* doc) {
-    log("ExtractHtmlText()\n");
+    log(StrL("ExtractHtmlText()\n"));
 
-    Str d = doc->GetHtmlData();
+    Str d = ToStr(doc->htmlData);
     int dataLen = d.len;
 
-    str::Builder text(dataLen / 2);
+    str::Builder text;
+    text.Reserve(dataLen / 2);
     GumboHtmlParser p(d);
     HtmlToken* t;
     Vec<HtmlTag> tagNesting;
-    while ((t = p.Next()) != nullptr && !t->IsError()) {
-        if (t->IsText() && !tagNesting.Contains(Tag_Head) && !tagNesting.Contains(Tag_Script) &&
-            !tagNesting.Contains(Tag_Style)) {
+    while ((t = p.Next()) != nullptr) {
+        if (t->IsText() && !VecContains(tagNesting, Tag_Head) && !VecContains(tagNesting, Tag_Script) &&
+            !VecContains(tagNesting, Tag_Style)) {
             // trim whitespace (TODO: also normalize within text?)
             Str tokText = t->s;
-            TrimHtmlTextToken(tokText);
+            str::TrimWsBoth(tokText);
             if (len(tokText) > 0) {
                 TempStr s = ResolveHtmlEntitiesTemp(tokText);
                 text.Append(s);
@@ -102,23 +92,23 @@ static WStr ExtractHtmlText(EpubDoc* doc) {
         } else if (t->IsStartTag()) {
             // TODO: force-close tags similar to HtmlFormatter.cpp's AutoCloseOnOpen?
             if (!IsTagSelfClosing(t->tag)) {
-                tagNesting.Append(t->tag);
+                VecAppend(tagNesting, t->tag);
             }
         } else if (t->IsEndTag()) {
-            if (!IsInlineTag(t->tag) && len(text) > 0 && text.Last() == ' ') {
+            if (!IsInlineTag(t->tag) && text.LastChar() == ' ') {
                 text.RemoveLast();
-                text.Append("\r\n");
+                text.Append(StrL("\r\n"));
             }
             // when closing a tag, if the top tag doesn't match but
             // there are only potentially self-closing tags on the
             // stack between the matching tag, we pop all of them
-            if (tagNesting.Contains(t->tag)) {
-                while (tagNesting.Last() != t->tag) {
-                    tagNesting.Pop();
+            if (VecContains(tagNesting, t->tag)) {
+                while (VecLast(tagNesting) != t->tag) {
+                    VecPop(tagNesting);
                 }
             }
-            if (len(tagNesting) > 0 && tagNesting.Last() == t->tag) {
-                tagNesting.Pop();
+            if (len(tagNesting) > 0 && VecLast(tagNesting) == t->tag) {
+                VecPop(tagNesting);
             }
         }
     }
@@ -127,9 +117,9 @@ static WStr ExtractHtmlText(EpubDoc* doc) {
 }
 
 HRESULT EpubFilter::GetNextChunkValue(ChunkValue& chunkValue) {
-    log("EpubFilter::GetNextChunkValue()\n");
+    log(StrL("EpubFilter::GetNextChunkValue()\n"));
 
-    TempStr str = nullptr;
+    TempStr str;
     WStr ws;
 
     switch (m_state) {
@@ -140,7 +130,7 @@ HRESULT EpubFilter::GetNextChunkValue(ChunkValue& chunkValue) {
 
         case STATE_EPUB_AUTHOR:
             m_state = STATE_EPUB_TITLE;
-            str = m_epubDoc->GetPropertyTemp(DocProp::Author);
+            str = GetPropValueTemp(m_epubDoc->props, DocProp::Author);
             if (len(str) > 0) {
                 ws = ToWStrTemp(str);
                 chunkValue.SetTextValue(PKEY_Author, ws.s);
@@ -150,9 +140,9 @@ HRESULT EpubFilter::GetNextChunkValue(ChunkValue& chunkValue) {
 
         case STATE_EPUB_TITLE:
             m_state = STATE_EPUB_DATE;
-            str = m_epubDoc->GetPropertyTemp(DocProp::Title);
-            if (!str) {
-                str = m_epubDoc->GetPropertyTemp(DocProp::Subject);
+            str = GetPropValueTemp(m_epubDoc->props, DocProp::Title);
+            if (len(str) == 0) {
+                str = GetPropValueTemp(m_epubDoc->props, DocProp::Subject);
             }
             if (len(str) > 0) {
                 ws = ToWStrTemp(str);
@@ -163,9 +153,9 @@ HRESULT EpubFilter::GetNextChunkValue(ChunkValue& chunkValue) {
 
         case STATE_EPUB_DATE:
             m_state = STATE_EPUB_CONTENT;
-            str = m_epubDoc->GetPropertyTemp(DocProp::ModificationDate);
-            if (!str) {
-                str = m_epubDoc->GetPropertyTemp(DocProp::CreationDate);
+            str = GetPropValueTemp(m_epubDoc->props, DocProp::ModificationDate);
+            if (len(str) == 0) {
+                str = GetPropValueTemp(m_epubDoc->props, DocProp::CreationDate);
             }
             if (len(str) > 0) {
                 SYSTEMTIME systime;

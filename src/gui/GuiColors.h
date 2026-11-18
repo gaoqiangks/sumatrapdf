@@ -52,6 +52,7 @@ enum {
     kColIconBtnBgHover,
     kColIconBtnBgSelected,
     kColIconBtnChevron,
+    kColIconBtnChevronDisabled,
     kColIconBtnCount,
 };
 extern Color gColsIconBtn[kColIconBtnCount];
@@ -101,6 +102,16 @@ enum {
 };
 extern Color gColsLine[kColLineCount];
 
+//--- VirtSlider
+enum {
+    kColSliderTrack,
+    kColSliderFill,
+    kColSliderThumb,
+    kColSliderThumbHover,
+    kColSliderCount,
+};
+extern Color gColsSlider[kColSliderCount];
+
 //--- VirtRichText
 enum {
     kColRichText,
@@ -114,17 +125,29 @@ extern Color gColsRichText[kColRichCount];
 //--- TabsCtrl / TabCtrl
 enum {
     kColTabText,
-    // the selected tab and the strip behind the tabs; the unselected and
-    // hovered shades are derived from it
+    // the active tab and the strip behind the tabs
     kColTabBg,
+    // the inactive tab; its hovered shade is derived from it
+    kColTabInactiveBg,
     kColTabCount,
 };
 extern Color gColsTab[kColTabCount];
 
+//--- win32 WindowBase
+// The per-instance overrides are HwndBase::textColor / bgColor (two plain
+// fields, not an owned array); WindowBase::GetColor(idx) resolves them
+// against these defaults
+enum {
+    kColWinText,
+    kColWinBg,
+    kColWinCount,
+};
+extern Color gColsWin[kColWinCount];
+
 //--- win32 Edit
 enum {
-    // the 1px underline an Edit created withBottomBorder draws. It is a
-    // separator, so it takes the same color as every other border and divider
+    // the 1px frame / underline a custom-bordered Edit draws. Same color as
+    // every other border and divider
     kColEditBottomBorder,
     kColEditCount,
 };

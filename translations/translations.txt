@@ -1,5 +1,5 @@
 AppTranslator: SumatraPDF
-b2ebb94a3a52483c01b97cfc048fc08c7f368552
+9d7d5cede0146e32e6d97a695863d60ab447f16f
 :# File History
 af:# Lêergeskiedenis
 am:# Ֆայլի պատմություն
@@ -68137,3 +68137,660 @@ vn:↑ ↓ để điều hướng
 :don't use
 :Toggle Windows Previewer
 :Toggle Windows Search Filter
+:Edit Favorites
+:Name:
+:Rename
+:Move Up
+:Move Down
+:Unsaved changes: %d
+:Filter settings
+:Failed to save sumatrapdfrestrict.ini.
+:Delete sumatrapdfrestrict.ini?
+:Configure Restricted Use
+:Failed to delete sumatrapdfrestrict.ini.
+:SumatraPDF cannot create files in its installation folder.
+:Administrator access is required. Restart elevated?
+:Embedding this font can add hundreds of kilobytes to the PDF.
+:Embed Font
+:Other Font (Embedded)...
+:Background Color
+:Color
+:Border Color
+:Border Width
+:Opacity
+:Text Size
+:Accept
+:filter %d annotations
+:Delete %d annotations
+:Discard changes
+:Show the selected annotation's note
+:Search syntax
+:...
+:Brightness / Contrast
+:&Brightness:
+:&Contrast:
+:&Reset
+:Open in hex view
+:Select
+:Search
+:Follow Windows
+:View Certificate...
+:Update EU Trusted List
+:The document's own styling is used.
+:&Custom CSS
+:&Chapter:
+:&Page:
+:The file could not be read
+:Couldn't open '%s'
+:Copy program and machine info
+:Open...
+:&Overwrite
+:Crop Image
+:Resize Image
+:&Apply Crop
+:&Resize
+:&Crop
+:&Apply Resize
+:C&opy
+:The installer has been corrupted. Please download it again.
+:Let Windows show &thumbnails of PDF documents
+:Install &desktop shortcut
+:Copied to clipboard
+:Units: %s
+:Enter the known length and units, then apply.
+:Click the start point. Ctrl+click deletes a measurement.
+:Click the other end of the arc.
+:Click a point on the arc.
+:Click the end point on the same page.
+:Enter a positive length and a unit name.
+:Measure
+:Tool:
+:Known length:
+:Units:
+:Length
+:Rectangular area
+:Radius
+:Guide line
+:Calibrate
+:&Snap to lines in the drawing
+:Apply calibration
+:Clear
+:Reset scale
+:Fit &Visible
+:&To Selection
+:Copy As &Image To Clipboard
+:&Save As Image...
+:&Print Selection...
+:Visual Search With Google &Lens
+:&Trim Pages To Selection
+:Count &Words
+:Show Selected Te&xt
+:&Translate with
+:S&earch with
+:Select C&urrent Page
+:Copy Link &Address
+:Sho&w Comment
+:Selected &Image
+:Show &Thumbnails
+:Sh&ow Toolbar
+:Show Caption
+:Auto-hide Sidebar
+:Insert Te&xt
+:Chapter %d Page %d
+:Add chapter %d page %d to favorites
+:Remove chapter %d page %d from favorites
+:%s, page %d
+:Restore page
+:Remove page
+:&Remove
+:R&estore
+:Cu&t
+:&Copy
+:&Paste
+:Select &All\tCtrl+A
+:Merge PDF
+:%d pages
+:%d pages, %d removed
+:%d selected
+:Add PDF
+:Insert '%s':
+:At the &end
+:At the &beginning
+:&After page
+:Add
+:%d files
+:Couldn't save '%s'
+:Add PDF...
+:Save As...
+:Up
+:Click to edit the path
+:Enter
+:open in current tab
+:Ctrl + Enter
+:open in new tab
+:Del
+:delete file
+:Annotation Colors
+:Font
+:Thickness
+:Text Alignment
+:Icon
+:Line Start
+:Line End
+:Edit colors
+:No result found
+:Couldn't save to the browser's storage, changes are lost when the tab is closed
+:&Settings...
+:Quit
+:Thumbnails
+:Layers
+:Save As
+:Failed to save image
+:Save Image
+:Browse...
+:Save downloaded files to
+:Open from URL
+:URL of a document to download and open:
+:Save to
+:Download
+:Page Grid
+:Horizontal:
+:Vertical:
+:Subdivisions:
+:Slant:
+:From left:
+:From bottom:
+:Grid style:
+:Distance between grid lines
+:Drag a line on the page to resize it
+:Alt+drag when this dialog is closed
+:Grid line origin offset
+:&Show Grid
+:Run PDF Script
+:Select file
+:Argument %d
+:Add argument
+:Run Script
+:Example Scripts
+:Reset
+:Running...
+:Save Selection As Image
+:Convert to Images
+:Convert EPUB to PDF
+:Convert CAJ to PDF
+:Overwrite
+:Convert
+:Failed to decrypt PDF file.
+:Invalid font size
+:Too large for this DPI
+:Saving image...
+:Pages
+:Current
+:All
+:Custom
+:From
+:Save as
+:Use New Names
+:Password
+:Resolution (DPI)
+:Use <N> for the page number
+:Page size
+:Font size
+:Reverse
+:Focus
+:File %s already exists. Overwrite?
+:Nothing to take a screenshot of
+:Saved screenshot to '%s'
+:Failed to save the screenshot
+:Settings
+:Sign Document
+:Certificate file...
+:Signature
+:Empty signature field: %s (page %d)
+:New signature on page %d
+:Please choose the certificate file to sign with.
+:Certificate file %s doesn't exist.
+:Image file %s doesn't exist.
+:Certificate files
+:Image files
+:&Certificate:
+:&Reason (optional):
+:&Location (optional):
+:&Where to sign:
+:Signature &type:
+:&Image (optional):
+:&Browse...
+:Lock form &fields after signing
+:Appearance:
+:Show &labels
+:Show &name
+:Show &DN
+:Show da&te
+:Show name as &graphic
+:C&hoose...
+:Sign
+:Download caj2pdf
+:Opening CAJ files needs the caj2pdf converter
+:Do&n't ask again
+:&Download caj2pdf
+:Reading stopped
+:Nothing to redo
+:Nothing to undo
+:File from a temporary folder
+:learn more
+:Copy to a permanent folder
+:Copy temporary files to
+:Failed to copy the file
+:Copied to
+:Couldn't load image '%s'
+:Annotation cut. Paste to move it.
+:Stored documents and settings didn't load, changes in this tab won't be saved
+:&Keep the group in sync with this window's tabs
+:Chapter:
+:Update
+:Version %s from %s available. %s
+:%d settings
+:%d of %d
+:empty
+:default: %s
+:Enter confirm
+:Esc cancel
+:Enter select
+:Enter change
+:%s restore default
+:See %s for setup instructions.
+:Bold
+:Italic
+:Attached File:
+:Border:
+:Popup:
+:Rect:
+:Replace %s with...
+:Attach File
+:Save %s to disk
+:Text Color
+:Border Color and Width
+:Interior Color
+:Edit text
+:Edit Note
+:Mark content for redaction. Drag or click twice. **Esc** to cancel.
+:Place stamp annotation. **Esc** to cancel.
+:Place caret annotation. **Esc** to cancel.
+:Place file attachment. **Esc** to cancel.
+:Place text annotation. **Esc** to cancel.
+:Place free text annotation. **Esc** to cancel.
+:Place line annotation. **Shift** to snap to multiples of 45 degrees. **Esc** to cancel.
+:Place circle annotation. Drag or click twice. **Shift** for a circle. **Esc** to cancel.
+:Draw ink annotation. Release to finish. **Esc** to cancel.
+:Select text to highlight it. **Esc** or **Enter** to finish.
+:%d tabs, synced
+:Name for chapter %d page %d (optional):
+:Name for page %s (optional):
+:Fit Visible
+:# History
+:% TOC
+:& Thumbnails
+:* Annotations
+:= Settings
+:Cmd+Backspace restore default
+:Del restore default
+:Ctrl+Tab navigate
+:Release Ctrl select
+:Del close tab
+:Enter open file
+:Del remove from history
+:Esc close
+:Enter switch to tab
+:Enter go to favorite
+:Del remove favorite
+:Enter go to
+:Enter apply
+:Esc go back
+:Enter run command
+:Signatures:
+:Publisher:
+:Identifier:
+:Source:
+:Language:
+:Issuer:
+:Serial Number:
+:Valid From:
+:Valid To:
+:SHA-1:
+:Trust:
+:Certificates:
+:(chapter %d page %d)
+:The selected area is too large for Google Lens.
+:Could not create a temporary file for Google Lens.
+:Could not open Google Lens in the web browser.
+:Google Lens is only available for document pages.
+:No image under the cursor.
+:Could not render the page for Google Lens.
+:Could not encode the page for Google Lens.
+:Tip:
+:Page %d of %d
+:1 page
+:Close %s to continue.
+:Open using &Windows File Picker...
+:Open using &SumatraPDF File Picker...
+:Open from &URL...
+:&Next Document
+:&Previous Document
+:&Browse Documents...
+:&Next File In Folder
+:&Previous File In Folder
+:&Browse Files In Folder...
+:&Open
+:Show in fo&lder
+:Save Shortc&ut...
+:Lin&k SumatraPDF Web...
+:Open Directory in Director&y Opus
+:Send &by E-mail...
+:Navigate Thumbnails
+:Auto-Rotate Wide Pages
+:&Uniform Page Width
+:&Trim Empty Margins
+:Trim Pages To Selection
+:Show Whole Pages
+:Save Trimmed Pages As...
+:Read &Columns
+:Read Columns: Show &Whole Page
+:View As &Hex
+:Mirror Pages
+:Fulls&creen
+:&Automatically Scroll
+:Read&ing Bar
+:Sho&w Thumbnails
+:Show Me&nu
+:&Highlight Form Fields
+:Transparency Gri&d
+:Configure Page Grid...
+:Custom AI
+:Next &Chapter
+:Previous C&hapter
+:&Advanced Settings...
+:&Open Advanced Settings File...
+:Configure &Restricted Use...
+:Edit Favorites...
+:&Selection As Image
+:&Page
+:&Google
+:&DeepL
+:G&rok Build
+:Claude C&ode
+:OpenAI Code&x
+:A&ntigravity
+:&Bing
+:&Wikipedia
+:Google Sc&holar
+:&Redact
+:Create From Selection
+:Create &Under Cursor
+:Cut Annotation
+:Copy Annotation
+:Paste Annotation
+:Apply Redactions
+:Save changes
+:Save to new file
+:Re&place Image...
+:Edit Image in &Another App
+:Merge PDF...
+:Run PDF Script...
+:Insert Image...
+:Sign With Image
+:Sign Document...
+:Convert to Images...
+:Convert EPUB to PDF...
+:Convert CAJ to PDF...
+:Expand Chapter
+:Collapse Chapter
+:&Highlighter
+:Image From Fi&le...
+:Si&gn With Image
+:OFD documents
+:DVI documents
+:CAJ documents
+:Microsoft Reader ebooks
+:Rich Text documents
+:Failed to download
+:Downloading
+:Enter a http:// or https:// URL
+:The folder doesn't exist
+:Can't write to the folder
+:inches
+:millimeters
+:centimeters
+:points
+:Dotted lines
+:Solid lines
+:Dots
+:of %d pages
+:%d of %d pages
+:Downloading the caj2pdf converter failed
+:The caj2pdf converter failed to run (error 0x%x)
+:The caj2pdf converter couldn't convert this file (exit code %d)
+:The caj2pdf converter took too long
+:1 file already exists
+:%d files already exist
+:&Shrink pages to printable area
+:S&tretch pages to fill paper
+:A&ctual size (1:1)
+:Rotate &wide pages to fit the paper
+:Top of view
+:Paused \xC2\xB7 %s \xC2\xB7 page %d of %d \xC2\xB7 %s
+:Paused \xC2\xB7 %s \xC2\xB7 %s
+:Read aloud voice crashed and was turned off
+:This document doesn't allow copying text.
+:< 1 min
+:%d min
+:%s left
+:pauses in %s
+:End of document
+:Time is up
+:Paused
+:Scrolling
+:Cannot start the inverse search command. Check its command line in Settings.
+:Couldn't open a browser tab, it may have been blocked
+:Copy to clipboard
+:Add text annotation
+:Grok Build is not signed in.
+:OpenAI Codex is not signed in.
+:Could not sign the document.
+:Wrong password for the certificate file.
+:Could not read the certificate file: %s
+:Could not use that certificate from the Windows certificate store.
+:Could not read the signature image.
+:Click or drag on the page to place the signature. Esc to cancel.
+:Approval signature
+:Certify: no changes allowed
+:Certify: form filling and signing allowed
+:Certify: form filling, signing and annotations allowed
+:Lock document after signing (last signer)
+:Signing this way locks the document: no further changes or signatures will be possible. Continue?
+:Folder
+:Encrypted
+:Signed
+:Has layers
+:Frame %d / %d
+:Chapter %d / %d
+:Page %d / %d
+:Page %s (%d / %d, %d%%)
+:Page %d / %d (%d%%)
+:Rotated %d\xC2\xB0
+:Word documents
+:Excel workbooks
+:PowerPoint presentations
+:Words: %d, characters (no spaces): %d
+:Counting words: page %d of %d...
+:(the first %d of %d characters; Copy gets all of them)
+:Counting words...
+:Saved trimmed pages to '%s'
+:Selection was too long for a URL and was shortened.
+:No redaction marks to apply
+:Failed to apply redactions
+:Redactions applied.
+:Creating thumbnail %d of %d: %s
+:Edit PDF
+:Previous Chapter
+:Next Chapter
+:Highlighter: select text to highlight it
+:Highlight Selection
+:Undo
+:Redo
+:Find Annotation
+:Signatures
+:At least one signature is invalid.
+:At least one signature has problems.
+:Signed with a qualified signature. All signatures are valid.
+:Signed and all signatures are valid.
+:Unknown signer
+:Signature Panel
+:Signature Properties
+:Validity Summary
+:Signer Info
+:Show Signer's Certificate...
+:Loading...
+:Couldn't replace the image
+:Image replaced. Save the PDF to keep it.
+:Image updated. Save the PDF to keep it.
+:Couldn't save the image for editing
+:SumatraPDF crashed.\n\nPress 'Cancel' to see how to report the crash.
+:The server address is not allowed.
+:Key removed from this computer.
+:Key saved.
+:That key was rejected. Create a new key on the website and paste it again.
+:Could not reach SumatraPDF Web.
+:That is not a SumatraPDF Web API key.
+:Contacting SumatraPDF Web...
+:This file is over 50 MiB. SumatraPDF will not download it.
+:The server rejected the saved API key. It may have been revoked.
+:Could not save the download.
+:Could not read the file.
+:Could not read the file list.
+:Uploaded.
+:That file name cannot be uploaded.
+:Replace %s on SumatraPDF Web?
+:Upload %s? If that name already exists on the server, it is replaced.
+:Link SumatraPDF Web
+:That file name cannot be downloaded.
+:Log in in the browser, then paste the API key here.
+:The key is a password for the files on the account.
+:Forget key removes it from this computer. To revoke it, use the button on the website.
+:This is a copy. Edits stay on this computer until you upload again. Save does not update SumatraPDF Web.
+:Log in...
+:Forget key
+:Upload...
+:Upload this document
+:Thin
+:Thick
+:You can [customize scrollbar](CmdChangeScrollbar).
+:You can [customize keyboard shortcuts](Help/Customize-keyboard-shortcuts).
+:You can [customize toolbar](Help/Customize-toolbar).
+:Press (Kbd/(Key/CmdCommandPalette)) to open [command palette](CmdCommandPalette).
+:You can [extract text from PDF file](Help/Tool-x-extract-text-from-pdf).
+:You can [toggle menu bar](CmdToggleMenuBar) with (Kbd/(Key/CmdToggleMenuBar)).
+:You can [toggle toolbar](CmdToggleToolbar) with (Kbd/(Key/CmdToggleToolbar)).
+:You can [edit PDF annotations](Help/Editing-annotations).
+:You can enable [citation preview on hover](Help/Citation-hover-preview).
+:You can [have documents read aloud](Help/Read-Aloud).
+:You can [sign a PDF](Help/Sign-a-PDF).
+:You can [fill PDF forms](Help/Fill-PDF-forms).
+:You can [merge PDFs](Help/Merge-PDFs) and [reorder pages](Help/Reorder-PDF-pages).
+:You can [split a PDF](Help/Split-a-PDF).
+:You can [redact a PDF](Help/Redact-a-PDF).
+:You can [present a PDF](Help/Present-a-PDF) full screen.
+:You can [use SumatraPDF with LaTeX](Help/LaTeX-integration) for forward and inverse search.
+:You can [read comics and manga](Help/Comics-and-manga) right to left.
+:You can [bookmark pages as favorites](Help/Managing-favorites).
+:You can [chat with AI about a document](Help/AI-Chat-with-document).
+:You can [customize theme colors](Help/Customize-theme-colors).
+:You can [save a page region as an image](Help/Save-page-region-as-image).
+:You can [print selected pages](Help/Print-selected-pages).
+:Press (Kbd/@) to quickly switch between tabs.
+:Press (Kbd/#) to navigate file history.
+:Press (Kbd/$) to navigate via favorites.
+:Press (Kbd/%) to navigate via table of contents.
+:Press (Kbd/&) to navigate via thumbnails.
+:Press (Kbd/(Key/CmdToggleAutomaticallyScroll)) to [scroll automatically](Help/Scrolling-and-zooming#scroll-automatically).
+:You can keep your place with the [reading bar](Help/Scrolling-and-zooming#keep-your-place-with-a-reading-bar).
+:Press (Kbd/=) to [change a setting](CmdQuickEditSettings) without opening Advanced Settings.
+:You can [browse files in the current folder](CmdNavigateFilesInFolder). [Learn more](Help/Scrolling-and-zooming#browse-files-in-the-folder)
+:You can overlay a [page grid](Help/Scrolling-and-zooming#overlay-a-page-grid) for measurement and calligraphy.
+:You can [zoom to fit the page content](Help/Scrolling-and-zooming#fit-the-page-content).
+:You can [paste an image from the clipboard](Help/Add-an-image-to-a-PDF#insert-an-image-from-the-clipboard).
+:You can [translate selected text](Help/Customize-search-translation-services#search-or-translate-the-selection).
+:Translate Selection with DeepL
+:Settings...
+:Debug: Toggle RTL
+:Extract Pages...
+:Toggle Read Aloud
+:Navigate Table Of Contents
+:Navigate Favorites
+:Toggle Citation Hover Preview
+:Toggle Highlight Form Fields
+:Toggle Page Boxes
+:Toggle Uniform Page Width
+:Toggle Transparency Grid
+:Toggle Page Grid
+:Toggle Edit PDF
+:Search with Google Lens
+:Show Comment
+:Highlighter
+:Open File Without History...
+:Copy Selection As Image
+:Search Page with Google Lens
+:Search Image with Google Lens
+:Save As Image...
+:Toggle Trim Empty Margins
+:Copy Location To Clipboard
+:Automatically Scroll
+:Automatically Scroll Faster
+:Automatically Scroll Slower
+:Reading Bar
+:Reading Bar Invert
+:Go To Home Page
+:Toggle Free Pan
+:Open Recent File
+:Go to Favorite
+:Toggle Grayscale
+:Print Selection...
+:Generate Table Of Contents
+:Open Advanced Settings File...
+:Open File With SumatraPDF File Picker...
+:Select Current Page
+:Zoom: Fit Visible
+:Insert Text Snippet
+:Toggle Thumbnails
+:Toggle Auto-Rotate Wide Pages
+:Navigate Tabs
+:Navigate History
+:Quick Edit Settings
+:Configure Restricted Use...
+:Toggle Caption
+:Adjust Brightness...
+:Adjust Contrast...
+:Toggle Sidebar Auto-hide
+:Debug: Show Crash Minidumps
+:Copy Temporary File to Permanent Folder
+:Find History
+:SumatraPDF Web...
+:Debug: Save Settings
+:New Tab
+:Show Signatures
+:Open from URL...
+:Toggle Layers
+:Toggle Facing: Step One Page
+:Count Words
+:Minimize Window
+:Show Selected Text
+:Replace Image...
+:Edit Image in Another App
+:Read Columns
+:Read Columns: Show Whole Page
+:Debug: Show Downloaded Fonts
+:Bookmarks: Expand Chapter
+:Bookmarks: Collapse Chapter
+:Close Tabs of Missing Files
+:View As Hex
+:Custom AI chat...
+:Browse Files In Folder...

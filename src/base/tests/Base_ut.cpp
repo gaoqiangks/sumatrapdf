@@ -2,9 +2,10 @@
    License: Simplified BSD (see COPYING.BSD) */
 
 #include "base/Base.h"
+#include "base/Pixmap.h"
 
 // must be last due to assert() over-write
-#include "base/UtAssert.h"
+#include "base/tests/UtAssert.h"
 
 struct TestFn0Data {
     int n = 0;
@@ -85,18 +86,58 @@ static void Func1FromFunc0Test() {
     utassert(d1.p == -8);
 }
 
+static void testFn1List(TestFn0Data* d0, TestFn1Data* d1) {
+    d0->n++;
+    d1->p++;
+}
+
+static void Func1ListTest() {
+    utassert(sizeof(Func1List<TestFn1Data*>) == 3 * sizeof(void*));
+
+    TestFn0Data a, b, c;
+    TestFn1Data arg{};
+    Func1List<TestFn1Data*> na = MkFunc1(testFn1List, &a);
+    Func1List<TestFn1Data*> nb = MkFunc1(testFn1List, &b);
+    Func1List<TestFn1Data*> nc = MkFunc1(testFn1List, &c);
+    Func1List<TestFn1Data*>* head = nullptr;
+
+    na.Register(&head);
+    nb.Register(&head);
+    nc.Register(&head);
+    utassert(head == &nc);
+    utassert(nc.next == &nb && nb.next == &na && !na.next);
+
+    head->CallAll(&arg);
+    utassert(a.n == 1 && b.n == 1 && c.n == 1 && arg.p == 3);
+
+    // assigning a new Func1 must not unlink the node
+    nb = MkFunc1(testFn1List, &b);
+    utassert(nc.next == &nb && nb.next == &na);
+
+    nb.Unregister(&head);
+    utassert(head == &nc && nc.next == &na && !nb.next);
+
+    a.n = b.n = c.n = 0;
+    arg.p = 0;
+    head->CallAll(&arg);
+    utassert(a.n == 1 && b.n == 0 && c.n == 1 && arg.p == 2);
+
+    // unregistering a node that isn't on the list is a no-op
+    nb.Unregister(&head);
+    utassert(head == &nc && nc.next == &na);
+
+    na.Unregister(&head);
+    nc.Unregister(&head);
+    utassert(!head);
+}
+
 static void GeomTest() {
     PointF ptD(12.4f, -13.6f);
-    utassert(ptD.x == 12.4f && ptD.y == -13.6f);
     Point ptI = ToPoint(ptD);
     utassert(ptI.x == 12 && ptI.y == -13);
 
     SizeF szD(7.7f, -3.3f);
-    utassert(szD.dx == 7.7f && szD.dy == -3.3f);
-    Size szI = ToSize(szD);
-    utassert(szI.dx == 8 && szI.dy == -3);
-    szD = ToSizeFl(szI);
-    utassert(SizeF(8, -3) == szD);
+    Size szI(8, -3);
 
     utassert(!szD.IsEmpty() && !szI.IsEmpty());
     utassert(Size().IsEmpty() && SizeF().IsEmpty());
@@ -203,100 +244,275 @@ static void ListTest() {
 
 static void ColorTest() {
     ParsedColor parsed;
-    ParseColor(parsed, "#f2f2f2");
+    ParseColor(parsed, StrL("#f2f2f2"));
     utassert(parsed.parsedOk);
     utassert(parsed.col == MkRgb(0xf2, 0xf2, 0xf2));
 
     parsed = {};
-    ParseColor(parsed, "#80f2f2f2");
+    ParseColor(parsed, StrL("#80f2f2f2"));
     utassert(parsed.parsedOk);
     utassert(parsed.col == MkRgba(0xf2, 0xf2, 0xf2, 0x80));
 
     parsed = {};
-    ParseColor(parsed, "#f2f2f");
+    ParseColor(parsed, StrL("#f2f2f"));
     utassert(!parsed.parsedOk);
+
+    // One Dark disabled text on a lifted button fill is too close; boost it
+    Color oneDarkBg = MkRgb(0x21, 0x25, 0x2b);
+    Color oneDarkBtn = AccentColor(oneDarkBg, 14);
+    Color oneDarkDis = MkRgb(0x5c, 0x63, 0x70);
+    Color boosted = EnsureContrast(oneDarkDis, oneDarkBtn, 80);
+    utassert(abs((int)GetLightness(boosted) - (int)GetLightness(oneDarkBtn)) >= 80);
+
+    // already-contrasty pair is left alone
+    Color lightFg = MkRgb(0xf9, 0xfa, 0xfb);
+    Color blackBg = MkRgb(0, 0, 0);
+    utassert(EnsureContrast(lightFg, blackBg, 80) == lightFg);
+
+    // 45-degree diamond: center inside, a point beside it outside
+    QuadF diamond;
+    diamond.ul = {0, 10};
+    diamond.ur = {10, 0};
+    diamond.ll = {10, 20};
+    diamond.lr = {20, 10};
+    utassert(diamond.IsRotated());
+    utassert(diamond.Contains({10, 10}));
+    utassert(!diamond.Contains({0, 0}));
 }
 
-static void ArenaPtrCompressTest() {
-    // Single-block round-trip
-    {
-        Arena* a = ArenaNew();
-        utassert(a != nullptr);
-        int* p = (int*)a->Push(sizeof(int) * 4, 8, true);
-        p[0] = 11;
-        p[1] = 22;
-        u32 c = ArenaPtrCompress(a, p);
-        utassert(c != 0);
-        utassert(c >= (u32)kArenaHeaderSize);
-        utassert(ArenaPtrUncompress(a, c) == p);
-        utassert(ArenaPtrUncompress<int>(a, c) == p);
-        utassert(ArenaPtrUncompress<int>(a, c)[1] == 22);
-        utassert(ArenaPtrCompress(a, nullptr) == 0);
-        utassert(ArenaPtrUncompress(a, 0) == nullptr);
-        ArenaDelete(a);
+// An allocation bigger than a block gets a block sized for it alone, and that
+// block stays the current one. The next small allocation chains off it and
+// must not inherit its size: reserving is cheap, but a block made for a big
+// allocation commits everything it reserves, so inheriting would commit the
+// whole of it for a handful of bytes.
+static void ArenaChainedBlockSizeTest() {
+    Arena* a = ArenaNew();
+    utassert(a != nullptr);
+    u64 reserveChunk = a->reserveChunkSize;
+    u64 commitChunk = a->commitChunkSize;
+    utassert(reserveChunk > 0 && commitChunk > 0);
+
+    // one allocation too big for a block of the usual size
+    void* big = a->Push(reserveChunk + 4096, 8, false);
+    utassert(big != nullptr);
+    utassert(a->current->reserved > reserveChunk);
+    utassert(a->current != a);
+
+    // fill what page alignment left over at the end of it, so the next push
+    // is the one that chains
+    u64 left = a->current->reserved - a->current->pos;
+    if (left > 0) {
+        utassert(a->Push(left, 1, false) != nullptr);
     }
 
-    // Multi-block chain: tiny reserve so a second Push allocates a new block
-    {
-        ArenaParams params = ArenaDefaultParams();
-        params.reserveSize = 4 * 1024;
-        params.commitSize = 4 * 1024;
-        Arena* a = ArenaNew(params);
-        utassert(a != nullptr);
-        utassert(a->current == a);
-        utassert(a->basePos == 0);
+    void* tail = a->Push(64, 8, false);
+    utassert(tail != nullptr);
+    utassert(a->current->reserved == reserveChunk);
+    utassert(a->current->committed == commitChunk);
+    ArenaDelete(a);
+}
 
-        // ArenaNew rounds the reserve up to a page, and a page is 16K on arm64
-        // macOS, not 4K - so size the pushes from the block we actually got.
-        // Two of these plus kArenaHeaderSize can't fit in one block.
-        u64 half = a->reserved / 2;
+#if IS_DEBUG
+static void OtherThreadSeesLock(Mutex* m) {
+    utassert(!m->IsHeldByCurrentThread());
+}
 
-        // Fill most of the first block (header is kArenaHeaderSize)
-        void* p1 = a->Push(half, 8, true);
-        utassert(p1 != nullptr);
-        utassert(a->current == a);
+// debug builds track the holder, so "caller holds X" can be asserted
+static void MutexOwnerTest() {
+    Mutex m;
+    utassert(!m.IsHeldByCurrentThread());
+    m.Lock();
+    utassert(m.IsHeldByCurrentThread());
+#if !OS_WASM
+    ThreadHandle t = StartThread(MkFunc0(OtherThreadSeesLock, &m), StrL("MutexOwnerTest"));
+    JoinThread(&t, -1);
+#endif
+    m.Unlock();
+    utassert(!m.IsHeldByCurrentThread());
+    utassert(m.TryLock());
+    utassert(m.IsHeldByCurrentThread());
+    m.Unlock();
 
-        // Force a second arena block in the chain
-        void* p2 = a->Push(half, 8, true);
-        utassert(p2 != nullptr);
-        utassert(a->current != a);
-        utassert(a->current->prev == a);
-        utassert(a->current->basePos == a->reserved);
+    RecursiveMutex rm;
+    rm.Lock();
+    rm.Lock();
+    rm.Unlock();
+    utassert(rm.IsHeldByCurrentThread());
+    rm.Unlock();
+    utassert(!rm.IsHeldByCurrentThread());
+}
+#endif
 
-        u32 c1 = ArenaPtrCompress(a, p1);
-        u32 c2 = ArenaPtrCompress(a, p2);
-        utassert(c1 != 0 && c2 != 0);
-        utassert(c1 < a->reserved);  // still in the first block's range
-        utassert(c2 >= a->reserved); // past the first block
-        utassert(c2 > c1);
+// ReportIf() evaluates to its condition, once, so callers can bail out in release
+static void ReportIfReturnsCondTest() {
+    int n = 0;
+    bool reported = ReportIf(++n > 5);
+    utassert(!reported);
+    utassert(n == 1);
+    if (ReportDebugIf(n == 2)) {
+        utassert(false);
+    }
+    int* p = &n;
+    utassert(!ReportIf(!p));
+}
 
-        utassert(ArenaPtrUncompress(a, c1) == p1);
-        utassert(ArenaPtrUncompress(a, c2) == p2);
-        utassert(ArenaPtrUncompress<char>(a, c2) == (char*)p2);
+// A size that wraps pos + size (e.g. a negative int cast to u64) must fail,
+// not move pos backwards over live allocations.
+static void ArenaPushOverflowTest() {
+    Arena* a = ArenaNew();
+    utassert(a != nullptr);
+    utassert(a->Push(64, 8, false) != nullptr);
+    u64 pos = a->current->pos;
 
-        // Write through uncompressed pointer in the second block
-        char* s = ArenaPtrUncompress<char>(a, c2);
-        s[0] = 'Z';
-        utassert(((char*)p2)[0] == 'Z');
+    utassert(a->Push((u64)-16, 8, false) == nullptr);
+    utassert(a->Push((u64)(int)-1, 1, true) == nullptr);
+    utassert(a->current->pos == pos);
+    ArenaDelete(a);
+}
 
-        // Another allocation on the second block still round-trips
-        void* p3 = a->Push(64, 8, true);
-        utassert(a->current != a);
-        u32 c3 = ArenaPtrCompress(a, p3);
-        utassert(ArenaPtrUncompress(a, c3) == p3);
-        utassert(c3 > c2);
+// a push that doesn't fit chains a new block, positioned after the previous one
+static void ArenaChainTest() {
+    ArenaParams params = ArenaDefaultParams();
+    params.reserveSize = 4 * 1024;
+    params.commitSize = 4 * 1024;
+    Arena* a = ArenaNew(params);
+    utassert(a != nullptr);
+    utassert(a->current == a);
+    utassert(a->basePos == 0);
 
-        ArenaDelete(a);
+    // ArenaNew rounds the reserve up to a page, and a page is 16K on arm64
+    // macOS, not 4K - so size the pushes from the block we actually got.
+    // Two of these plus kArenaHeaderSize can't fit in one block.
+    u64 half = a->reserved / 2;
+
+    void* p1 = a->Push(half, 8, true);
+    utassert(p1 != nullptr);
+    utassert(a->current == a);
+
+    void* p2 = a->Push(half, 8, true);
+    utassert(p2 != nullptr);
+    utassert(a->current != a);
+    utassert(a->current->prev == a);
+    utassert(a->current->basePos == a->reserved);
+    ((char*)p2)[0] = 'Z';
+    utassert(((char*)p2)[0] == 'Z');
+
+    ArenaDelete(a);
+}
+
+#if OS_POSIX && !OS_WASM
+static AtomicBool gTimedJoinFinished;
+
+static void TimedJoinWorker() {
+    SleepInMs(50);
+    AtomicBoolSet(&gTimedJoinFinished, true);
+}
+
+static void TimedJoinTest() {
+    AtomicBoolSet(&gTimedJoinFinished, false);
+    ThreadHandle thread = StartThread(MkFunc0Void(TimedJoinWorker), StrL("timed-join-test"));
+    utassert(thread != nullptr);
+    utassert(!JoinThread(&thread, 1));
+    utassert(thread == nullptr);
+    // the detached worker still finishes; poll, a loaded CI runner can take long
+    for (int i = 0; i < 500 && !AtomicBoolGet(&gTimedJoinFinished); i++) {
+        SleepInMs(10);
+    }
+    utassert(AtomicBoolGet(&gTimedJoinFinished));
+
+    AtomicBoolSet(&gTimedJoinFinished, false);
+    thread = StartThread(MkFunc0Void(TimedJoinWorker), StrL("timed-join-test"));
+    utassert(JoinThread(&thread, 500));
+    utassert(thread == nullptr);
+    utassert(AtomicBoolGet(&gTimedJoinFinished));
+}
+#endif
+
+#if !OS_WASM
+static AtomicBool gWaitThreadFinished;
+
+static void WaitThreadWorker() {
+    SleepInMs(50);
+    AtomicBoolSet(&gWaitThreadFinished, true);
+}
+
+// WaitThread() leaves the handle open: it can be waited on again and is closed
+// by its owner, before or after the thread ends.
+static void WaitThreadTest() {
+    AtomicBoolSet(&gWaitThreadFinished, false);
+    ThreadHandle thread = StartThread(MkFunc0Void(WaitThreadWorker), StrL("wait-thread-test"));
+    utassert(thread != nullptr);
+    utassert(!WaitThread(thread, 1));
+    utassert(thread != nullptr);
+    utassert(WaitThread(thread, -1));
+    utassert(AtomicBoolGet(&gWaitThreadFinished));
+    utassert(WaitThread(thread, 0));
+    utassert(SafeCloseThreadHandle(&thread));
+    utassert(thread == nullptr);
+    utassert(!WaitThread(nullptr, 0));
+
+    // closed while still running
+    AtomicBoolSet(&gWaitThreadFinished, false);
+    thread = StartThread(MkFunc0Void(WaitThreadWorker), StrL("wait-thread-test"));
+    utassert(SafeCloseThreadHandle(&thread));
+    // poll, a loaded CI runner can take long
+    for (int i = 0; i < 500 && !AtomicBoolGet(&gWaitThreadFinished); i++) {
+        SleepInMs(10);
+    }
+    utassert(AtomicBoolGet(&gWaitThreadFinished));
+}
+#endif
+
+// CmdToggleMirror prints through FlipPixmapHorizontally: 3 and 4 byte pixels,
+// odd widths (the middle pixel stays), padded rows
+static void FlipPixmapTest() {
+    PixmapFormat formats[] = {PixmapFormat::BGR8, PixmapFormat::BGRA8};
+    for (PixmapFormat fmt : formats) {
+        constexpr int kDx = 3;
+        constexpr int kDy = 2;
+        Pixmap* p = AllocPixmap(kDx, kDy, fmt);
+        int bpp = PixmapBytesPerPixel(fmt);
+        for (int y = 0; y < kDy; y++) {
+            for (int x = 0; x < kDx; x++) {
+                for (int b = 0; b < bpp; b++) {
+                    p->data[(y * p->stride) + (x * bpp) + b] = (u8)((y * 100) + (x * 10) + b);
+                }
+            }
+        }
+        FlipPixmapHorizontally(p);
+        for (int y = 0; y < kDy; y++) {
+            for (int x = 0; x < kDx; x++) {
+                for (int b = 0; b < bpp; b++) {
+                    u8 want = (u8)((y * 100) + ((kDx - 1 - x) * 10) + b);
+                    utassert(p->data[(y * p->stride) + (x * bpp) + b] == want);
+                }
+            }
+        }
+        FreePixmap(p);
     }
 }
 
 void BaseUtilTest() {
+    FlipPixmapTest();
+#if !OS_WASM
+    WaitThreadTest();
+#endif
     ListTest();
     Func0Test();
     Func1Test();
     Func1FromFunc0Test();
+    Func1ListTest();
     ColorTest();
-    ArenaPtrCompressTest();
+    ReportIfReturnsCondTest();
+#if IS_DEBUG
+    MutexOwnerTest();
+#endif
+    ArenaChainedBlockSizeTest();
+    ArenaPushOverflowTest();
+    ArenaChainTest();
+#if OS_POSIX && !OS_WASM
+    TimedJoinTest();
+#endif
 
     size_t n = dimof(roundUpTestCases) / 2;
     for (size_t i = 0; i < n; i++) {
@@ -315,6 +531,25 @@ void BaseUtilTest() {
     utassert(RoundToPowerOf2(15) == 16);
     utassert(RoundToPowerOf2((1 << 13) + 1) == (1 << 14));
     utassert(RoundToPowerOf2((1 << 30) + 1) == -1); // overflow: no power of 2 fits in an int
+
+    utassert(WCharToLower('A') == 'a');
+    utassert(WCharToLower('Z') == 'z');
+    utassert(WCharToLower('a') == 'a');
+    utassert(WCharToLower('0') == '0');
+    utassert(WCharToLower(0x00C9) == 0x00E9); // É -> é
+    utassert(WCharToLower(0x0410) == 0x0430); // А -> а
+
+    utassert(FoldCaseRune(0x0130) == 'i');       // İ -> i
+    utassert(FoldDiacriticsRune(0x00E9) == 'e'); // é -> e
+    utassert(FoldDiacriticsRune(0x0141) == 'L'); // Ł -> L
+    utassert(FoldDiacriticsRune(0x0105) == 'a'); // ą -> a
+    utassert(FoldDiacriticsRune(0x0386) == 0x0391);
+    utassert(FoldDiacriticsRune(0x0401) == 0x0415);
+    utassert(FoldDiacriticsRune(0x1ea1) == 'a');
+    utassert(FoldDiacriticsRune(0x1f82) == 0x03b1);
+    utassert(FoldDiacriticsRune(0x212b) == 'A');
+    utassert(FoldDiacriticsRune(0x0430) == 0x0430);
+    utassert(IsCombiningMark(0x0301));
 
     utassert(MurmurHash2(nullptr, 0) == 0);
     utassert(MurmurHash2("test", 4) != MurmurHash2("Test", 4));

@@ -1,16 +1,19 @@
 /* Copyright 2022 the SumatraPDF project authors (see AUTHORS file).
    License: Simplified BSD (see COPYING.BSD) */
 
+void WriteStdout(Str data);
+void WriteStdoutLn(Str data);
+
 #if OS_WIN
-#define PATH_SEP "\\"
-#define PATH_SEP_CHAR '\\'
-#define PATH_SEP_WSTR L"\\"
-#define PATH_SEP_WCHAR L'\\'
+#define kPathSep "\\"
+constexpr char kPathSepChar = '\\';
+constexpr const WCHAR* kPathSepWStr = L"\\";
+constexpr WCHAR kPathSepWChar = L'\\';
 #else
-#define PATH_SEP "/"
-#define PATH_SEP_CHAR '/'
-#define PATH_SEP_WSTR L"/"
-#define PATH_SEP_WCHAR L'/'
+#define kPathSep "/"
+constexpr char kPathSepChar = '/';
+constexpr const WCHAR* kPathSepWStr = L"/";
+constexpr WCHAR kPathSepWChar = L'/';
 #endif
 
 namespace path {
@@ -47,9 +50,14 @@ bool IsSame(Str path1, Str path2);
 bool HasVariableDriveLetter(Str path);
 bool IsOnFixedDrive(Str path);
 bool IsOnNetworkDrive(Str path);
+bool IsOnAvailableDrive(Str path);
 bool IsCloudPlaceholder(Str path);
+TempStr StorageInfoTemp(Str path);
+bool IsEphemeralHostFile(Str path);
+bool IsInTempDir(Str path);
 bool SupportsChangeNotifications(Str path);
 bool IsAbsolute(Str path);
+bool IsInDir(Str path, Str dir);
 
 bool IsWslUnc(Str path);
 bool IsWslMount(Str path);
@@ -70,7 +78,9 @@ Type GetType(Str path);
 TempStr GetTempFilePathTemp(Str filePrefix = Str());
 TempStr GetSelfExePathTemp();
 #if OS_WIN
-TempWStr GetSelfExePathW();
+// initialCch is only a starting guess; the buffer grows until the path fits.
+// Tests pass a tiny value to exercise that.
+TempWStr GetModulePathTemp(HMODULE mod, int initialCch);
 #endif
 TempStr GetSelfExeDirTemp();
 TempStr GetPathInExeDirTemp(Str fileName = Str());
@@ -90,6 +100,14 @@ bool Exists(Str path);
 
 FILE* OpenFILE(Str path);
 FileHandle OpenReadOnly(Str path);
+
+// handle-based i/o, for files kept open across many reads / appends
+FileHandle OpenReadWrite(Str path, bool createIfMissing);
+void Close(FileHandle);
+i64 SeekEnd(FileHandle);
+bool WriteAll(FileHandle, Str data);
+bool Flush(FileHandle);
+
 Str ReadFileWithArena(Str path, Arena*);
 Str ReadFile(Str path);
 int ReadN(Str path, u8* buf, size_t toRead);
@@ -116,7 +134,6 @@ bool SetModificationTime(Str path, FILETIME lastMod);
 DWORD GetAttributes(Str path);
 bool SetAttributes(Str path, DWORD attrs);
 
-bool StartsWithN(Str path, Str s);
 bool StartsWith(Str path, Str s);
 
 int GetZoneIdentifier(Str path);
@@ -138,10 +155,10 @@ extern thread_local CopyProgressCb gFileCopyProgressCb;
 bool Copy(Str dst, Str src, bool dontOverwrite);
 bool Copy(Str dst, Str src, bool dontOverwrite, const CopyProgressCb& cbProgress);
 bool Rename(Str newPath, Str oldPath);
+bool RenameReplace(Str newPath, Str oldPath);
 bool OverwriteAtomicRetry(Str dst, Str src, int retryCount, int retrySleepMs);
 
 bool SetAccessTime(Str path, FILETIME accessTime);
-FILETIME GetAccessTime(Str path);
 
 } // namespace file
 
@@ -160,10 +177,7 @@ bool HasWriteAccess(Str dir);
 } // namespace dir
 
 bool FileSystemEntryExists(Str s);
-Str FindFirstValidParentDir(Str path);
-Str PathGetDirTemp(Str path);
-Str PathGetNameTemp(Str path);
-Str SmartResolveDirectory(Str dir);
+TempStr GetDownloadsDirTemp();
 
 bool FileTimeEq(const FILETIME& a, const FILETIME& b);
 int FileTimeDiffInSecs(const FILETIME& ft1, const FILETIME& ft2);

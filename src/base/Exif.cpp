@@ -36,115 +36,115 @@ struct TagDef {
 };
 
 const TagDef kImageTags[] = {
-    {0x010E, "ImageDescription"},
-    {0x010F, "Make"},
-    {0x0110, "Model"},
-    {0x0112, "Orientation"},
-    {0x011A, "XResolution"},
-    {0x011B, "YResolution"},
-    {0x0128, "ResolutionUnit"},
-    {0x0131, "Software"},
-    {0x0132, "DateTime"},
-    {0x013B, "Artist"},
-    {0x013C, "HostComputer"},
-    {0x0213, "YCbCrPositioning"},
-    {0x8298, "Copyright"},
-    {0x8769, "ExifOffset"},
-    {0x8825, "GPSInfo"},
-    {0x9C9B, "XPTitle"},
-    {0x9C9C, "XPComment"},
-    {0x9C9D, "XPAuthor"},
-    {0x9C9E, "XPKeywords"},
-    {0x9C9F, "XPSubject"},
-    {0xC4A5, "PrintIM"},
-    {0x0100, "ImageWidth"},
-    {0x0101, "ImageLength"},
-    {0x0102, "BitsPerSample"},
-    {0x0103, "Compression"},
-    {0x0201, "JPEGInterchangeFormat"},
-    {0x0202, "JPEGInterchangeFormatLength"},
+    {0x010E, StrL("ImageDescription")},
+    {0x010F, StrL("Make")},
+    {0x0110, StrL("Model")},
+    {0x0112, StrL("Orientation")},
+    {0x011A, StrL("XResolution")},
+    {0x011B, StrL("YResolution")},
+    {0x0128, StrL("ResolutionUnit")},
+    {0x0131, StrL("Software")},
+    {0x0132, StrL("DateTime")},
+    {0x013B, StrL("Artist")},
+    {0x013C, StrL("HostComputer")},
+    {0x0213, StrL("YCbCrPositioning")},
+    {0x8298, StrL("Copyright")},
+    {0x8769, StrL("ExifOffset")},
+    {0x8825, StrL("GPSInfo")},
+    {0x9C9B, StrL("XPTitle")},
+    {0x9C9C, StrL("XPComment")},
+    {0x9C9D, StrL("XPAuthor")},
+    {0x9C9E, StrL("XPKeywords")},
+    {0x9C9F, StrL("XPSubject")},
+    {0xC4A5, StrL("PrintIM")},
+    {0x0100, StrL("ImageWidth")},
+    {0x0101, StrL("ImageLength")},
+    {0x0102, StrL("BitsPerSample")},
+    {0x0103, StrL("Compression")},
+    {0x0201, StrL("JPEGInterchangeFormat")},
+    {0x0202, StrL("JPEGInterchangeFormatLength")},
 };
 
 const TagDef kExifTags[] = {
-    {0x829A, "ExposureTime"},
-    {0x829D, "FNumber"},
-    {0x8822, "ExposureProgram"},
-    {0x8827, "ISOSpeedRatings"},
-    {0x9000, "ExifVersion"},
-    {0x9003, "DateTimeOriginal"},
-    {0x9004, "DateTimeDigitized"},
-    {0x9010, "OffsetTime"},
-    {0x9011, "OffsetTimeOriginal"},
-    {0x9012, "OffsetTimeDigitized"},
-    {0x9101, "ComponentsConfiguration"},
-    {0x9102, "CompressedBitsPerPixel"},
-    {0x9201, "ShutterSpeedValue"},
-    {0x9202, "ApertureValue"},
-    {0x9203, "BrightnessValue"},
-    {0x9204, "ExposureBiasValue"},
-    {0x9205, "MaxApertureValue"},
-    {0x9207, "MeteringMode"},
-    {0x9208, "LightSource"},
-    {0x9209, "Flash"},
-    {0x920A, "FocalLength"},
-    {0x9214, "SubjectArea"},
-    {0x927C, "MakerNote"},
-    {0x9286, "UserComment"},
-    {0x9290, "SubSecTime"},
-    {0x9291, "SubSecTimeOriginal"},
-    {0x9292, "SubSecTimeDigitized"},
-    {0xA000, "FlashPixVersion"},
-    {0xA001, "ColorSpace"},
-    {0xA002, "ExifImageWidth"},
-    {0xA003, "ExifImageLength"},
-    {0xA005, "InteroperabilityOffset"},
-    {0xA20E, "FocalPlaneXResolution"},
-    {0xA20F, "FocalPlaneYResolution"},
-    {0xA210, "FocalPlaneResolutionUnit"},
-    {0xA217, "SensingMethod"},
-    {0xA300, "FileSource"},
-    {0xA301, "SceneType"},
-    {0xA401, "CustomRendered"},
-    {0xA402, "ExposureMode"},
-    {0xA403, "WhiteBalance"},
-    {0xA404, "DigitalZoomRatio"},
-    {0xA405, "FocalLengthIn35mmFilm"},
-    {0xA406, "SceneCaptureType"},
-    {0xA407, "GainControl"},
-    {0xA408, "Contrast"},
-    {0xA409, "Saturation"},
-    {0xA40A, "Sharpness"},
-    {0xA432, "LensSpecification"},
-    {0xA433, "LensMake"},
-    {0xA434, "LensModel"},
-    {0x8830, "SensitivityType"},
+    {0x829A, StrL("ExposureTime")},
+    {0x829D, StrL("FNumber")},
+    {0x8822, StrL("ExposureProgram")},
+    {0x8827, StrL("ISOSpeedRatings")},
+    {0x9000, StrL("ExifVersion")},
+    {0x9003, StrL("DateTimeOriginal")},
+    {0x9004, StrL("DateTimeDigitized")},
+    {0x9010, StrL("OffsetTime")},
+    {0x9011, StrL("OffsetTimeOriginal")},
+    {0x9012, StrL("OffsetTimeDigitized")},
+    {0x9101, StrL("ComponentsConfiguration")},
+    {0x9102, StrL("CompressedBitsPerPixel")},
+    {0x9201, StrL("ShutterSpeedValue")},
+    {0x9202, StrL("ApertureValue")},
+    {0x9203, StrL("BrightnessValue")},
+    {0x9204, StrL("ExposureBiasValue")},
+    {0x9205, StrL("MaxApertureValue")},
+    {0x9207, StrL("MeteringMode")},
+    {0x9208, StrL("LightSource")},
+    {0x9209, StrL("Flash")},
+    {0x920A, StrL("FocalLength")},
+    {0x9214, StrL("SubjectArea")},
+    {0x927C, StrL("MakerNote")},
+    {0x9286, StrL("UserComment")},
+    {0x9290, StrL("SubSecTime")},
+    {0x9291, StrL("SubSecTimeOriginal")},
+    {0x9292, StrL("SubSecTimeDigitized")},
+    {0xA000, StrL("FlashPixVersion")},
+    {0xA001, StrL("ColorSpace")},
+    {0xA002, StrL("ExifImageWidth")},
+    {0xA003, StrL("ExifImageLength")},
+    {0xA005, StrL("InteroperabilityOffset")},
+    {0xA20E, StrL("FocalPlaneXResolution")},
+    {0xA20F, StrL("FocalPlaneYResolution")},
+    {0xA210, StrL("FocalPlaneResolutionUnit")},
+    {0xA217, StrL("SensingMethod")},
+    {0xA300, StrL("FileSource")},
+    {0xA301, StrL("SceneType")},
+    {0xA401, StrL("CustomRendered")},
+    {0xA402, StrL("ExposureMode")},
+    {0xA403, StrL("WhiteBalance")},
+    {0xA404, StrL("DigitalZoomRatio")},
+    {0xA405, StrL("FocalLengthIn35mmFilm")},
+    {0xA406, StrL("SceneCaptureType")},
+    {0xA407, StrL("GainControl")},
+    {0xA408, StrL("Contrast")},
+    {0xA409, StrL("Saturation")},
+    {0xA40A, StrL("Sharpness")},
+    {0xA432, StrL("LensSpecification")},
+    {0xA433, StrL("LensMake")},
+    {0xA434, StrL("LensModel")},
+    {0x8830, StrL("SensitivityType")},
 };
 
 const TagDef kGpsTags[] = {
-    {0x0000, "GPSVersionID"},
-    {0x0001, "GPSLatitudeRef"},
-    {0x0002, "GPSLatitude"},
-    {0x0003, "GPSLongitudeRef"},
-    {0x0004, "GPSLongitude"},
-    {0x0005, "GPSAltitudeRef"},
-    {0x0006, "GPSAltitude"},
-    {0x0007, "GPSTimeStamp"},
-    {0x0009, "GPSStatus"},
-    {0x000A, "GPSMeasureMode"},
-    {0x000B, "GPSDOP"},
-    {0x000C, "GPSSpeedRef"},
-    {0x000D, "GPSSpeed"},
-    {0x0010, "GPSImgDirectionRef"},
-    {0x0011, "GPSImgDirection"},
-    {0x001D, "GPSDate"},
-    {0x001B, "GPSProcessingMethod"},
+    {0x0000, StrL("GPSVersionID")},
+    {0x0001, StrL("GPSLatitudeRef")},
+    {0x0002, StrL("GPSLatitude")},
+    {0x0003, StrL("GPSLongitudeRef")},
+    {0x0004, StrL("GPSLongitude")},
+    {0x0005, StrL("GPSAltitudeRef")},
+    {0x0006, StrL("GPSAltitude")},
+    {0x0007, StrL("GPSTimeStamp")},
+    {0x0009, StrL("GPSStatus")},
+    {0x000A, StrL("GPSMeasureMode")},
+    {0x000B, StrL("GPSDOP")},
+    {0x000C, StrL("GPSSpeedRef")},
+    {0x000D, StrL("GPSSpeed")},
+    {0x0010, StrL("GPSImgDirectionRef")},
+    {0x0011, StrL("GPSImgDirection")},
+    {0x001D, StrL("GPSDate")},
+    {0x001B, StrL("GPSProcessingMethod")},
 };
 
 const TagDef kInteropTags[] = {
-    {0x0001, "InteroperabilityIndex"},
-    {0x0002, "InteroperabilityVersion"},
-    {0x1001, "RelatedImageWidth"},
-    {0x1002, "RelatedImageLength"},
+    {0x0001, StrL("InteroperabilityIndex")},
+    {0x0002, StrL("InteroperabilityVersion")},
+    {0x1001, StrL("RelatedImageWidth")},
+    {0x1002, StrL("RelatedImageLength")},
 };
 
 Str LookupTagName(const TagDef* tags, int n, u16 id) {
@@ -174,52 +174,24 @@ Str GroupPrefix(IfdGroup g) {
     return StrL("");
 }
 
+// TIFF types are 1..10; name and element size, indexed by type
+// clang-format off
+static const struct {
+    Str name;
+    int elemSize;
+} kTiffTypes[] = {
+    {StrL("Unknown"), 0},      {StrL("Byte"), 1},        {StrL("ASCII"), 1},       {StrL("Short"), 2},
+    {StrL("Long"), 4},         {StrL("Ratio"), 8},       {StrL("Signed Byte"), 1}, {StrL("Undefined"), 1},
+    {StrL("Signed Short"), 2}, {StrL("Signed Long"), 4}, {StrL("Signed Ratio"), 8},
+};
+// clang-format on
+
 Str TypeName(u16 type) {
-    switch (type) {
-        case TiffByte:
-            return StrL("Byte");
-        case TiffAscii:
-            return StrL("ASCII");
-        case TiffShort:
-            return StrL("Short");
-        case TiffLong:
-            return StrL("Long");
-        case TiffRational:
-            return StrL("Ratio");
-        case TiffSByte:
-            return StrL("Signed Byte");
-        case TiffUndefined:
-            return StrL("Undefined");
-        case TiffSShort:
-            return StrL("Signed Short");
-        case TiffSLong:
-            return StrL("Signed Long");
-        case TiffSRational:
-            return StrL("Signed Ratio");
-        default:
-            return StrL("Unknown");
-    }
+    return type < dimof(kTiffTypes) ? kTiffTypes[type].name : StrL("Unknown");
 }
 
 int TypeElemSize(u16 type) {
-    switch (type) {
-        case TiffByte:
-        case TiffAscii:
-        case TiffSByte:
-        case TiffUndefined:
-            return 1;
-        case TiffShort:
-        case TiffSShort:
-            return 2;
-        case TiffLong:
-        case TiffSLong:
-            return 4;
-        case TiffRational:
-        case TiffSRational:
-            return 8;
-        default:
-            return 0;
-    }
+    return type < dimof(kTiffTypes) ? kTiffTypes[type].elemSize : 0;
 }
 
 const TagDef* TagsForGroup(IfdGroup g, int& n) {
@@ -251,128 +223,88 @@ Str TagName(IfdGroup g, u16 tag) {
     return tags ? LookupTagName(tags, n, tag) : Str{};
 }
 
-Str LookupEnum(SeqStrings names, u32 val) {
-    if (val <= (u32)INT_MAX) {
-        return SeqStrByIndex(names, (int)val);
+// Names for enum-like SHORT tags, looked up by (tag, value). Image/Thumbnail
+// IFDs and the Exif IFD have separate tag spaces.
+struct EnumName {
+    u16 tag;
+    u16 val;
+    Str name;
+};
+
+#define IMG(prop) (u16) ExifProp::prop
+// clang-format off
+static const EnumName kImageEnumNames[] = {
+    {IMG(Orientation), 1, StrL("Horizontal (normal)")},
+    {IMG(Orientation), 2, StrL("Mirrored horizontal")},
+    {IMG(Orientation), 3, StrL("Rotated 180")},
+    {IMG(Orientation), 4, StrL("Mirrored vertical")},
+    {IMG(Orientation), 5, StrL("Mirrored horizontal then rotated 90 CCW")},
+    {IMG(Orientation), 6, StrL("Rotated 90 CW")},
+    {IMG(Orientation), 7, StrL("Mirrored horizontal then rotated 90 CW")},
+    {IMG(Orientation), 8, StrL("Rotated 90 CCW")},
+    {IMG(ResolutionUnit), 2, StrL("Pixels/Inch")},
+    {IMG(ResolutionUnit), 3, StrL("Pixels/Centimeter")},
+    {IMG(YCbCrPositioning), 1, StrL("Centered")},
+    {IMG(YCbCrPositioning), 2, StrL("Co-sited")},
+    {IMG(Compression), 6, StrL("JPEG (old-style)")},
+    {IMG(Compression), 7, StrL("JPEG")},
+};
+// clang-format on
+
+// clang-format off
+static const EnumName kExifEnumNames[] = {
+    {IMG(ExposureProgram), 0, StrL("Unidentified")},   {IMG(ExposureProgram), 1, StrL("Manual")},
+    {IMG(ExposureProgram), 2, StrL("Program Normal")}, {IMG(ExposureProgram), 3, StrL("Aperture Priority")},
+    {IMG(ExposureProgram), 4, StrL("Shutter Priority")}, {IMG(ExposureProgram), 5, StrL("Program Creative")},
+    {IMG(ExposureProgram), 6, StrL("Program Action")}, {IMG(ExposureProgram), 7, StrL("Portrait Mode")},
+    {IMG(ExposureProgram), 8, StrL("Landscape Mode")},
+    {IMG(MeteringMode), 0, StrL("Unidentified")}, {IMG(MeteringMode), 1, StrL("Average")},
+    {IMG(MeteringMode), 2, StrL("CenterWeightedAverage")}, {IMG(MeteringMode), 3, StrL("Spot")},
+    {IMG(MeteringMode), 4, StrL("MultiSpot")}, {IMG(MeteringMode), 5, StrL("Pattern")},
+    {IMG(MeteringMode), 6, StrL("Partial")},
+    {IMG(ColorSpace), 1, StrL("sRGB")}, {IMG(ColorSpace), 0xFFFF, StrL("Uncalibrated")},
+    {IMG(WhiteBalance), 0, StrL("Auto")}, {IMG(WhiteBalance), 1, StrL("Manual")},
+    {IMG(ExposureMode), 0, StrL("Auto Exposure")}, {IMG(ExposureMode), 1, StrL("Manual Exposure")},
+    {IMG(ExposureMode), 2, StrL("Auto Bracket")},
+    {IMG(SceneCaptureType), 0, StrL("Standard")}, {IMG(SceneCaptureType), 1, StrL("Landscape")},
+    {IMG(SceneCaptureType), 2, StrL("Portrait")}, {IMG(SceneCaptureType), 3, StrL("Night")},
+    {IMG(GainControl), 0, StrL("None")}, {IMG(GainControl), 1, StrL("Low gain up")},
+    {IMG(GainControl), 2, StrL("High gain up")}, {IMG(GainControl), 3, StrL("Low gain down")},
+    {IMG(GainControl), 4, StrL("High gain down")},
+    {IMG(Contrast), 0, StrL("Normal")}, {IMG(Contrast), 1, StrL("Soft")}, {IMG(Contrast), 2, StrL("Hard")},
+    {IMG(Saturation), 0, StrL("Normal")}, {IMG(Saturation), 1, StrL("Soft")}, {IMG(Saturation), 2, StrL("Hard")},
+    {IMG(Sharpness), 0, StrL("Normal")}, {IMG(Sharpness), 1, StrL("Soft")}, {IMG(Sharpness), 2, StrL("Hard")},
+    {0xA401, 0, StrL("Normal")}, {0xA401, 1, StrL("Custom")}, // CustomRendered
+    {IMG(SensitivityType), 0, StrL("Unknown")},
+    {IMG(SensitivityType), 1, StrL("Standard Output Sensitivity")},
+    {IMG(SensitivityType), 2, StrL("Recommended Exposure Index")},
+    {IMG(SensitivityType), 3, StrL("ISO Speed")},
+    {IMG(SensitivityType), 4, StrL("Standard Output Sensitivity and Recommended Exposure Index")},
+    {IMG(SensitivityType), 5, StrL("Standard Output Sensitivity and ISO Speed")},
+    {IMG(SensitivityType), 6, StrL("Recommended Exposure Index and ISO Speed")},
+    {IMG(SensitivityType), 7, StrL("Standard Output Sensitivity, Recommended Exposure Index and ISO Speed")},
+    {IMG(Flash), 0, StrL("Flash did not fire")}, {IMG(Flash), 1, StrL("Flash fired")},
+    {IMG(Flash), 5, StrL("Strobe return light not detected")}, {IMG(Flash), 7, StrL("Strobe return light detected")},
+    {IMG(Flash), 9, StrL("Flash fired, compulsory flash mode")},
+    {IMG(Flash), 16, StrL("Flash did not fire, compulsory flash mode")},
+    {IMG(Flash), 24, StrL("Flash did not fire, auto mode")}, {IMG(Flash), 25, StrL("Flash fired, auto mode")},
+};
+// clang-format on
+#undef IMG
+
+static Str LookupEnumName(IfdGroup g, u16 tag, u32 val) {
+    const EnumName* names = kImageEnumNames;
+    int n = dimofi(kImageEnumNames);
+    if (g == IfdGroup::Exif) {
+        names = kExifEnumNames;
+        n = dimofi(kExifEnumNames);
+    } else if (g != IfdGroup::Image && g != IfdGroup::Thumbnail) {
+        return {};
     }
-    return {};
-}
-
-Str FormatOrientation(u32 val) {
-    static SeqStrings names =
-        "Horizontal (normal)\0"
-        "Mirrored horizontal\0"
-        "Rotated 180\0"
-        "Mirrored vertical\0"
-        "Mirrored horizontal then rotated 90 CCW\0"
-        "Rotated 90 CW\0"
-        "Mirrored horizontal then rotated 90 CW\0"
-        "Rotated 90 CCW\0";
-    return val > 0 ? LookupEnum(names, val - 1) : Str{};
-}
-
-Str FormatExposureProgram(u32 val) {
-    static SeqStrings names =
-        "Unidentified\0"
-        "Manual\0"
-        "Program Normal\0"
-        "Aperture Priority\0"
-        "Shutter Priority\0"
-        "Program Creative\0"
-        "Program Action\0"
-        "Portrait Mode\0"
-        "Landscape Mode\0";
-    return LookupEnum(names, val);
-}
-
-Str FormatMeteringMode(u32 val) {
-    static SeqStrings names =
-        "Unidentified\0"
-        "Average\0"
-        "CenterWeightedAverage\0"
-        "Spot\0"
-        "MultiSpot\0"
-        "Pattern\0"
-        "Partial\0";
-    return LookupEnum(names, val);
-}
-
-Str FormatColorSpace(u32 val) {
-    if (val == 1) {
-        return StrL("sRGB");
-    }
-    if (val == 0xFFFF) {
-        return StrL("Uncalibrated");
-    }
-    return {};
-}
-
-Str FormatWhiteBalance(u32 val) {
-    return val == 0 ? StrL("Auto") : StrL("Manual");
-}
-
-Str FormatExposureMode(u32 val) {
-    static SeqStrings names = "Auto Exposure\0Manual Exposure\0Auto Bracket\0";
-    return LookupEnum(names, val);
-}
-
-Str FormatSceneCaptureType(u32 val) {
-    static SeqStrings names = "Standard\0Landscape\0Portrait\0Night\0";
-    return LookupEnum(names, val);
-}
-
-Str FormatGainControl(u32 val) {
-    static SeqStrings names =
-        "None\0"
-        "Low gain up\0"
-        "High gain up\0"
-        "Low gain down\0"
-        "High gain down\0";
-    return LookupEnum(names, val);
-}
-
-Str FormatContrastSatSharp(u32 val) {
-    static SeqStrings names = "Normal\0Soft\0Hard\0";
-    return LookupEnum(names, val);
-}
-
-Str FormatCustomRendered(u32 val) {
-    return val == 0 ? StrL("Normal") : StrL("Custom");
-}
-
-Str FormatSensitivityType(u32 val) {
-    static SeqStrings names =
-        "Unknown\0"
-        "Standard Output Sensitivity\0"
-        "Recommended Exposure Index\0"
-        "ISO Speed\0"
-        "Standard Output Sensitivity and Recommended Exposure Index\0"
-        "Standard Output Sensitivity and ISO Speed\0"
-        "Recommended Exposure Index and ISO Speed\0"
-        "Standard Output Sensitivity, Recommended Exposure Index and ISO Speed\0";
-    return LookupEnum(names, val);
-}
-
-Str FormatResolutionUnit(u32 val) {
-    if (val == 2) {
-        return StrL("Pixels/Inch");
-    }
-    if (val == 3) {
-        return StrL("Pixels/Centimeter");
-    }
-    return {};
-}
-
-Str FormatYCbCrPositioning(u32 val) {
-    return val == 1 ? StrL("Centered") : StrL("Co-sited");
-}
-
-Str FormatCompression(u32 val) {
-    if (val == 6) {
-        return StrL("JPEG (old-style)");
-    }
-    if (val == 7) {
-        return StrL("JPEG");
+    for (int i = 0; i < n; i++) {
+        if (names[i].tag == tag && names[i].val == val) {
+            return names[i].name;
+        }
     }
     return {};
 }
@@ -385,32 +317,8 @@ Str FormatSceneType(u8 val) {
     return val == 1 ? StrL("Directly Photographed") : Str{};
 }
 
-Str FormatFlash(u32 val) {
-    switch (val) {
-        case 0:
-            return StrL("Flash did not fire");
-        case 1:
-            return StrL("Flash fired");
-        case 5:
-            return StrL("Strobe return light not detected");
-        case 7:
-            return StrL("Strobe return light detected");
-        case 9:
-            return StrL("Flash fired, compulsory flash mode");
-        case 16:
-            return StrL("Flash did not fire, compulsory flash mode");
-        case 24:
-            return StrL("Flash did not fire, auto mode");
-        case 25:
-            return StrL("Flash fired, auto mode");
-        default:
-            return {};
-    }
-}
-
 bool IsXpProp(ExifProp prop) {
-    return prop == ExifProp::XPTitle || prop == ExifProp::XPComment || prop == ExifProp::XPAuthor ||
-           prop == ExifProp::XPKeywords || prop == ExifProp::XPSubject;
+    return prop >= ExifProp::XPTitle && prop <= ExifProp::XPSubject;
 }
 
 bool IsAsciiUndefinedProp(ExifProp prop) {
@@ -424,7 +332,8 @@ u16 ReadLE16(const u8* p) {
 TempStr Utf16LeToUtf8Temp(Str data) {
     // UTF-8 is at most 3x UTF-16 code units for BMP; EXIF strings are usually short.
     char outScratch[512]{};
-    str::Builder out(Str(outScratch, sizeofi(outScratch)));
+    str::Builder out;
+    out.UseExternalBuffer(Str(outScratch, sizeofi(outScratch)));
     int n = data.len & ~1;
     for (int i = 0; i + 1 < n; i += 2) {
         u32 c = ReadLE16((const u8*)data.s + i);
@@ -448,7 +357,7 @@ TempStr Utf16LeToUtf8Temp(Str data) {
 
 TempStr TrimmedAsciiTemp(ByteReader r, int off, u32 count) {
     if (off < 0 || off >= r.len) {
-        return str::DupTemp("");
+        return str::DupTemp(StrL(""));
     }
     int n = (int)count;
     if (off + n > r.len) {
@@ -500,7 +409,7 @@ void AppendLine(ExifParser& parser, IfdGroup g, u16 tag, u16 type, TempStr value
     Str prefix = GroupPrefix(g);
     Str name = TagName(g, tag);
     char tagNameBuf[32];
-    if (!name) {
+    if (len(name) == 0) {
         snprintf(tagNameBuf, sizeof(tagNameBuf), "Tag 0x%04X", tag);
         name = Str(tagNameBuf);
     }
@@ -510,7 +419,7 @@ void AppendLine(ExifParser& parser, IfdGroup g, u16 tag, u16 type, TempStr value
 
 TempStr FormatRationalPair(u32 num, u32 den, bool asFraction) {
     if (den == 0) {
-        return str::DupTemp("0");
+        return str::DupTemp(StrL("0"));
     }
     if (asFraction && num == 1) {
         return fmt("1/%u", den);
@@ -528,14 +437,15 @@ TempStr FormatComponentsConfig(ByteReader r, int off, u32 count) {
     static SeqStrings compNames = "Y\0Cb\0Cr\0R\0G\0B\0";
     // "Y, Cb, Cr" etc. — a few components.
     char sScratch[64]{};
-    str::Builder s(Str(sScratch, sizeofi(sScratch)));
+    str::Builder s;
+    s.UseExternalBuffer(Str(sScratch, sizeofi(sScratch)));
     for (u32 i = 0; i < count && off + (int)i < r.len; i++) {
         u8 c = r.UInt8(off + (int)i);
         if (c == 0) {
             break;
         }
         if (len(s) > 0) {
-            s.Append(", ");
+            s.Append(StrL(", "));
         }
         Str compName = SeqStrByIndex(compNames, c - 1);
         if (compName) {
@@ -543,14 +453,14 @@ TempStr FormatComponentsConfig(ByteReader r, int off, u32 count) {
         }
     }
     if (len(s) == 0) {
-        return str::DupTemp("YCbCr");
+        return str::DupTemp(StrL("YCbCr"));
     }
     return ToStrTemp(s);
 }
 
 TempStr FormatUndefinedBytesTemp(ByteReader r, int off, u32 count, bool asList) {
     if (count == 0) {
-        return str::DupTemp("");
+        return str::DupTemp(StrL(""));
     }
     if (off + (int)count > r.len) {
         count = (u32)(r.len - off);
@@ -574,19 +484,20 @@ TempStr FormatUndefinedBytesTemp(ByteReader r, int off, u32 count, bool asList) 
     }
     // At most 20 bytes as "255, " ~ 80 chars + brackets.
     char sScratch[128]{};
-    str::Builder s(Str(sScratch, sizeofi(sScratch)));
-    s.Append("[");
+    str::Builder s;
+    s.UseExternalBuffer(Str(sScratch, sizeofi(sScratch)));
+    s.Append(StrL("["));
     u32 show = count > 20 ? 20 : count;
     for (u32 i = 0; i < show; i++) {
         if (i > 0) {
-            s.Append(", ");
+            s.Append(StrL(", "));
         }
         s.Append(fmt("%u", r.UInt8(off + i)));
     }
     if (count > show) {
-        s.Append(", ... ");
+        s.Append(StrL(", ... "));
     }
-    s.Append("]");
+    s.Append(StrL("]"));
     return ToStrTemp(s);
 }
 
@@ -607,48 +518,12 @@ bool ReadRational(const ExifParser& parser, int off, ExifRational* valOut, bool 
 TempStr FormatValuesTemp(const ExifParser& parser, IfdGroup g, u16 tag, u16 type, u32 count, int off) {
     ByteReader r(parser.exifBlob);
     if (count == 0) {
-        return str::DupTemp("");
+        return str::DupTemp(StrL(""));
     }
 
     if (type == TiffShort && count == 1) {
         u32 val = off + 2 <= r.len ? ReadWord(parser, off) : 0;
-        Str s;
-        if (g == IfdGroup::Image || g == IfdGroup::Thumbnail) {
-            if (tag == (u16)ExifProp::Orientation) {
-                s = FormatOrientation(val);
-            } else if (tag == (u16)ExifProp::ResolutionUnit) {
-                s = FormatResolutionUnit(val);
-            } else if (tag == (u16)ExifProp::YCbCrPositioning) {
-                s = FormatYCbCrPositioning(val);
-            } else if (tag == (u16)ExifProp::Compression) {
-                s = FormatCompression(val);
-            }
-        } else if (g == IfdGroup::Exif) {
-            if (tag == (u16)ExifProp::ExposureProgram) {
-                s = FormatExposureProgram(val);
-            } else if (tag == (u16)ExifProp::MeteringMode) {
-                s = FormatMeteringMode(val);
-            } else if (tag == (u16)ExifProp::ColorSpace) {
-                s = FormatColorSpace(val);
-            } else if (tag == (u16)ExifProp::WhiteBalance) {
-                s = FormatWhiteBalance(val);
-            } else if (tag == (u16)ExifProp::ExposureMode) {
-                s = FormatExposureMode(val);
-            } else if (tag == (u16)ExifProp::SceneCaptureType) {
-                s = FormatSceneCaptureType(val);
-            } else if (tag == (u16)ExifProp::GainControl) {
-                s = FormatGainControl(val);
-            } else if (tag == (u16)ExifProp::Contrast || tag == (u16)ExifProp::Saturation ||
-                       tag == (u16)ExifProp::Sharpness) {
-                s = FormatContrastSatSharp(val);
-            } else if (tag == 0xA401) {
-                s = FormatCustomRendered(val);
-            } else if (tag == (u16)ExifProp::SensitivityType) {
-                s = FormatSensitivityType(val);
-            } else if (tag == (u16)ExifProp::Flash) {
-                s = FormatFlash(val);
-            }
-        }
+        Str s = LookupEnumName(g, tag, val);
         if (s) {
             return s;
         }
@@ -683,7 +558,8 @@ TempStr FormatValuesTemp(const ExifParser& parser, IfdGroup g, u16 tag, u16 type
     if (type == TiffRational || type == TiffSRational) {
         // Multi-rational lists (GPS DMS, lens) are usually a few short fractions.
         char sScratch[256]{};
-        str::Builder s(Str(sScratch, sizeofi(sScratch)));
+        str::Builder s;
+        s.UseExternalBuffer(Str(sScratch, sizeofi(sScratch)));
         bool sr = type == TiffSRational;
         for (u32 i = 0; i < count; i++) {
             int eoff = off + ((int)i * 8);
@@ -692,12 +568,12 @@ TempStr FormatValuesTemp(const ExifParser& parser, IfdGroup g, u16 tag, u16 type
                 break;
             }
             if (i > 0) {
-                s.Append(", ");
+                s.Append(StrL(", "));
             }
             bool gpsDms = g == IfdGroup::Gps && (tag == 0x0002 || tag == 0x0004) && count == 3;
             if (gpsDms || (count > 1 && tag == (u16)ExifProp::LensSpecification)) {
                 if (i == 0) {
-                    s.Append("[");
+                    s.Append(StrL("["));
                 }
                 if (sr) {
                     s.Append(fmt("%d", rat.num));
@@ -708,9 +584,9 @@ TempStr FormatValuesTemp(const ExifParser& parser, IfdGroup g, u16 tag, u16 type
                     s.Append(FormatRationalPair((u32)rat.num, (u32)rat.den, true));
                 }
                 if (i < count - 1) {
-                    s.Append(", ");
+                    s.Append(StrL(", "));
                 } else {
-                    s.Append("]");
+                    s.Append(StrL("]"));
                 }
             } else if (sr) {
                 s.Append(fmt("%d", rat.num));
@@ -725,65 +601,43 @@ TempStr FormatValuesTemp(const ExifParser& parser, IfdGroup g, u16 tag, u16 type
         return ToStrTemp(s);
     }
 
-    if (type == TiffShort || type == TiffSShort) {
-        char sScratch[256]{};
-        str::Builder s(Str(sScratch, sizeofi(sScratch)));
-        for (u32 i = 0; i < count; i++) {
-            int eoff = off + ((int)i * 2);
-            if (i > 0) {
-                s.Append(", ");
-            }
-            if (type == TiffSShort) {
-                s.Append(fmt("%d", (i16)ReadWord(parser, eoff)));
-            } else {
-                u32 v = ReadWord(parser, eoff);
-                if (g == IfdGroup::Exif && tag == (u16)ExifProp::Flash && count == 1) {
-                    Str fs = FormatFlash(v);
-                    if (fs) {
-                        return fs;
-                    }
-                }
-                s.Append(fmt("%u", v));
+    int elemSize = TypeElemSize(type);
+    bool isInt = type == TiffByte || type == TiffSByte || type == TiffShort || type == TiffSShort || type == TiffLong ||
+                 type == TiffSLong;
+    if (isInt) {
+        bool isSigned = type == TiffSByte || type == TiffSShort || type == TiffSLong;
+        if (type == TiffShort && g == IfdGroup::Exif && tag == (u16)ExifProp::Flash && count == 1) {
+            Str fs = LookupEnumName(g, tag, ReadWord(parser, off));
+            if (fs) {
+                return fs;
             }
         }
-        if (count > 1 && tag == 0x9214) {
-            return fmt("[%s]", ToStr(s));
+        // byte arrays and SubjectArea (0x9214) are shown in brackets
+        bool brackets = elemSize == 1 || (count > 1 && tag == 0x9214);
+        char sScratch[256]{};
+        str::Builder s;
+        s.UseExternalBuffer(Str(sScratch, sizeofi(sScratch)));
+        if (brackets) {
+            s.AppendChar('[');
+        }
+        for (u32 i = 0; i < count; i++) {
+            int eoff = off + ((int)i * elemSize);
+            if (i > 0) {
+                s.Append(StrL(", "));
+            }
+            i64 v = elemSize == 1 ? r.UInt8(eoff) : elemSize == 2 ? ReadWord(parser, eoff) : ReadDWord(parser, eoff);
+            if (isSigned) {
+                v = elemSize == 1 ? (i8)v : elemSize == 2 ? (i16)v : (i32)v;
+            }
+            s.Append(fmt("%lld", v));
+        }
+        if (brackets) {
+            s.AppendChar(']');
         }
         return ToStrTemp(s);
     }
 
-    if (type == TiffLong || type == TiffSLong) {
-        char sScratch[256]{};
-        str::Builder s(Str(sScratch, sizeofi(sScratch)));
-        for (u32 i = 0; i < count; i++) {
-            int eoff = off + ((int)i * 4);
-            if (i > 0) {
-                s.Append(", ");
-            }
-            if (type == TiffSLong) {
-                s.Append(fmt("%d", (i32)ReadDWord(parser, eoff)));
-            } else {
-                s.Append(fmt("%u", ReadDWord(parser, eoff)));
-            }
-        }
-        return ToStrTemp(s);
-    }
-
-    if (type == TiffByte || type == TiffSByte) {
-        char sScratch[256]{};
-        str::Builder s(Str(sScratch, sizeofi(sScratch)));
-        s.Append("[");
-        for (u32 i = 0; i < count; i++) {
-            if (i > 0) {
-                s.Append(", ");
-            }
-            s.Append(fmt("%u", r.UInt8(off + i)));
-        }
-        s.Append("]");
-        return ToStrTemp(s);
-    }
-
-    return str::DupTemp("");
+    return str::DupTemp(StrL(""));
 }
 
 void AddEntry(ExifParser& parser, IfdGroup group, u16 tag, u16 type, u32 count, int dataOff) {
@@ -793,7 +647,7 @@ void AddEntry(ExifParser& parser, IfdGroup group, u16 tag, u16 type, u32 count, 
     entry.count = count;
     entry.dataOff = dataOff;
     entry.group = (u8)group;
-    parser.entries.Append(entry);
+    VecAppend(parser.entries, entry);
 }
 
 static void ParseIfd(ExifParser& parser, IfdGroup group, int ifdRel, int makerNoteEndian = 0, int depth = 0);
@@ -809,9 +663,10 @@ void ParseMakerNote(ExifParser& parser, int dataOff, u32 count, int depth) {
     int mnBase = dataOff;
     int mnOff = 8;
     int makerNoteEndian = 0;
-    if (count > 10 && (r.UInt8(dataOff) == 'I' || r.UInt8(dataOff) == 'M')) {
+    int firstByte = count > 10 ? r.UInt8(dataOff) : 0;
+    if (firstByte == 'I' || firstByte == 'M') {
         mnOff = 0;
-        makerNoteEndian = r.UInt8(dataOff);
+        makerNoteEndian = firstByte;
     } else if (count > 10 && r.UInt8(dataOff + 6) == 'I' && r.UInt8(dataOff + 7) == 'I') {
         mnOff = 8;
         makerNoteEndian = 'I';
@@ -966,36 +821,8 @@ bool ExtractJpegExif(Str d, Str& out) {
     }
 }
 
-bool HasWebpSignature(Str d) {
-    return d.len >= 12 && memeq(d.s, "RIFF", 4) && memeq(d.s + 8, "WEBP", 4);
-}
-
 bool ExtractWebpExif(Str d, Str& out) {
-    if (!HasWebpSignature(d)) {
-        return false;
-    }
-    ByteReader r(d);
-    int idx = 12;
-    while (idx + 8 <= r.len) {
-        if (r.UInt8(idx) == 'E' && r.UInt8(idx + 1) == 'X' && r.UInt8(idx + 2) == 'I' && r.UInt8(idx + 3) == 'F') {
-            int size = (int)r.UInt32LE(idx + 4);
-            int payload = idx + 8;
-            if (payload + size <= r.len && size >= 8) {
-                out = Str((char*)(r.d + payload), size);
-                return true;
-            }
-        }
-        int size = (int)r.UInt32LE(idx + 4);
-        int chunkSize = size + (size & 1);
-        if (chunkSize < size) {
-            return false;
-        }
-        idx += 8 + chunkSize;
-        if (idx < 8) {
-            return false;
-        }
-    }
-    return false;
+    return FindWebpChunk(d, "EXIF", out) && out.len >= 8;
 }
 
 bool LooksLikeTiffExif(const u8* p, int n) {
@@ -1026,7 +853,7 @@ bool CopyTiffBlob(const u8* data, int n, int tiffOff, Str& out, u8** ownedOut) {
     }
     memcpy(copy, data + tiffOff, (size_t)blobLen);
     *ownedOut = copy;
-    out = Str((char*)(copy), blobLen);
+    out = Str((char*)copy, blobLen);
     return true;
 }
 
@@ -1063,7 +890,7 @@ bool ExtractHeifExifFromBytes(Str d, Str& out, u8** ownedOut) {
         }
         memcpy(copy, data + tiffOff, (size_t)blobLen);
         *ownedOut = copy;
-        out = Str((char*)(copy), blobLen);
+        out = Str((char*)copy, blobLen);
         return true;
     }
     for (int i = 0; i + 8 < n; i++) {
@@ -1109,11 +936,11 @@ ExifParser::~ExifParser() {
 }
 
 void ExifParser::Reset() {
+    data = {};
     dumpLines.Reset();
-    entries.Reset();
+    VecReset(entries);
     free(ownedExif);
     ownedExif = nullptr;
-    data = {};
     exifBlob = {};
     isBE = false;
     tiffBase = 0;
@@ -1129,54 +956,33 @@ bool ExifParser::Parse(Str imageData) {
     return ParseTiff(*this);
 }
 
-bool ExifParser::HasProp(ExifProp prop) const {
-    return FindEntry(*this, prop) != nullptr;
-}
-
-ExifValueKind ExifParser::GetPropKind(ExifProp prop) const {
-    const ExifEntry* entry = FindEntry(*this, prop);
-    if (!entry) {
-        return ExifValueKind::Unknown;
-    }
-    if (entry->type == TiffAscii || IsXpProp(prop) || IsAsciiUndefinedProp(prop) || prop == ExifProp::UserComment) {
-        return ExifValueKind::String;
-    }
-    if (entry->type == TiffShort || entry->type == TiffLong || entry->type == TiffSShort || entry->type == TiffSLong) {
-        return ExifValueKind::Int;
-    }
-    if (entry->type == TiffRational || entry->type == TiffSRational) {
-        return ExifValueKind::Rational;
-    }
-    return ExifValueKind::Bytes;
-}
-
 TempStr ExifParser::GetStringProp(ExifProp prop, ExifProp altProp) const {
     const ExifEntry* entry = FindEntry(*this, prop);
     if (!entry) {
-        return altProp == ExifProp::None ? nullptr : GetStringProp(altProp);
+        return altProp == ExifProp::None ? Str() : GetStringProp(altProp);
     }
     ByteReader r(exifBlob);
     if (!EntryBoundsOk(*this, *entry, TypeElemSize(entry->type) * (int)entry->count)) {
-        return altProp == ExifProp::None ? nullptr : GetStringProp(altProp);
+        return altProp == ExifProp::None ? Str() : GetStringProp(altProp);
     }
     if (IsXpProp(prop)) {
         TempStr res = Utf16LeToUtf8Temp(Str((char*)(r.d + entry->dataOff), (int)entry->count));
         return str::IsEmptyOrWhiteSpace(res) && altProp != ExifProp::None ? GetStringProp(altProp) : res;
     }
-    TempStr res = nullptr;
+    TempStr res;
     bool isAsciiText = entry->type == TiffAscii || (entry->type == TiffUndefined && IsAsciiUndefinedProp(prop));
     if (isAsciiText) {
         res = TrimmedAsciiTemp(r, entry->dataOff, entry->count);
     } else if (prop == ExifProp::UserComment && entry->type == TiffUndefined && EntryBoundsOk(*this, *entry, 8)) {
         Str bytes((char*)(r.d + entry->dataOff), (int)entry->count);
-        if (bytes.len > 8 && memeq(bytes.s, "ASCII\0\0\0", 8)) {
+        if (bytes.len > 8 && MemEq(bytes.s, "ASCII\0\0\0", 8)) {
             res = TrimmedAsciiTemp(r, entry->dataOff + 8, entry->count - 8);
-        } else if (bytes.len > 10 && memeq(bytes.s, "UNICODE\0", 8)) {
+        } else if (bytes.len > 10 && MemEq(bytes.s, "UNICODE\0", 8)) {
             res = Utf16LeToUtf8Temp(Str(bytes.s + 8, bytes.len - 8));
         }
     }
     if (str::IsEmptyOrWhiteSpace(res)) {
-        return altProp == ExifProp::None ? nullptr : GetStringProp(altProp);
+        return altProp == ExifProp::None ? Str() : GetStringProp(altProp);
     }
     return res;
 }
@@ -1244,13 +1050,7 @@ bool ExifParser::GetFloatProp(ExifProp prop, double* valOut) const {
 TempStr ExifParser::GetFormattedPropTemp(ExifProp prop) const {
     const ExifEntry* entry = FindEntry(*this, prop);
     if (!entry) {
-        return nullptr;
+        return {};
     }
     return FormatValuesTemp(*this, (IfdGroup)entry->group, entry->tag, entry->type, entry->count, entry->dataOff);
-}
-
-void ExifParser::GetDumpLines(StrVec& linesOut) const {
-    for (Str line : dumpLines) {
-        linesOut.Append(line);
-    }
 }

@@ -8,7 +8,6 @@ const int Inf = INT_MAX;
 void PositionRB(const Rect& container, Rect& r);
 void MoveXY(Rect& r, int x, int y);
 
-int Clamp(int v, int vmin, int vmax);
 int Scale(int v, i64 num, i64 den);
 int GuardInf(int a, int b);
 
@@ -17,33 +16,24 @@ struct Constraints {
     Size max;
 
     Size Constrain(Size) const;
-    Size ConstrainAndAttemptToPreserveAspectRatio(Size) const;
-    int ConstrainHeight(int height) const;
-    int ConstrainWidth(int width) const;
     bool HasBoundedHeight() const;
     bool HasBoundedWidth() const;
     bool HasTightWidth() const;
     bool HasTightHeight() const;
     Constraints Inset(int width, int height) const;
-    bool IsBounded() const;
-    bool IsNormalized() const;
     bool IsTight() const;
-    bool IsSatisfiedBy(Size) const;
     bool IsZero() const;
     Constraints Loosen() const;
     Constraints LoosenHeight() const;
     Constraints LoosenWidth() const;
-    Constraints Tighten(Size) const;
     Constraints TightenHeight(int height) const;
     Constraints TightenWidth(int width) const;
 };
 
 Constraints ExpandInf();
 Constraints ExpandHeight(int width);
-Constraints ExpandWidth(int height);
 Constraints Loose(Size size);
 Constraints Tight(Size size);
-Constraints TightHeight(int height);
 
 using NeedLayout = Func0;
 
@@ -58,7 +48,6 @@ enum class Visibility {
 
 struct VirtCtrl;
 struct ControlBase;
-class DeferWinPosHelper;
 
 struct ILayout {
     Kind kind = nullptr;
@@ -92,8 +81,6 @@ struct ILayout {
 
 bool IsCollapsed(ILayout*);
 
-bool IsLayoutOfKind(ILayout*, Kind);
-
 // padding.go
 
 struct Insets {
@@ -124,9 +111,6 @@ struct Padding : ILayout {
     int LayoutChildCount() override;
     ILayout* LayoutChildAt(int) override;
 };
-
-bool IsPadding(Kind);
-bool IsPadding(ILayout*);
 
 // vbox.go
 
@@ -198,6 +182,8 @@ struct HBox : ILayout {
     MainAxisAlign alignMain = MainAxisAlign::MainStart;
     CrossAxisAlign alignCross = CrossAxisAlign::CrossStart;
     int gap = 0;
+    // at least this tall, the children centered in it per alignCross
+    int minDy = 0;
     // when true, children are placed right-to-left (MainStart packs to the right)
     bool rtl = false;
     int totalWidth = 0;
@@ -261,28 +247,6 @@ struct Spacer : ILayout {
     ~Spacer() override;
 
     // ILayout
-    Size Layout(Constraints bc) override;
-    int MinIntrinsicHeight(int width) override;
-    int MinIntrinsicWidth(int height) override;
-    void SetBounds(Rect) override;
-};
-
-// MoveWindow of an HWND that is not itself an ILayout (frame canvas, lazy webview).
-// lastBounds is always recorded, so a null hwnd still works as a measured slot.
-struct HwndSlot : ILayout {
-    HWND hwnd = nullptr;
-    // if set, SetBounds batches the move through this helper (not owned)
-    DeferWinPosHelper* winPos = nullptr;
-    int dx = 0;
-    int dy = 0;
-    // SetWindowPos x as offset from the physical left when the parent is RTL
-    // (tabs / menu rebar). Off for toc / canvas / favorites, which already
-    // live in the frame's client coordinates.
-    bool mapRtlX = false;
-
-    HwndSlot(HWND hwnd = nullptr, int dx = 0, int dy = 0);
-    ~HwndSlot() override;
-
     Size Layout(Constraints bc) override;
     int MinIntrinsicHeight(int width) override;
     int MinIntrinsicWidth(int height) override;
@@ -415,8 +379,57 @@ struct Table : ILayout {
     Rect ContentRect();
 };
 
-void LayoutAndSizeToContent(ILayout* layout, int minDx, int minDy, HWND hwnd);
 Size LayoutToSize(ILayout* layout, Size size);
 
 void dbglayout(Str s);
 void LogConstraints(Constraints c, Str suffix);
+
+#if IS_DEBUG
+void Layout_UnitTests();
+#endif
+
+class DeferWinPosHelper;
+
+// MoveWindow of an HWND that is not itself an ILayout (frame canvas, lazy webview).
+// lastBounds is always recorded, so a null hwnd still works as a measured slot.
+struct HwndSlot : ILayout {
+    HWND hwnd = nullptr;
+    // if set, SetBounds batches the move through this helper (not owned)
+    DeferWinPosHelper* winPos = nullptr;
+    int dx = 0;
+    int dy = 0;
+    // SetWindowPos x as offset from the physical left when the parent is RTL
+    // (tabs / menu rebar). Off for toc / canvas / favorites, which already
+    // live in the frame's client coordinates.
+    bool mapRtlX = false;
+
+    HwndSlot(HWND hwnd = nullptr, int dx = 0, int dy = 0);
+    ~HwndSlot() override;
+
+    Size Layout(Constraints bc) override;
+    int MinIntrinsicHeight(int width) override;
+    int MinIntrinsicWidth(int height) override;
+    void SetBounds(Rect) override;
+};
+
+// at least `dx` wide, wider if the child needs more
+struct MinDxBox : ILayout {
+    ILayout* child = nullptr;
+    int dx = 0;
+
+    MinDxBox(ILayout* c, int dxIn);
+    ~MinDxBox() override;
+
+    Size Layout(Constraints bc) override;
+    int MinIntrinsicHeight(int width) override;
+    int MinIntrinsicWidth(int height) override;
+    void SetBounds(Rect) override;
+    int LayoutChildCount() override;
+    ILayout* LayoutChildAt(int) override;
+};
+
+void LayoutAndSizeToContent(ILayout* layout, int minDx, int minDy, HWND hwnd);
+
+#if IS_DEBUG
+void LayoutWin_UnitTests();
+#endif

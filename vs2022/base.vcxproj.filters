@@ -16,15 +16,18 @@
     <Filter Include="src\base">
       <UniqueIdentifier>{F7972DCF-E364-88DA-0C7E-7682F8A9BD68}</UniqueIdentifier>
     </Filter>
-    <Filter Include="src\gui">
-      <UniqueIdentifier>{210530A9-8DE4-AE44-96FC-391B025B15A6}</UniqueIdentifier>
+    <Filter Include="src\shared">
+      <UniqueIdentifier>{D3351079-BFED-51C6-28F5-2A2214CCECB6}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="src\shared\gui">
+      <UniqueIdentifier>{C772284F-B340-1C55-9CD4-8C7B8841F8B9}</UniqueIdentifier>
     </Filter>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="..\src\base\Archive.h">
       <Filter>src\base</Filter>
     </ClInclude>
-    <ClInclude Include="..\src\base\Arena.h">
+    <ClInclude Include="..\src\base\AutoWin.h">
       <Filter>src\base</Filter>
     </ClInclude>
     <ClInclude Include="..\src\base\Base.h">
@@ -33,10 +36,7 @@
     <ClInclude Include="..\src\base\ByteReaderWriter.h">
       <Filter>src\base</Filter>
     </ClInclude>
-    <ClInclude Include="..\src\base\CmdLineArgsIter.h">
-      <Filter>src\base</Filter>
-    </ClInclude>
-    <ClInclude Include="..\src\base\Color.h">
+    <ClInclude Include="..\src\base\CmdLineArgs.h">
       <Filter>src\base</Filter>
     </ClInclude>
     <ClInclude Include="..\src\base\Crypto.h">
@@ -66,9 +66,6 @@
     <ClInclude Include="..\src\base\GdiPlusUtil.h">
       <Filter>src\base</Filter>
     </ClInclude>
-    <ClInclude Include="..\src\base\Geom.h">
-      <Filter>src\base</Filter>
-    </ClInclude>
     <ClInclude Include="..\src\base\GuessFileType.h">
       <Filter>src\base</Filter>
     </ClInclude>
@@ -90,46 +87,19 @@
     <ClInclude Include="..\src\base\Pixmap.h">
       <Filter>src\base</Filter>
     </ClInclude>
-    <ClInclude Include="..\src\base\Scoped.h">
-      <Filter>src\base</Filter>
-    </ClInclude>
-    <ClInclude Include="..\src\base\ScopedWin.h">
-      <Filter>src\base</Filter>
-    </ClInclude>
     <ClInclude Include="..\src\base\SettingsUtil.h">
       <Filter>src\base</Filter>
     </ClInclude>
     <ClInclude Include="..\src\base\SquareTreeParser.h">
       <Filter>src\base</Filter>
     </ClInclude>
-    <ClInclude Include="..\src\base\Str.h">
-      <Filter>src\base</Filter>
-    </ClInclude>
-    <ClInclude Include="..\src\base\StrFormatParse.h">
-      <Filter>src\base</Filter>
-    </ClInclude>
     <ClInclude Include="..\src\base\StrQueue.h">
-      <Filter>src\base</Filter>
-    </ClInclude>
-    <ClInclude Include="..\src\base\StrUtf8.h">
-      <Filter>src\base</Filter>
-    </ClInclude>
-    <ClInclude Include="..\src\base\StrVec.h">
-      <Filter>src\base</Filter>
-    </ClInclude>
-    <ClInclude Include="..\src\base\Strconv.h">
       <Filter>src\base</Filter>
     </ClInclude>
     <ClInclude Include="..\src\base\TgaReader.h">
       <Filter>src\base</Filter>
     </ClInclude>
-    <ClInclude Include="..\src\base\Thread.h">
-      <Filter>src\base</Filter>
-    </ClInclude>
     <ClInclude Include="..\src\base\UITask.h">
-      <Filter>src\base</Filter>
-    </ClInclude>
-    <ClInclude Include="..\src\base\Vec.h">
       <Filter>src\base</Filter>
     </ClInclude>
     <ClInclude Include="..\src\base\Win.h">
@@ -141,8 +111,11 @@
     <ClInclude Include="..\src\base\Zip.h">
       <Filter>src\base</Filter>
     </ClInclude>
-    <ClInclude Include="..\src\gui\Dpi.h">
-      <Filter>src\gui</Filter>
+    <ClInclude Include="..\src\shared\PerfLog.h">
+      <Filter>src\shared</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\shared\gui\Dpi.h">
+      <Filter>src\shared\gui</Filter>
     </ClInclude>
   </ItemGroup>
   <ItemGroup>
@@ -161,43 +134,28 @@
     <ClCompile Include="..\src\base\Arena.cpp">
       <Filter>src\base</Filter>
     </ClCompile>
-    <ClCompile Include="..\src\base\Arena_win.cpp">
-      <Filter>src\base</Filter>
-    </ClCompile>
     <ClCompile Include="..\src\base\Base.cpp">
-      <Filter>src\base</Filter>
-    </ClCompile>
-    <ClCompile Include="..\src\base\Base_win.cpp">
       <Filter>src\base</Filter>
     </ClCompile>
     <ClCompile Include="..\src\base\ByteReaderWriter.cpp">
       <Filter>src\base</Filter>
     </ClCompile>
-    <ClCompile Include="..\src\base\CmdLineArgsIter.cpp">
+    <ClCompile Include="..\src\base\CmdLineArgs.cpp">
       <Filter>src\base</Filter>
     </ClCompile>
-    <ClCompile Include="..\src\base\CmdLineArgsIter_win.cpp">
-      <Filter>src\base</Filter>
-    </ClCompile>
-    <ClCompile Include="..\src\base\Color.cpp">
-      <Filter>src\base</Filter>
-    </ClCompile>
-    <ClCompile Include="..\src\base\Crypto_win.cpp">
+    <ClCompile Include="..\src\base\Crypto.cpp">
       <Filter>src\base</Filter>
     </ClCompile>
     <ClCompile Include="..\src\base\CssParser.cpp">
       <Filter>src\base</Filter>
     </ClCompile>
-    <ClCompile Include="..\src\base\DbgHelpDyn_win.cpp">
+    <ClCompile Include="..\src\base\DbgHelpDyn.cpp">
       <Filter>src\base</Filter>
     </ClCompile>
     <ClCompile Include="..\src\base\Dict.cpp">
       <Filter>src\base</Filter>
     </ClCompile>
     <ClCompile Include="..\src\base\DirScan.cpp">
-      <Filter>src\base</Filter>
-    </ClCompile>
-    <ClCompile Include="..\src\base\DirScan_win.cpp">
       <Filter>src\base</Filter>
     </ClCompile>
     <ClCompile Include="..\src\base\Exif.cpp">
@@ -209,28 +167,16 @@
     <ClCompile Include="..\src\base\FileWatcher.cpp">
       <Filter>src\base</Filter>
     </ClCompile>
-    <ClCompile Include="..\src\base\File_win.cpp">
-      <Filter>src\base</Filter>
-    </ClCompile>
     <ClCompile Include="..\src\base\GdiPlusUtil.cpp">
       <Filter>src\base</Filter>
     </ClCompile>
-    <ClCompile Include="..\src\base\Geom.cpp">
-      <Filter>src\base</Filter>
-    </ClCompile>
     <ClCompile Include="..\src\base\GuessFileType.cpp">
-      <Filter>src\base</Filter>
-    </ClCompile>
-    <ClCompile Include="..\src\base\GuessFileTypeFromFile.cpp">
       <Filter>src\base</Filter>
     </ClCompile>
     <ClCompile Include="..\src\base\HtmlTags.cpp">
       <Filter>src\base</Filter>
     </ClCompile>
     <ClCompile Include="..\src\base\Http.cpp">
-      <Filter>src\base</Filter>
-    </ClCompile>
-    <ClCompile Include="..\src\base\Http_win.cpp">
       <Filter>src\base</Filter>
     </ClCompile>
     <ClCompile Include="..\src\base\JsonParser.cpp">
@@ -242,40 +188,16 @@
     <ClCompile Include="..\src\base\Pixmap.cpp">
       <Filter>src\base</Filter>
     </ClCompile>
-    <ClCompile Include="..\src\base\Pixmap_win.cpp">
-      <Filter>src\base</Filter>
-    </ClCompile>
     <ClCompile Include="..\src\base\SettingsUtil.cpp">
       <Filter>src\base</Filter>
     </ClCompile>
     <ClCompile Include="..\src\base\SquareTreeParser.cpp">
       <Filter>src\base</Filter>
     </ClCompile>
-    <ClCompile Include="..\src\base\Str.cpp">
-      <Filter>src\base</Filter>
-    </ClCompile>
-    <ClCompile Include="..\src\base\StrFormatParse.cpp">
-      <Filter>src\base</Filter>
-    </ClCompile>
     <ClCompile Include="..\src\base\StrQueue.cpp">
       <Filter>src\base</Filter>
     </ClCompile>
-    <ClCompile Include="..\src\base\StrUtf8.cpp">
-      <Filter>src\base</Filter>
-    </ClCompile>
-    <ClCompile Include="..\src\base\StrVec.cpp">
-      <Filter>src\base</Filter>
-    </ClCompile>
-    <ClCompile Include="..\src\base\Strconv.cpp">
-      <Filter>src\base</Filter>
-    </ClCompile>
     <ClCompile Include="..\src\base\TgaReader.cpp">
-      <Filter>src\base</Filter>
-    </ClCompile>
-    <ClCompile Include="..\src\base\TgaReader_win.cpp">
-      <Filter>src\base</Filter>
-    </ClCompile>
-    <ClCompile Include="..\src\base\Thread.cpp">
       <Filter>src\base</Filter>
     </ClCompile>
     <ClCompile Include="..\src\base\UITask.cpp">
@@ -284,14 +206,22 @@
     <ClCompile Include="..\src\base\Win.cpp">
       <Filter>src\base</Filter>
     </ClCompile>
-    <ClCompile Include="..\src\base\WinDynCalls_win.cpp">
+    <ClCompile Include="..\src\base\WinDynCalls.cpp">
       <Filter>src\base</Filter>
     </ClCompile>
     <ClCompile Include="..\src\base\Zip.cpp">
       <Filter>src\base</Filter>
     </ClCompile>
-    <ClCompile Include="..\src\gui\Dpi_win.cpp">
-      <Filter>src\gui</Filter>
+    <ClCompile Include="..\src\shared\PerfLog.cpp">
+      <Filter>src\shared</Filter>
     </ClCompile>
+    <ClCompile Include="..\src\shared\gui\Dpi.cpp">
+      <Filter>src\shared\gui</Filter>
+    </ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <CustomBuild Include="..\src\shared\PerfLog_x64.asm">
+      <Filter>src\shared</Filter>
+    </CustomBuild>
   </ItemGroup>
 </Project>

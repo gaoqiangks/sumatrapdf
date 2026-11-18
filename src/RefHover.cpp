@@ -13,8 +13,7 @@
 
 #include "DocController.h"
 #include "EngineBase.h"
-#include "RefHoverInternal.h"
-#include "RefHoverText.h"
+#include "RefHover.h"
 
 RefHoverState* RefHoverCreate(HWND hwndCanvas) {
     auto* s = new RefHoverState();
@@ -24,6 +23,17 @@ RefHoverState* RefHoverCreate(HWND hwndCanvas) {
     }
     RefHoverRegisterLiveState(s);
     return s;
+}
+
+// the shown strip and the engine it was hit-tested with: kept, the engine
+// would hold a closed document's file open
+static void RefHoverReleaseShown(RefHoverState* s) {
+    FreePixmap(s->bmp);
+    s->bmp = nullptr;
+    if (s->hitEngine) {
+        s->hitEngine->Release();
+        s->hitEngine = nullptr;
+    }
 }
 
 void RefHoverDestroy(RefHoverState* s) {
@@ -36,12 +46,7 @@ void RefHoverDestroy(RefHoverState* s) {
         DestroyWindow(s->hwndPopup);
         s->hwndPopup = nullptr;
     }
-    FreePixmap(s->bmp);
-    s->bmp = nullptr;
-    if (s->hitEngine) {
-        s->hitEngine->Release();
-        s->hitEngine = nullptr;
-    }
+    RefHoverReleaseShown(s);
     RefHoverFreeLookupCache(s);
     delete s;
 }
@@ -57,7 +62,7 @@ void RefHoverSchedule(RefHoverState* s, HWND hwndCanvas, int delayMs, Point scre
     KillTimer(hwndCanvas, kRefHoverHideTimerID);
 
     bool sameSrc = s->displayed.srcPage == srcPage && s->displayed.srcRect == srcRect;
-    if (HwndIsVisible(s->hwndPopup) && s->displayed.destPage == destPage && s->displayed.destX == destX &&
+    if (HwndIsVisible(s->hwndPopup) && s->displayed.destPageRaw == destPage && s->displayed.destX == destX &&
         s->displayed.destY == destY && sameSrc) {
         return;
     }
@@ -66,6 +71,7 @@ void RefHoverSchedule(RefHoverState* s, HWND hwndCanvas, int delayMs, Point scre
     s->pending.destX = destX;
     s->pending.destY = destY;
     s->pending.destZoom = destZoom;
+    s->pending.noteRef = false;
     s->pending.srcPage = srcPage;
     s->pending.srcRect = srcRect;
     s->pending.pageScreenRect = pageScreenRect;
@@ -88,11 +94,10 @@ void RefHoverHide(RefHoverState* s, HWND hwndCanvas) {
         ShowWindow(s->hwndPopup, SW_HIDE);
         s->displayed.destPage = -1;
     }
+    RefHoverReleaseShown(s);
 }
 
 static constexpr UINT kRefHoverHidePollMs = 150;
-static constexpr int kRefHoverHideMinMs = 250;
-
 // Like RefHoverHide but deferred: cancels any pending show immediately, then
 // hides the visible popup after delayMs. While the timer is pending, moving
 // the cursor onto the popup (e.g. to click a DOI link inside it) keeps it
@@ -142,4 +147,16 @@ void RefHoverHandlePopupClick(RefHoverState* s, IPageDestination* dest) {
     }
     RefHoverHide(s, s->hwndCanvas);
     s->ctrl->HandleLink(dest, s->linkHandler);
+}
+
+int RefHoverPopupWidthCap(RefHoverState* s, int minWidth) {
+    POINT pt = {s->pending.screenPt.x, s->pending.screenPt.y};
+    HMONITOR monitor = MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST);
+    MONITORINFO info{};
+    info.cbSize = sizeof(info);
+    if (!GetMonitorInfoW(monitor, &info)) {
+        return minWidth;
+    }
+    int monitorWidth = info.rcWork.right - info.rcWork.left;
+    return std::max(monitorWidth * 95 / 100, minWidth);
 }

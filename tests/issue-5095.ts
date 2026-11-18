@@ -15,38 +15,28 @@
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { ControlCommand, withControlledSumatra } from "./control.ts";
-import { cmdId, EXE, runStandalone, tmpPath } from "./util.ts";
+import { cmdId, EXE, runStandalone, tmpPath, assemblePdf } from "./util.ts";
 
 type Button = { visible: boolean; idx: number };
 
-// the standard toolbar written out as a layout; docs/md/Customize-toolbar.md
+// the standard toolbar written out as a layout; sumatra-website/www/docs/Customize-toolbar.md
 // gives users this string as the starting point for their own
 const DEFAULT_LAYOUT =
   "CmdOpenFile CmdPrint | PageInfo CmdGoToPrevPage CmdGoToNextPage | " +
-  "CmdNavigateBack CmdNavigateForward | CmdReadAloud | " +
+  "CmdNavigateBack CmdNavigateForward | CmdToggleReadAloud | " +
   "CmdZoomFitWidthAndContinuous CmdZoomFitPageAndSinglePage CmdRotateLeft CmdRotateRight " +
-  "CmdZoomOut CmdZoomIn | CmdFindFirst";
+  "CmdZoomOut CmdZoomIn | CmdFindFirst | CmdToggleEditPDF";
 
 function makePdf(): string {
+  // a bookmark, so the chapter buttons have something to go to
   const objs = [
-    `<< /Type /Catalog /Pages 2 0 R >>`,
+    `<< /Type /Catalog /Pages 2 0 R /Outlines 4 0 R >>`,
     `<< /Type /Pages /Count 1 /Kids [3 0 R] >>`,
     `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] >>`,
+    `<< /Type /Outlines /First 5 0 R /Last 5 0 R /Count 1 >>`,
+    `<< /Title (Start) /Parent 4 0 R /Dest [3 0 R /Fit] >>`,
   ];
-  let body = "%PDF-1.4\n";
-  const offsets: number[] = [];
-  for (let i = 0; i < objs.length; i++) {
-    offsets.push(body.length);
-    body += `${i + 1} 0 obj\n${objs[i]}\nendobj\n`;
-  }
-  const xrefStart = body.length;
-  const size = objs.length + 1;
-  body += `xref\n0 ${size}\n0000000000 65535 f \n`;
-  for (const off of offsets) {
-    body += off.toString().padStart(10, "0") + " 00000 n \n";
-  }
-  body += `trailer\n<< /Size ${size} /Root 1 0 R >>\nstartxref\n${xrefStart}\n%%EOF\n`;
-  return body;
+  return assemblePdf(objs);
 }
 
 type DumpBtn = { idx: number; cmd: number; hidden: boolean };
@@ -116,7 +106,7 @@ export async function testit(): Promise<void> {
   rmSync(appdata, { recursive: true, force: true });
   mkdirSync(appdata, { recursive: true });
 
-  const cmds = ["CmdOpenFile", "CmdPrint", "CmdGoToPrevPage", "CmdGoToNextPage", "CmdFindFirst"];
+  const cmds = ["CmdOpenFile", "CmdPrint", "CmdGoToPrevPage", "CmdGoToNextPage", "CmdFindFirst", "CmdToggleEditPDF"];
 
   // the standard layout: everything is there, Open comes before Find
   writeSettings(appdata, "");
@@ -160,6 +150,20 @@ export async function testit(): Promise<void> {
         `the documented default layout doesn't reproduce the standard one: ${name} is ` +
           `${a.visible ? `at ${a.idx}` : "hidden"} by default but ${b.visible ? `at ${b.idx}` : "hidden"} with it`,
       );
+    }
+  }
+  // optional buttons: not in the standard layout, on the toolbar when listed
+  const chapterCmds = ["CmdGoToPrevChapter", "CmdGoToNextChapter"];
+  writeSettings(appdata, "");
+  const stdChapters = await readToolbar(appdata, pdf, chapterCmds);
+  writeSettings(appdata, "CmdGoToPrevChapter CmdGoToNextChapter | PageInfo");
+  const chapters = await readToolbar(appdata, pdf, chapterCmds);
+  for (const name of chapterCmds) {
+    if (stdChapters.get(name)!.visible) {
+      throw new Error(`${name} is on the standard toolbar`);
+    }
+    if (!chapters.get(name)!.visible) {
+      throw new Error(`${name} is missing although the layout lists it`);
     }
   }
   console.log(`  ToolbarCustomLayout orders and hides buttons: Find=${find} < Next=${next} < Prev=${prev} ✓`);

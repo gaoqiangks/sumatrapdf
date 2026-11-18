@@ -120,6 +120,27 @@ int main(int argc, char** argv) {
         SysFreeString(all);
     }
 
+    // GetChildren of a one-page range must return that page and no other:
+    // the page filter used to accept every page, overflowing the array
+    {
+        IUIAutomationTextRange* onePage = nullptr;
+        tp->get_DocumentRange(&onePage);
+        if (onePage) {
+            onePage->MoveEndpointByRange(TextPatternRangeEndpoint_End, onePage, TextPatternRangeEndpoint_Start);
+            onePage->ExpandToEnclosingUnit(TextUnit_Page);
+            IUIAutomationElementArray* kids = nullptr;
+            HRESULT hrK = onePage->GetChildren(&kids);
+            printf("children.hr=0x%08x\n", (unsigned)hrK);
+            int n = 0;
+            if (SUCCEEDED(hrK) && kids) {
+                kids->get_Length(&n);
+                kids->Release();
+            }
+            printf("children.count=%d\n", n);
+            onePage->Release();
+        }
+    }
+
     // walking by character / word / line is how a screen reader reads: each
     // step must land on new text
     struct {
@@ -131,6 +152,28 @@ int main(int argc, char** argv) {
                  {TextUnit_Word, "walk.word", 3, 40},
                  {TextUnit_Line, "walk.line", 3, 80},
                  {TextUnit_Page, "walk.page", 2, 40}};
+    // Compare / CompareEndpoints take another range: ours must be recognized
+    {
+        IUIAutomationTextRange* a = nullptr;
+        IUIAutomationTextRange* b = nullptr;
+        tp->get_DocumentRange(&a);
+        tp->get_DocumentRange(&b);
+        if (a && b) {
+            BOOL same = FALSE;
+            HRESULT hr = a->Compare(b, &same);
+            printf("compare.same=%d\n", SUCCEEDED(hr) && same ? 1 : 0);
+            int diff = 99;
+            hr = a->CompareEndpoints(TextPatternRangeEndpoint_Start, b, TextPatternRangeEndpoint_Start, &diff);
+            printf("compare.endpoints=%d\n", SUCCEEDED(hr) ? diff : 99);
+        }
+        if (a) {
+            a->Release();
+        }
+        if (b) {
+            b->Release();
+        }
+    }
+
     for (auto& w : walks) {
         IUIAutomationTextRange* r = nullptr;
         tp->get_DocumentRange(&r);
@@ -231,6 +274,67 @@ int main(int argc, char** argv) {
                 SysFreeString(wantS);
             }
             word->Release();
+        }
+    }
+
+    // with nothing selected GetSelection() is a null range; moving an endpoint
+    // onto it left the other endpoint on a page and GetText() read page -1
+    {
+        IUIAutomationTextRangeArray* sels = nullptr;
+        IUIAutomationTextRange* sel = nullptr;
+        IUIAutomationTextRange* r = nullptr;
+        tp->GetSelection(&sels);
+        if (sels) {
+            sels->GetElement(0, &sel);
+        }
+        tp->get_DocumentRange(&r);
+        if (sel && r) {
+            r->MoveEndpointByRange(TextPatternRangeEndpoint_Start, sel, TextPatternRangeEndpoint_Start);
+            BSTR s = nullptr;
+            HRESULT hrT = r->GetText(40, &s);
+            printf("nullsel.hr=0x%08x\n", (unsigned)hrT);
+            PrintEscaped("nullsel.text", s);
+            if (s) {
+                SysFreeString(s);
+            }
+        }
+        if (r) {
+            r->Release();
+        }
+        if (sel) {
+            sel->Release();
+        }
+        if (sels) {
+            sels->Release();
+        }
+    }
+
+    // the Document is not one of its own pages: RangeFromChild must refuse it
+    // instead of reading a page number out of the wrong object
+    {
+        IUIAutomationTextRange* r = nullptr;
+        HRESULT hrC = tp->RangeFromChild(doc, &r);
+        printf("notchild.hr=0x%08x\n", (unsigned)hrC);
+        if (r) {
+            r->Release();
+        }
+
+        // a real page still gives that page's range
+        IUIAutomationElement* page = nullptr;
+        raw->GetFirstChildElement(doc, &page);
+        if (page) {
+            r = nullptr;
+            hrC = tp->RangeFromChild(page, &r);
+            printf("child.hr=0x%08x\n", (unsigned)hrC);
+            if (r) {
+                BSTR s = RangeText(r, 40);
+                PrintEscaped("child.text", s);
+                if (s) {
+                    SysFreeString(s);
+                }
+                r->Release();
+            }
+            page->Release();
         }
     }
 

@@ -15,24 +15,7 @@
 #include "EngineBase.h"
 #include "DisplayModel.h"
 #include "RefHover.h"
-#include "RefHoverText.h"
-
-// Canvas wiring entry points (RefHoverCanvas.cpp) — keep Canvas.cpp thin.
-bool RefHoverIsInternalLink(IPageElement* el, DisplayModel* dm) {
-    if (!el || !el->Is(kindPageElementDest)) {
-        return false;
-    }
-    IPageDestination* dest = el->AsLink();
-    if (!dest) {
-        return false;
-    }
-    Kind k = dest->GetKind();
-    if (k == kindDestinationLaunchURL || k == kindDestinationLaunchFile) {
-        return false;
-    }
-    int destPage = PageDestGetPageNo(dest);
-    return dm && dm->ValidPageNo(destPage);
-}
+#include "RefHoverPopupCommon.h"
 
 static Rect PageScreenRectToScreen(HWND hwndCanvas, DisplayModel* dm, int srcPage) {
     Rect pageScreenRect{};
@@ -46,12 +29,85 @@ static Rect PageScreenRectToScreen(HWND hwndCanvas, DisplayModel* dm, int srcPag
     return pageScreenRect;
 }
 
+// schedules the popup for el, an internal link at canvas point (x, y)
+bool RefHoverScheduleLink(RefHoverState* s, HWND hwndCanvas, DisplayModel* dm, int x, int y, IPageElement* el,
+                          int delayMs) {
+    if (!RefHoverIsInternalLink(el, dm)) {
+        return false;
+    }
+    IPageDestination* dest = el->AsLink();
+    // chaptered doc (EPUB): the page is known once the dest is resolved
+    if (PageDestGetPageNo(dest) < 1) {
+        dm->ResolveDest(dest);
+    }
+    int destPage = PageDestGetPageNo(dest);
+    if (!dm->ValidPageNo(destPage)) {
+        return false;
+    }
+    RectF destPt = PageDestGetDestPoint(dest);
+    // a footnote's region is detected from its text, not the rest of the page
+    float destZoom = dest->isNoteRef ? 0.f : dest->GetZoom();
+    Point screenPt = HwndClientToScreen(hwndCanvas, Point(x, y));
+    int srcPage = el->GetPageNo();
+    RectF srcRect = el->GetRect();
+    Rect pageScreenRect = PageScreenRectToScreen(hwndCanvas, dm, srcPage);
+    RefHoverSchedule(s, hwndCanvas, delayMs, screenPt, destPage, destPt.x, destPt.y, destZoom, srcPage, srcRect,
+                     pageScreenRect);
+    s->pending.noteRef = dest->isNoteRef;
+    return true;
+}
+
+// Show the popup for a click on an EPUB footnote link right away. False if
+// there's nothing to show, so the click follows the link.
+bool RefHoverShowNoteRef(RefHoverState*& s, HWND hwndCanvas, DocController* ctrl, ILinkHandler* linkHandler,
+                         DisplayModel* dm, int x, int y, IPageElement* el) {
+    if (!s) {
+        s = RefHoverCreate(hwndCanvas);
+    }
+    if (!s) {
+        return false;
+    }
+    s->ctrl = ctrl;
+    s->linkHandler = linkHandler;
+    if (!RefHoverScheduleLink(s, hwndCanvas, dm, x, y, el, 0)) {
+        return false;
+    }
+    // tracking a cursor that isn't over the canvas would hide the popup at once
+    if (HwndIsCursorOverWindow(hwndCanvas)) {
+        TrackMouseLeave(hwndCanvas);
+    }
+    return true;
+}
+
+// Windows sends WM_MOUSEMOVE without the mouse moving (a window appearing under
+// a resting cursor); such a move must not cancel or replace a popup
+static bool IsRepeatedMove(HWND hwndCanvas, int x, int y) {
+    static HWND lastHwnd = nullptr;
+    static Point lastPt{-1, -1};
+    bool same = hwndCanvas == lastHwnd && lastPt.x == x && lastPt.y == y;
+    lastHwnd = hwndCanvas;
+    lastPt = Point(x, y);
+    return same;
+}
+
 void RefHoverOnCanvasMouseMove(RefHoverState*& s, HWND hwndCanvas, DocController* ctrl, ILinkHandler* linkHandler,
                                DisplayModel* dm, int x, int y, IPageElement* el, int srcPageNo, int hoverDelayMs) {
+    if (IsRepeatedMove(hwndCanvas, x, y)) {
+        return;
+    }
     if (hoverDelayMs < 0) {
-        if (s) {
-            RefHoverHide(s, hwndCanvas);
+        // no hover popups, so a shown one is from a click on an EPUB footnote
+        // link: it stays while the cursor is on that link or on the popup. One
+        // not shown yet stays too: Windows sends a move without the mouse
+        // moving when a window appears under the cursor
+        if (!s || !HwndIsVisible(s->hwndPopup)) {
+            return;
         }
+        if (IsPopupLink(s, el)) {
+            KillTimer(hwndCanvas, kRefHoverHideTimerID);
+            return;
+        }
+        RefHoverScheduleHide(s, hwndCanvas, 0);
         return;
     }
 
@@ -65,18 +121,8 @@ void RefHoverOnCanvasMouseMove(RefHoverState*& s, HWND hwndCanvas, DocController
     s->linkHandler = linkHandler;
 
     bool scheduled = false;
-    if (RefHoverIsInternalLink(el, dm)) {
+    if (RefHoverScheduleLink(s, hwndCanvas, dm, x, y, el, hoverDelayMs)) {
         TrackMouseLeave(hwndCanvas);
-        IPageDestination* dest = el->AsLink();
-        int destPage = PageDestGetPageNo(dest);
-        RectF destPt = PageDestGetDestPoint(dest);
-        float destZoom = PageDestGetZoom(dest);
-        Point screenPt = HwndClientToScreen(hwndCanvas, Point(x, y));
-        int srcPage = el->GetPageNo();
-        RectF srcRect = el->GetRect();
-        Rect pageScreenRect = PageScreenRectToScreen(hwndCanvas, dm, srcPage);
-        RefHoverSchedule(s, hwndCanvas, hoverDelayMs, screenPt, destPage, destPt.x, destPt.y, destZoom, srcPage,
-                         srcRect, pageScreenRect);
         scheduled = true;
     } else if (srcPageNo > 0) {
         PointF pagePtF = dm->CvtFromScreen({x, y}, srcPageNo);
@@ -118,7 +164,8 @@ bool RefHoverOnCanvasTimer(RefHoverState* s, HWND hwndCanvas, DisplayModel* dm, 
             return true;
         }
         float pageZoom = dm->GetZoomReal(destPage);
-        RefHoverOnTimer(s, hwndCanvas, dm->GetEngine(), pageZoom);
+        KillTimer(hwndCanvas, kRefHoverTimerID);
+        RefHoverOnTimer(s, dm->GetEngine(), pageZoom);
         return true;
     }
     if (timerId == kRefHoverHideTimerID) {

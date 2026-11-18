@@ -15,8 +15,10 @@ Color gColsListBox[kColListCount];
 Color gColsSplitter[kColSplitterCount];
 Color gColsFill[kColFillCount];
 Color gColsLine[kColLineCount];
+Color gColsSlider[kColSliderCount];
 Color gColsRichText[kColRichCount];
 Color gColsTab[kColTabCount];
+Color gColsWin[kColWinCount];
 Color gColsEdit[kColEditCount];
 
 // An override wins unless its slot is kColorUnset, which means "I didn't say".
@@ -60,7 +62,6 @@ void GuiColorsInitIfNeeded() {
 void GuiSetDefaultColorsFromSystem() {
     gDefaultColorsInited = true;
     gGuiColorsFromSystem = true;
-#if OS_WIN
     Color winBg = GetSysColor(COLOR_WINDOW);
     Color winText = GetSysColor(COLOR_WINDOWTEXT);
     Color ctlBg = GetSysColor(COLOR_BTNFACE);
@@ -68,15 +69,6 @@ void GuiSetDefaultColorsFromSystem() {
     Color disabledText = GetSysColor(COLOR_GRAYTEXT);
     Color link = GetSysColor(COLOR_HOTLIGHT);
     Color edge = GetSysColor(COLOR_WINDOWFRAME);
-#else
-    Color winBg = MkGray(0xff);
-    Color winText = MkGray(0x00);
-    Color ctlBg = MkGray(0xf0);
-    Color ctlText = MkGray(0x00);
-    Color disabledText = MkGray(0x6d);
-    Color link = MkRgb(0x00, 0x66, 0xcc);
-    Color edge = MkGray(0xa0);
-#endif
 
     gColsText[kColText] = winText;
 
@@ -97,6 +89,7 @@ void GuiSetDefaultColorsFromSystem() {
     gColsIconBtn[kColIconBtnBgHover] = AccentColor(ctlBg, 20);
     gColsIconBtn[kColIconBtnBgSelected] = AccentColor(ctlBg, 36);
     gColsIconBtn[kColIconBtnChevron] = ctlText;
+    gColsIconBtn[kColIconBtnChevronDisabled] = disabledText;
 
     gColsCloseBtn[kColCloseX] = kColCloseXDef;
     gColsCloseBtn[kColCloseXHover] = kColCloseXHoverDef;
@@ -117,12 +110,21 @@ void GuiSetDefaultColorsFromSystem() {
 
     gColsLine[kColLineFg] = edge;
 
+    gColsSlider[kColSliderTrack] = AccentColor(ctlBg, 40);
+    gColsSlider[kColSliderFill] = ctlText;
+    gColsSlider[kColSliderThumb] = ctlText;
+    gColsSlider[kColSliderThumbHover] = AccentColor(ctlText, 20);
+
     gColsRichText[kColRichText] = winText;
     gColsRichText[kColRichLink] = link;
     gColsRichText[kColRichBg] = winBg;
 
     gColsTab[kColTabText] = winText;
     gColsTab[kColTabBg] = ctlBg;
+
+    // a custom top-level window's own surface, like the OS paints a window's
+    gColsWin[kColWinText] = winText;
+    gColsWin[kColWinBg] = winBg;
 
     gColsEdit[kColEditBottomBorder] = edge;
 }

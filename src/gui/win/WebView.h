@@ -3,6 +3,7 @@
 
 TempStr GetWebView2VersionTemp();
 bool HasWebView();
+void WebViewShutdown();
 
 // TODO: maybe hide those inside a private struct
 typedef interface ICoreWebView2 ICoreWebView2;
@@ -103,11 +104,9 @@ struct WebviewWnd : WindowBase {
     void AddInitScriptWithToken(Str js, int token);
     int FindInitScript(int token) const;
     void RemoveInitScript(int token);
-    void RemoveAllInitScripts();
     void OnInitScriptAdded(int token, const WCHAR* id);
     void Navigate(Str url);
     void Bind(Str name);
-    void Unbind(Str name);
     void Resolve(Str id, int status, Str resultJson);
     void OnJsCall(Str msg);
     void OnJsNotify(Str msg);
@@ -120,6 +119,8 @@ struct WebviewWnd : WindowBase {
     bool CanGoForward() const;
     void Focus();
     void ShowFindUI();
+    bool ShowPrintUI();
+    bool CapturePreviewPng(const Func1<Str>& done);
     void RegisterForwardingDropTarget();
     void RevokeForwardingDropTarget();
     bool Embed(WebViewMsgCb& cb);
@@ -129,6 +130,7 @@ struct WebviewWnd : WindowBase {
     void QueuePendingOp(PendingWebViewOp::Kind kind, Str text, int token = 0);
     void FlushPendingOps();
     void SetControllerVisible(bool visible);
+    void RefreshControllerSurface();
 
     virtual void OnBrowserMessage(Str msg);
 
@@ -171,6 +173,7 @@ struct WebviewWnd : WindowBase {
     WebViewEvents events;
     bool forwardAppAccelerators = true;
     bool allowClipboardRead = false;
+    Color defaultBackgroundColor = kColorTransparent;
     // when false, WebView2 won't claim external (file) drops, so they fall
     // through to the host window's drop target (e.g. to open the file)
     bool allowExternalDrop = true;

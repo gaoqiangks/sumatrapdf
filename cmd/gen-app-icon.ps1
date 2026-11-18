@@ -6,8 +6,8 @@ $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Drawing
 
 $iconRoot = Split-Path -Parent $PSScriptRoot
-$iconSourcePath = Join-Path $iconRoot 'gfx/SumatraPDF.png'
-$iconOutputPath = Join-Path $iconRoot 'gfx/SumatraPDF-smaller.ico'
+$iconSourcePath = Join-Path $iconRoot 'src/shared/gfx/SumatraPDF-TeXstudio.png'
+$iconOutputPath = Join-Path $iconRoot 'src/shared/gfx/SumatraPDF-TeXstudio.ico'
 $iconSizes = @(256, 64, 48, 40, 32, 24, 20, 16)
 
 function New-IconFrame([System.Drawing.Image] $Source, [int] $Size) {

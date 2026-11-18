@@ -151,8 +151,7 @@ function parseModules(raw: string): Map<number, ModuleInfo> {
 
 function parseSectionContribs(raw: string): SectionContrib[] {
   const contribs: SectionContrib[] = [];
-  const re =
-    /^\s*SC\[([^\]]+)\]\s+\|\s+mod\s+=\s+(\d+),\s+([0-9A-Fa-f]+):(\d+),\s+size\s+=\s+(\d+)/;
+  const re = /^\s*SC\[([^\]]+)\]\s+\|\s+mod\s+=\s+(\d+),\s+([0-9A-Fa-f]+):(\d+),\s+size\s+=\s+(\d+)/;
   for (const line of raw.split(/\r?\n/)) {
     const m = line.match(re);
     if (!m) {
@@ -238,7 +237,7 @@ function projectName(objPath: string, libPath: string): string {
   if (s.includes("/windows kits/")) {
     return "windows-sdk";
   }
-  if (s.includes("/packages/microsoft.web.webview2.")) {
+  if (s.includes("webview2loader.obj")) {
     return "webview2";
   }
 
@@ -257,10 +256,6 @@ function projectName(objPath: string, libPath: string): string {
   const extIdx = originalLib.toLowerCase().indexOf("/ext/");
   if (extIdx >= 0) {
     return originalLib.slice(extIdx + 5).split("/")[0] || "ext";
-  }
-  const pkgIdx = originalLib.toLowerCase().indexOf("/packages/");
-  if (pkgIdx >= 0) {
-    return originalLib.slice(pkgIdx + 10).split("/")[0] || "packages";
   }
   const srcIdx = originalObj.toLowerCase().indexOf("/src/");
   if (srcIdx >= 0) {
@@ -382,7 +377,9 @@ function renderReport(
   lines.push("");
   lines.push("Notes:");
   lines.push("- Sizes come from `llvm-pdbutil dump --section-contribs`, grouped through `dump --modules`.");
-  lines.push("- This measures linked contribution size, not static .lib file size; unused library members are not counted.");
+  lines.push(
+    "- This measures linked contribution size, not static .lib file size; unused library members are not counted.",
+  );
   lines.push("- PE headers, alignment padding, certificate data, and gaps are shown only in the unattributed total.");
   lines.push(...renderBucketTable("By Project", projects, attributedSize));
   lines.push(...renderBucketTable(`Top ${top} Object Files`, objects, attributedSize, top));
@@ -424,7 +421,9 @@ async function main() {
   writeFileSync(out, report);
 
   const attributedSize = contribs.reduce((sum, c) => sum + c.size, 0);
-  console.log(`Attributed ${formatSize(attributedSize)} bytes across ${contribs.length.toLocaleString()} contributions.`);
+  console.log(
+    `Attributed ${formatSize(attributedSize)} bytes across ${contribs.length.toLocaleString()} contributions.`,
+  );
   console.log(`Wrote ${out}`);
 }
 

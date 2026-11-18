@@ -3,13 +3,23 @@
 
 void UpdateDeltaPerLine();
 
+// home page paints since start, read by -dbg-control WaitHomePainted
+extern int gHomePagePaintCount;
+
 LRESULT CALLBACK WndProcCanvas(HWND, UINT, WPARAM, LPARAM);
 LRESULT WndProcCanvasAbout(MainWindow*, HWND, UINT, WPARAM, LPARAM);
 bool IsDragDistance(int x1, int x2, int y1, int y2);
-void CancelDrag(MainWindow*);
+bool NudgeSelectedAnnotation(MainWindow*, WPARAM key);
+void FinishAnnotationNudge(MainWindow*);
 void StartAutoScrollAtCursor(MainWindow*);
 bool ShowImageOutlines();
 void ToggleShowImageOutlines();
+bool ShowTransparencyGrid();
+void ToggleTransparencyGrid();
+bool ShowPageGrid();
+void TogglePageGrid();
+void SetShowPageGrid(bool);
+void RedrawAllWindows();
 bool ShowFitContentArea();
 void ToggleShowFitContentArea();
 bool IsLaserPointerActive();
@@ -29,7 +39,7 @@ void DisconnectLastDragDataObject();
 constexpr UINT_PTR kSmoothScrollTimerID = 6;
 // Timer for smooth middle-click auto-scroll (issue #2693)
 constexpr UINT_PTR kAutoScrollTimerID = 7;
-// Debounce for re-numbering keyboard link targets after scrolling (issue #2629)
+// Debounce for relabeling keyboard link targets after scrolling (issue #2629)
 constexpr UINT_PTR kLinkFollowTimerID = 11;
 constexpr uint kLinkFollowRecomputeDelayInMs = 300;
 // Blink for the keyboard text selection caret (issues #4684, #4116)
@@ -41,3 +51,11 @@ constexpr uint kSelectionToolbarShowDelayInMs = 500;
 // either as a gesture stream or as synthesized mouse messages, so the hold is
 // detected both ways; this timer is the mouse-message half.
 constexpr UINT_PTR kTouchLongPressTimerID = 14;
+// Debounce PDF page rendering while an annotation resize is in progress.
+constexpr UINT_PTR kAnnotationResizeRerenderTimerID = 15;
+constexpr uint kAnnotationResizeRerenderDelayMs = 125;
+// Debounce re-rendering the page while arrow keys move an annotation
+constexpr UINT_PTR kAnnotationNudgeTimerID = 17;
+constexpr uint kAnnotationNudgeDelayMs = 150;
+
+void CancelAnnotationResizeRerender(MainWindow* win);

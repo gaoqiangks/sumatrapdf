@@ -3,8 +3,9 @@
 
 #include "base/Base.h"
 #include "base/Pixmap.h"
-#include "base/ScopedWin.h"
+#include "base/AutoWin.h"
 #include "base/File.h"
+#include "base/GuessFileType.h"
 #include "base/Win.h"
 #include "gui/Dpi.h"
 #include "base/GdiPlusUtil.h"
@@ -18,15 +19,23 @@
 #include "gui/GuiColors.h"
 #include "gui/VirtCtrl.h"
 
+#if COMPILER_MSVC
+#pragma warning(disable : 4668)
+#endif
+#include <commctrl.h>
+#include <wincodec.h>
+
+#include "base/ByteReaderWriter.h"
 #include "PngOptimizer.h"
+#include "ImageReader.h"
 #include "ImageSaveCropResize.h"
+#include "ImageSaveCropResizeCommon.h"
 
 ImageEditHost gImageEditHost;
 
-// The host's translation of s, or s itself when it has none.
 // A warning box. The host may have a styled one, but a plain one is fine here.
 static void WarnBox(HWND hwnd, Str msg, Str title) {
-    MessageBoxWarningSimple(hwnd, ToWStrTemp(msg), ToWStrTemp(title));
+    MsgBoxWarning(hwnd, msg, title);
 }
 
 static PlatformFont* ImageEditFont(HWND hwnd) {
@@ -39,7 +48,8 @@ static PlatformFont* ImageEditFont(HWND hwnd) {
     return GetDefaultGuiFont();
 }
 
-static Str Tr(Str s) {
+// The host's translation of s, or s itself when it has none.
+static Str HostTr(Str s) {
     if (gImageEditHost.Translate) {
         Str t = gImageEditHost.Translate(s);
         if (t) {
@@ -48,14 +58,23 @@ static Str Tr(Str s) {
     }
     return s;
 }
-
-#include <commctrl.h>
-#include <wincodec.h>
+static Str HostTr(const char* s) {
+    return HostTr(Str(s));
+}
 
 using Gdiplus::Bitmap;
 using Gdiplus::Graphics;
 using Gdiplus::Ok;
 using Gdiplus::Status;
+
+// HighQuality/Half offsets samples by -0.5px, so a 1:1 or integer-scaled
+// image lands a half-pixel off and looks shifted (issue #3434). None keeps
+// the image on the pixel grid — same as EngineImages::RenderPage.
+static void DrawResizedBitmap(Graphics& g, Bitmap* src, int destW, int destH) {
+    g.SetInterpolationMode(Gdiplus::InterpolationModeHighQualityBicubic);
+    g.SetPixelOffsetMode(Gdiplus::PixelOffsetModeNone);
+    g.DrawImage(src, 0, 0, destW, destH);
+}
 
 constexpr const WCHAR* kImageEditWinClassName = L"SUMATRA_PDF_IMAGE_EDIT";
 
@@ -65,35 +84,33 @@ constexpr int kDownsizeMinImgDy = 200;
 constexpr int kImagePadding = 16;
 constexpr int kResizeEdgeThreshold = 2;
 constexpr int kDragHandleSize = 6;
-constexpr int kControlAreaDy = 100;
+constexpr int kControlAreaDy = 104;
 constexpr int kRowPadding = 6;
-constexpr int kButtonPadding = 8;
-
-struct ImageFormat {
-    Str label;
-    const GUID* containerFormat; // WIC container format GUID (null for PDF)
-    Str ext;
-    bool needsProbe; // if true, check if encoder is available before offering
-    bool available;  // set after probing
-    bool isPdf;      // PDF is created via PdfCreator, not WIC
-};
+// the strip's padding, as the redrawn dialogs pad their footers
+constexpr int kButtonPadding = 16;
+constexpr int kStripPadDy = 10;
+constexpr int kStripBtnRadius = 4;
+// WM_TIMER id used to clear the transient "Copied to clipboard" info label
+constexpr UINT_PTR kCopyStatusTimerId = 1;
+constexpr UINT kCopyStatusTimeoutMs = 1500;
 
 // clang-format off
-static ImageFormat gImageFormats[] = {
-    {StrL("PNG"),  &GUID_ContainerFormatPng,  StrL(".png"),  false, true,  false},
-    {StrL("JPEG"), &GUID_ContainerFormatJpeg, StrL(".jpg"),  false, true,  false},
-    {StrL("BMP"),  &GUID_ContainerFormatBmp,  StrL(".bmp"),  false, true,  false},
-    {StrL("GIF"),  &GUID_ContainerFormatGif,  StrL(".gif"),  false, true,  false},
-    {StrL("TIFF"), &GUID_ContainerFormatTiff, StrL(".tif"),  false, true,  false},
-    {StrL("WebP"), &GUID_ContainerFormatWebp, StrL(".webp"), true,  false, false},
-    {StrL("PDF"),  nullptr,                   StrL(".pdf"),  false, true,  true},
+ImageFormat gImageFormats[kImageFormatCount] = {
+    {StrL("PNG"),  StrL(".png"),  false, true,  false},
+    {StrL("JPEG"), StrL(".jpg"),  false, true,  false},
+    {StrL("BMP"),  StrL(".bmp"),  false, true,  false},
+    {StrL("GIF"),  StrL(".gif"),  false, true,  false},
+    {StrL("TIFF"), StrL(".tif"),  false, true,  false},
+    {StrL("WebP"), StrL(".webp"), true,  false, false},
+    {StrL("PDF"),  StrL(".pdf"),  false, true,  true},
+};
+
+// WIC container format of each gImageFormats entry (null for PDF)
+static const GUID* gImageFormatGuids[kImageFormatCount] = {
+    &GUID_ContainerFormatPng, &GUID_ContainerFormatJpeg, &GUID_ContainerFormatBmp, &GUID_ContainerFormatGif,
+    &GUID_ContainerFormatTiff, &GUID_ContainerFormatWebp, nullptr,
 };
 // clang-format on
-
-// index of the PDF entry in gImageFormats
-constexpr int kPdfFormatIdx = 6;
-
-constexpr int kDefaultFormatIdx = 0; // PNG
 
 static bool gFormatsProbed = false;
 
@@ -110,12 +127,13 @@ static void ProbeImageFormats() {
         return;
     }
 
-    for (auto& fmt : gImageFormats) {
+    for (int i = 0; i < kImageFormatCount; i++) {
+        ImageFormat& fmt = gImageFormats[i];
         if (!fmt.needsProbe) {
             continue;
         }
         IWICBitmapEncoder* pEncoder = nullptr;
-        hr = pFactory->CreateEncoder(*fmt.containerFormat, nullptr, &pEncoder);
+        hr = pFactory->CreateEncoder(*gImageFormatGuids[i], nullptr, &pEncoder);
         if (SUCCEEDED(hr) && pEncoder) {
             fmt.available = true;
             pEncoder->Release();
@@ -124,20 +142,6 @@ static void ProbeImageFormats() {
 
     pFactory->Release();
 }
-
-enum class DragEdge {
-    None,
-    Left,
-    Right,
-    Top,
-    Bottom,
-    TopLeft,
-    TopRight,
-    BottomLeft,
-    BottomRight,
-    Move,   // only used in crop mode
-    NewCrop // only used in crop mode
-};
 
 // a button labelled "&Save": virtual controls draw their text as-is, so the
 // '&' is stripped for the label and kept here as the Alt- shortcut
@@ -151,6 +155,7 @@ struct ImageEditButton : VirtButton {
 struct ImageEditWindow : WindowBase {
     ImageEditMode mode = ImageEditMode::Crop;
     bool fromRenderedBitmap = false;
+    bool closeWithEsc = false;
 
     HWND hwndParent = nullptr;
 
@@ -164,11 +169,18 @@ struct ImageEditWindow : WindowBase {
     ImageEditButton* btnSave = nullptr;
     ImageEditButton* btnCrop = nullptr;   // "Crop" or "Apply Crop"
     ImageEditButton* btnResize = nullptr; // "Resize" or "Apply Resize"
+    ImageEditButton* btnCopy = nullptr;   // "Copy" - copies the image to the clipboard
+    UINT_PTR copyStatusTimer = 0;         // clears the transient "Copied" info label
     DropDown* dropFormat = nullptr;
     Vec<int> formatIndices; // maps dropdown index to gImageFormats index
 
     // source image
     Str filePath;
+    // encoded original (JPEG/PNG/…); written as-is when dest ext matches
+    // and the bitmap has not been cropped or resized
+    Str originalData;
+    Str originalExt;
+    bool srcWasModified = false;
     Bitmap* srcBitmap = nullptr;
     Pixmap* srcPixmap = nullptr;
     int imgW = 0;
@@ -211,6 +223,7 @@ struct ImageEditWindow : WindowBase {
         delete srcBitmap;
         FreePixmap(srcPixmap);
         str::Free(filePath);
+        str::Free(originalData);
         // ~WindowBase deletes `layout`, which is controlLayout
     }
 
@@ -383,7 +396,7 @@ static bool TriggerImageEditMnemonic(ImageEditWindow* ew, WCHAR key) {
         return false;
     }
     key = UpperW(key);
-    ImageEditButton* btns[] = {ew->btnSave, ew->btnCrop, ew->btnResize};
+    ImageEditButton* btns[] = {ew->btnSave, ew->btnCrop, ew->btnResize, ew->btnCopy};
     for (ImageEditButton* btn : btns) {
         if (!btn || !btn->IsEnabled() || btn->mnemonic == 0) {
             continue;
@@ -479,7 +492,7 @@ static int ImageEditButtonPadding() {
 }
 
 static int ImageEditLabelDy(ImageEditWindow* ew) {
-    return PlatformFontMeasureText(ew->font, "Ag").dy;
+    return PlatformFontMeasureText(ew->font, StrL("Ag")).dy;
 }
 
 static int ImageEditPathLabelRowDy(ImageEditWindow* ew) {
@@ -504,6 +517,7 @@ static void ImageEditApplyFont(ImageEditWindow* ew) {
     setVirtFont(ew->btnSave);
     setVirtFont(ew->btnCrop);
     setVirtFont(ew->btnResize);
+    setVirtFont(ew->btnCopy);
     setWndFont(ew->destEdit);
     setWndFont(ew->dropFormat);
 }
@@ -512,7 +526,7 @@ static int GetSelectedFormatIdx(ImageEditWindow* ew) {
     if (!ew->dropFormat) {
         return kDefaultFormatIdx;
     }
-    int ddIdx = ew->dropFormat->GetCurrentSelection();
+    int ddIdx = CbGetCurrentSelection(ew->dropFormat);
     if (ddIdx < 0 || ddIdx >= len(ew->formatIndices)) {
         return kDefaultFormatIdx;
     }
@@ -539,7 +553,7 @@ static void UpdateSaveButtonText(ImageEditWindow* ew) {
         return;
     }
     TempStr dest = ew->destEdit->GetTextTemp();
-    Str text = file::Exists(dest) ? Str(Tr("&Overwrite")) : Str(Tr("&Save"));
+    Str text = file::Exists(dest) ? Str(HostTr(StrL("&Overwrite"))) : Str(HostTr("&Save"));
     ew->btnSave->SetLabel(text);
     // re-layout since button width may have changed
     LayoutControls(ew);
@@ -988,16 +1002,16 @@ static void PaintCropImage(ImageEditWindow* ew, Gfx* gfx, Rect imageArea) {
 
     Vec<Rect> overlay;
     if (cropDispY > iy) {
-        overlay.Append({ix, iy, iw, cropDispY - iy});
+        VecAppend(overlay, {ix, iy, iw, cropDispY - iy});
     }
     if (cropDispB < ib) {
-        overlay.Append({ix, cropDispB, iw, ib - cropDispB});
+        VecAppend(overlay, {ix, cropDispB, iw, ib - cropDispB});
     }
     if (cropDispX > ix) {
-        overlay.Append({ix, cropDispY, cropDispX - ix, cropDispB - cropDispY});
+        VecAppend(overlay, {ix, cropDispY, cropDispX - ix, cropDispB - cropDispY});
     }
     if (cropDispR < ir) {
-        overlay.Append({cropDispR, cropDispY, ir - cropDispR, cropDispB - cropDispY});
+        VecAppend(overlay, {cropDispR, cropDispY, ir - cropDispR, cropDispB - cropDispY});
     }
     gfx->FillRects(overlay.els, len(overlay), kColBlack, 128);
 
@@ -1103,7 +1117,7 @@ static void OnBrowse(ImageEditWindow* ew) {
         L"All Files\0*.*\0";
     ofn.Flags = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST | OFN_HIDEREADONLY;
 
-    if (GetSaveFileNameW(&ofn) && ew->destEdit) {
+    if ((TakeTestSaveFileName(&ofn) || GetSaveFileNameW(&ofn)) && ew->destEdit) {
         ew->destEdit->SetText(ToUtf8Temp(dstFileName));
     }
 }
@@ -1111,7 +1125,7 @@ static void OnBrowse(ImageEditWindow* ew) {
 // Save a GDI+ Bitmap using WIC. Supports all formats that have a WIC encoder installed,
 // including WebP on Windows 10+.
 static bool SaveBitmapWithWIC(Bitmap* bmp, WStr destPath, const GUID* containerFormat) {
-    if (!bmp || !destPath || !containerFormat) {
+    if (!bmp || len(destPath) == 0 || !containerFormat) {
         return false;
     }
 
@@ -1234,17 +1248,54 @@ static void OnSave(ImageEditWindow* ew) {
         return;
     }
 
-    // ensure extension matches selected format
+    bool unmodified = !ew->srcWasModified;
+    if (ew->mode == ImageEditMode::Crop && IsCropChanged(ew)) {
+        unmodified = false;
+    }
+    if (ew->mode == ImageEditMode::Resize && IsResizeChanged(ew)) {
+        unmodified = false;
+    }
+
     int fmtIdx = GetSelectedFormatIdx(ew);
     Str fmtExt = gImageFormats[fmtIdx].ext;
     TempStr destExt = path::GetExtTemp(rawDest);
+    bool writeOriginal = unmodified && len(ew->originalData) > 0 && ExtMatchesOriginal(destExt, ew->originalExt) &&
+                         !gImageFormats[fmtIdx].isPdf;
+
     TempStr dest;
-    if (str::EqI(destExt, fmtExt)) {
+    if (writeOriginal || str::EqI(destExt, fmtExt)) {
         dest = str::DupTemp(rawDest);
     } else {
-        int baseLen = len(rawDest) - len(destExt);
-        TempStr base = str::DupTemp(Str(rawDest.s, baseLen));
-        dest = fmt("%s%s", base, fmtExt);
+        dest = PathWithExtTemp(rawDest, fmtExt);
+    }
+
+    if (writeOriginal) {
+        bool saved = file::WriteFile(dest, ew->originalData);
+        if (!saved) {
+            WarnBox(ew->hwnd, StrL("Failed to save image"), StrL("Save Image"));
+            return;
+        }
+        HWND hwndParent = ew->hwndParent;
+        TempStr savedPath = dest;
+        DestroyWindow(ew->hwnd);
+        if (gImageEditHost.OpenSavedFile) {
+            gImageEditHost.OpenSavedFile(hwndParent, savedPath);
+        }
+        return;
+    }
+
+    // Unmodified CMYK JPEG saved as TIFF: keep CMYK instead of going through
+    // the RGB GDI+ bitmap (which is what WIC would write).
+    if (unmodified && len(ew->originalData) > 0 && str::EqI(fmtExt, StrL(".tif"))) {
+        if (TrySaveOriginalAsCmykTiff(ew->originalData, dest)) {
+            HWND hwndParent = ew->hwndParent;
+            TempStr savedPath = dest;
+            DestroyWindow(ew->hwnd);
+            if (gImageEditHost.OpenSavedFile) {
+                gImageEditHost.OpenSavedFile(hwndParent, savedPath);
+            }
+            return;
+        }
     }
 
     Bitmap* result = nullptr;
@@ -1252,7 +1303,7 @@ static void OnSave(ImageEditWindow* ew) {
         // save as-is
         result = ew->srcBitmap->Clone(0, 0, ew->imgW, ew->imgH, ew->srcBitmap->GetPixelFormat());
         if (!result) {
-            WarnBox(ew->hwnd, "Failed to save image", "Save Image");
+            WarnBox(ew->hwnd, StrL("Failed to save image"), StrL("Save Image"));
             return;
         }
     } else if (ew->mode == ImageEditMode::Crop) {
@@ -1260,19 +1311,18 @@ static void OnSave(ImageEditWindow* ew) {
         Gdiplus::Rect srcRect(ew->cropX, ew->cropY, ew->cropW, ew->cropH);
         result = ew->srcBitmap->Clone(srcRect, ew->srcBitmap->GetPixelFormat());
         if (!result) {
-            WarnBox(ew->hwnd, "Failed to create cropped image", Tr("Crop Image"));
+            WarnBox(ew->hwnd, StrL("Failed to create cropped image"), HostTr("Crop Image"));
             return;
         }
     } else {
         // create resized bitmap
         result = new Bitmap(ew->newW, ew->newH, ew->srcBitmap->GetPixelFormat());
         if (!result) {
-            WarnBox(ew->hwnd, "Failed to create resized image", Tr("Resize Image"));
+            WarnBox(ew->hwnd, StrL("Failed to create resized image"), HostTr("Resize Image"));
             return;
         }
         Graphics g(result);
-        g.SetInterpolationMode(Gdiplus::InterpolationModeHighQualityBicubic);
-        g.DrawImage(ew->srcBitmap, 0, 0, ew->newW, ew->newH);
+        DrawResizedBitmap(g, ew->srcBitmap, ew->newW, ew->newH);
     }
 
     bool saved;
@@ -1280,39 +1330,48 @@ static void OnSave(ImageEditWindow* ew) {
         saved = gImageEditHost.SaveBitmapAsPdf && gImageEditHost.SaveBitmapAsPdf(result, dest);
     } else {
         TempWStr destW = ToWStrTemp(dest);
-        saved = SaveBitmapWithWIC(result, destW, gImageFormats[fmtIdx].containerFormat);
+        saved = SaveBitmapWithWIC(result, destW, gImageFormatGuids[fmtIdx]);
     }
     delete result;
 
     if (!saved) {
-        WarnBox(ew->hwnd, "Failed to save image", "Save Image");
+        WarnBox(ew->hwnd, StrL("Failed to save image"), StrL("Save Image"));
         return;
     }
     OptimizePngFileAsync(dest);
 
     // load the saved image
     HWND hwndParent = ew->hwndParent;
-    Str savedPath = str::Dup(dest);
+    TempStr savedPath = dest;
     DestroyWindow(ew->hwnd);
 
     if (gImageEditHost.OpenSavedFile) {
         gImageEditHost.OpenSavedFile(hwndParent, savedPath);
     }
-    str::Free(savedPath);
+}
+
+// a drag belongs to the mode it started in: switching modes (buttons can be
+// pressed from the keyboard while the mouse is down) ends it
+static void EndImageDrag(ImageEditWindow* ew) {
+    if (ew->isDragging && GetCapture() == ew->hwnd) {
+        ReleaseCapture();
+    }
+    ew->isDragging = false;
+    ew->dragMoved = false;
+    ew->dragEdge = DragEdge::None;
+    ew->hoverEdge = DragEdge::None;
 }
 
 static void SwitchToSaveMode(ImageEditWindow* ew) {
+    EndImageDrag(ew);
     ew->mode = ImageEditMode::Save;
-    ew->isDragging = false;
-    ew->dragEdge = DragEdge::None;
-    ew->hoverEdge = DragEdge::None;
     ew->cropX = 0;
     ew->cropY = 0;
     ew->cropW = ew->imgW;
     ew->cropH = ew->imgH;
     ew->newW = ew->imgW;
     ew->newH = ew->imgH;
-    HwndSetText(ew->hwnd, "Save Image");
+    HwndSetText(ew->hwnd, StrL("Save Image"));
     UpdateModeButtons(ew);
     UpdateSaveButtonText(ew);
     UpdateInfoLabel(ew);
@@ -1346,20 +1405,20 @@ static bool IsResizeChanged(ImageEditWindow* ew) {
 
 static void UpdateModeButtons(ImageEditWindow* ew) {
     if (ew->mode == ImageEditMode::Crop) {
-        ew->btnCrop->SetLabel(Tr("&Apply Crop"));
+        ew->btnCrop->SetLabel(HostTr(StrL("&Apply Crop")));
         ew->btnCrop->SetIsEnabled(IsCropChanged(ew));
-        ew->btnResize->SetLabel(Tr("&Resize"));
+        ew->btnResize->SetLabel(HostTr(StrL("&Resize")));
         ew->btnResize->SetIsEnabled(true);
     } else if (ew->mode == ImageEditMode::Resize) {
-        ew->btnCrop->SetLabel(Tr("&Crop"));
+        ew->btnCrop->SetLabel(HostTr(StrL("&Crop")));
         ew->btnCrop->SetIsEnabled(true);
-        ew->btnResize->SetLabel(Tr("&Apply Resize"));
+        ew->btnResize->SetLabel(HostTr(StrL("&Apply Resize")));
         ew->btnResize->SetIsEnabled(IsResizeChanged(ew));
     } else {
         // Save mode
-        ew->btnCrop->SetLabel(Tr("&Crop"));
+        ew->btnCrop->SetLabel(HostTr(StrL("&Crop")));
         ew->btnCrop->SetIsEnabled(true);
-        ew->btnResize->SetLabel(Tr("&Resize"));
+        ew->btnResize->SetLabel(HostTr(StrL("&Resize")));
         ew->btnResize->SetIsEnabled(true);
     }
 }
@@ -1379,6 +1438,7 @@ static void ApplyCrop(ImageEditWindow* ew) {
         if (!ReplaceSrcBitmap(ew, cropped)) {
             return;
         }
+        ew->srcWasModified = true;
         ew->cropX = 0;
         ew->cropY = 0;
         ew->cropW = ew->imgW;
@@ -1401,11 +1461,11 @@ static void ApplyResize(ImageEditWindow* ew) {
         int prevW = ew->imgW;
         int prevH = ew->imgH;
         Graphics g(resized);
-        g.SetInterpolationMode(Gdiplus::InterpolationModeHighQualityBicubic);
-        g.DrawImage(ew->srcBitmap, 0, 0, ew->newW, ew->newH);
+        DrawResizedBitmap(g, ew->srcBitmap, ew->newW, ew->newH);
         if (!ReplaceSrcBitmap(ew, resized)) {
             return;
         }
+        ew->srcWasModified = true;
         ew->newW = ew->imgW;
         ew->newH = ew->imgH;
         UpdateModeButtons(ew);
@@ -1415,6 +1475,7 @@ static void ApplyResize(ImageEditWindow* ew) {
 }
 
 static void SwitchToCropMode(ImageEditWindow* ew) {
+    EndImageDrag(ew);
     // apply pending resize before switching
     if (ew->mode == ImageEditMode::Resize && IsResizeChanged(ew)) {
         ApplyResize(ew);
@@ -1424,7 +1485,7 @@ static void SwitchToCropMode(ImageEditWindow* ew) {
     ew->cropY = 0;
     ew->cropW = ew->imgW;
     ew->cropH = ew->imgH;
-    HwndSetText(ew->hwnd, "Crop Image");
+    HwndSetText(ew->hwnd, StrL("Crop Image"));
     UpdateModeButtons(ew);
     UpdateSaveButtonText(ew);
     UpdateInfoLabel(ew);
@@ -1434,6 +1495,7 @@ static void SwitchToCropMode(ImageEditWindow* ew) {
 }
 
 static void SwitchToResizeMode(ImageEditWindow* ew) {
+    EndImageDrag(ew);
     // apply pending crop before switching
     if (ew->mode == ImageEditMode::Crop && IsCropChanged(ew)) {
         ApplyCrop(ew);
@@ -1441,7 +1503,7 @@ static void SwitchToResizeMode(ImageEditWindow* ew) {
     ew->mode = ImageEditMode::Resize;
     ew->newW = ew->imgW;
     ew->newH = ew->imgH;
-    HwndSetText(ew->hwnd, "Resize Image");
+    HwndSetText(ew->hwnd, StrL("Resize Image"));
     UpdateModeButtons(ew);
     UpdateSaveButtonText(ew);
     UpdateInfoLabel(ew);
@@ -1481,8 +1543,7 @@ static Bitmap* CreateBitmapForClipboard(ImageEditWindow* ew) {
             return nullptr;
         }
         Graphics g(resized);
-        g.SetInterpolationMode(Gdiplus::InterpolationModeHighQualityBicubic);
-        g.DrawImage(ew->srcBitmap, 0, 0, ew->newW, ew->newH);
+        DrawResizedBitmap(g, ew->srcBitmap, ew->newW, ew->newH);
         return resized;
     }
     return ew->srcBitmap->Clone(0, 0, ew->imgW, ew->imgH, ew->srcBitmap->GetPixelFormat());
@@ -1499,17 +1560,36 @@ static bool CopyEditedImageToClipboard(ImageEditWindow* ew) {
     if (status != Ok || !tmp) {
         return false;
     }
-    ScopedGdiObj<HBITMAP> hbmp(tmp);
+    AutoDeleteGdiObj<HBITMAP> hbmp(tmp);
     return CopyImageToClipboard(tmp, false);
+}
+
+// Copy and say so in the info label; a one-shot timer puts the label back.
+static void OnCopyButton(ImageEditWindow* ew) {
+    if (ew->copyStatusTimer) {
+        KillTimer(ew->hwnd, kCopyStatusTimerId);
+        ew->copyStatusTimer = 0;
+    }
+    bool ok = CopyEditedImageToClipboard(ew);
+    if (ew->staticInfoLabel) {
+        ew->staticInfoLabel->SetText(ok ? StrL("Copied to clipboard") : StrL("Copy failed"));
+    }
+    LayoutControls(ew);
+    ew->copyStatusTimer = SetTimer(ew->hwnd, kCopyStatusTimerId, kCopyStatusTimeoutMs, nullptr);
 }
 
 // Tab moves between the dest edit, the format drop-down and the buttons; the
 // ring is the layout order and covers HWND and virtual controls alike
 void ImageEditWindow::OnKeyDown(KeyEvent* ev) {
-    if (ev->vkey != VK_TAB) {
+    if (ev->hwnd != hwnd && !::IsChild(hwnd, ev->hwnd)) {
         return;
     }
-    if (ev->hwnd != hwnd && !::IsChild(hwnd, ev->hwnd)) {
+    if (ev->vkey == VK_ESCAPE && closeWithEsc) {
+        DestroyWindow(hwnd);
+        ev->didHandle = true;
+        return;
+    }
+    if (ev->vkey != VK_TAB) {
         return;
     }
     TabNavigate(ev->isShift);
@@ -1562,11 +1642,15 @@ void ImageEditWindow::OnDestroy(WindowBase::DestroyEvent*) {
     if (GetCurrentModelessDialog() == hwnd) {
         SetCurrentModelessDialog(nullptr);
     }
+    if (copyStatusTimer) {
+        KillTimer(hwnd, kCopyStatusTimerId);
+        copyStatusTimer = 0;
+    }
     HWND parent = hwndParent;
     if (destEdit && destEdit->hwnd && gDestEditSubclassId) {
         RemoveWindowSubclass(destEdit->hwnd, WndProcDestEditSubclass, gDestEditSubclassId);
     }
-    gImageEditWindows.Remove(this);
+    VecRemove(gImageEditWindows, this);
     // deleting a window while handling its own message is unsafe;
     // uitask runs after this dispatch finishes
     auto fn = MkFunc0<ImageEditWindow>(DeleteImageEditWindow, this);
@@ -1634,7 +1718,7 @@ void ImageEditWindow::WndProc(WindowBase::WndProcEvent* ev) {
                 PaintResizeImage(ew, gfx, imageArea);
             }
             Rect controlArea{0, imageArea.dy, cRc.dx, cRc.dy - imageArea.dy};
-            gfx->FillRect(controlArea, GetSysColor(COLOR_BTNFACE));
+            gfx->FillRect(controlArea, gColsWin[kColWinBg]);
             if (ew->vroot) {
                 ew->vroot->Paint(gfx, controlArea);
             }
@@ -1908,12 +1992,23 @@ void ImageEditWindow::WndProc(WindowBase::WndProcEvent* ev) {
             }
             break;
 
+        case WM_TIMER:
+            if (wp == kCopyStatusTimerId) {
+                KillTimer(hwnd, ew->copyStatusTimer);
+                ew->copyStatusTimer = 0;
+                UpdateInfoLabel(ew);
+                ev->result = 0;
+                ev->didHandle = true;
+                return;
+            }
+            break;
+
         case WM_KEYDOWN: {
             if (!ew) {
                 break;
             }
             if ((GetKeyState(VK_CONTROL) & 0x8000) != 0 && wp == 'C') {
-                CopyEditedImageToClipboard(ew);
+                OnCopyButton(ew);
                 {
                     ev->result = 0;
                     ev->didHandle = true;
@@ -1921,10 +2016,10 @@ void ImageEditWindow::WndProc(WindowBase::WndProcEvent* ev) {
                 }
             }
             if (wp == VK_ESCAPE) {
-                if (ew->mode != ImageEditMode::Save) {
-                    SwitchToSaveMode(ew);
-                } else if (gImageEditHost.escToExit) {
+                if (ew->closeWithEsc) {
                     DestroyWindow(hwnd);
+                } else if (ew->mode != ImageEditMode::Save) {
+                    SwitchToSaveMode(ew);
                 }
                 {
                     ev->result = 0;
@@ -1952,23 +2047,20 @@ void ImageEditWindow::WndProc(WindowBase::WndProcEvent* ev) {
     }
 }
 
-// this window is drawn in the system colors, not the app's theme (its own
-// background is COLOR_BTNFACE), so the buttons override the themed defaults
-static ImageEditButton* NewImageEditButton(ImageEditWindow* ew, Str text, const VirtMouseHandler& onClick) {
+// the strip is drawn like the redrawn dialogs' footers, in the gui colors
+static ImageEditButton* NewImageEditButton(ImageEditWindow* ew, Str text, const VirtMouseHandler& onClick,
+                                           VirtButtonStyle style) {
     auto* b = new ImageEditButton(Str{}, ew->font);
-    Color bg = GetSysColor(COLOR_BTNFACE);
-    b->SetColor(kColBtnText, GetSysColor(COLOR_BTNTEXT));
-    b->SetColor(kColBtnTextDisabled, GetSysColor(COLOR_GRAYTEXT));
-    b->SetColor(kColBtnBg, AccentColor(bg, 14));
-    b->SetColor(kColBtnBgHover, AccentColor(bg, 28));
-    b->SetColor(kColBtnBorder, AccentColor(bg, 40));
-    b->textPadding = DpiScaledInsets(4, 10);
+    SetVirtButtonStyle(b, style);
+    b->cornerRadius = DpiScale(kStripBtnRadius);
+    b->textPadding = DpiScaledInsets(5, 12);
     b->SetLabel(text);
     b->onClick = onClick;
     return b;
 }
 
-void ShowImageEditWindow(HWND parent, ImageEditMode mode, Str filePath, RenderedBitmap* rbmp, bool selectPdf) {
+void ShowImageEditWindow(HWND parent, ImageEditMode mode, Str filePath, RenderedBitmap* rbmp, bool selectPdf,
+                         Str originalData, bool closeOnEsc) {
     ProbeImageFormats();
 
     Bitmap* bmp = nullptr;
@@ -1987,7 +2079,7 @@ void ShowImageEditWindow(HWND parent, ImageEditMode mode, Str filePath, Rendered
         }
     } else {
         // the caller names the image; there is nothing to edit without one
-        if (!filePath) {
+        if (len(filePath) == 0) {
             return;
         }
         Str data = file::ReadFile(filePath);
@@ -2011,10 +2103,21 @@ void ShowImageEditWindow(HWND parent, ImageEditMode mode, Str filePath, Rendered
         return;
     }
 
+    Str origOwned;
+    if (len(originalData) > 0) {
+        origOwned = str::Dup(originalData);
+    } else if (!fromRenderedBitmap && filePath && file::Exists(filePath)) {
+        origOwned = file::ReadFile(filePath);
+    }
+    Str origExt = ImageSaveExtFromData(origOwned);
+
     auto* ew = new ImageEditWindow();
+    ew->closeWithEsc = closeOnEsc || gImageEditHost.escToExit;
     ew->mode = mode;
     ew->fromRenderedBitmap = fromRenderedBitmap;
     ew->filePath = filePath ? str::Dup(filePath) : Str();
+    ew->originalData = origOwned;
+    ew->originalExt = origExt;
     ew->srcBitmap = bmp;
     ew->srcPixmap = PixmapFromGdiplus(bmp);
     if (!ew->srcPixmap) {
@@ -2035,16 +2138,16 @@ void ShowImageEditWindow(HWND parent, ImageEditMode mode, Str filePath, Rendered
         ew->newH = imgH;
     }
 
-    gImageEditWindows.Append(ew);
+    VecAppend(gImageEditWindows, ew);
 
     HMODULE h = GetModuleHandleW(nullptr);
     Size winSize = CalcImageEditWindowSizeEx(parent, parent, fromRenderedBitmap, imgW, imgH, nullptr);
 
-    Str title = "Save Image";
+    Str title = StrL("Save Image");
     if (mode == ImageEditMode::Crop) {
-        title = "Crop Image";
+        title = StrL("Crop Image");
     } else if (mode == ImageEditMode::Resize) {
-        title = "Resize Image";
+        title = StrL("Resize Image");
     }
     {
         CreateCustomArgs cargs;
@@ -2054,7 +2157,7 @@ void ShowImageEditWindow(HWND parent, ImageEditMode mode, Str filePath, Rendered
         cargs.exStyle = WS_EX_CONTROLPARENT;
         cargs.pos = {CW_USEDEFAULT, CW_USEDEFAULT, winSize.dx, winSize.dy};
         cargs.visible = false;
-        cargs.bgColor = GetSysColor(COLOR_BTNFACE);
+        cargs.bgColor = gColsWin[kColWinBg];
         if (gImageEditHost.appIconId) {
             cargs.icon = LoadIconW(h, MAKEINTRESOURCEW(gImageEditHost.appIconId));
         }
@@ -2071,7 +2174,7 @@ void ShowImageEditWindow(HWND parent, ImageEditMode mode, Str filePath, Rendered
     }
     HWND hwnd = ew->hwnd;
     if (!hwnd) {
-        gImageEditWindows.Remove(ew);
+        VecRemove(gImageEditWindows, ew);
         delete ew;
         return;
     }
@@ -2081,14 +2184,22 @@ void ShowImageEditWindow(HWND parent, ImageEditMode mode, Str filePath, Rendered
     ew->font = ImageEditFont(hwnd);
 
     // create child controls
-    TempStr destPath = filePath ? MakeUniqueFilePathTemp(filePath) : str::DupTemp(StrL(""));
+    TempStr destPath = StrL("");
+    if (filePath) {
+        destPath = filePath;
+        if (origExt && !ExtMatchesOriginal(path::GetExtTemp(destPath), origExt)) {
+            destPath = PathWithExtTemp(destPath, origExt);
+        }
+        destPath = MakeUniqueFilePathTemp(destPath);
+    }
     {
         auto* edit = new Edit();
         Edit::CreateArgs editArgs;
         editArgs.parent = hwnd;
         editArgs.font = ew->font;
         editArgs.text = destPath;
-        editArgs.withBorder = true;
+        editArgs.withBorder = false;
+        edit->SetColors(gColsWin[kColWinText], gColsWin[kColWinBg]);
         edit->Create(editArgs);
         edit->onTextChanged = MkFunc0<ImageEditWindow>(UpdateSaveButtonText, ew);
         if (!gDestEditSubclassId) {
@@ -2097,12 +2208,12 @@ void ShowImageEditWindow(HWND parent, ImageEditMode mode, Str filePath, Rendered
         SetWindowSubclass(edit->hwnd, WndProcDestEditSubclass, gDestEditSubclassId, (DWORD_PTR)ew);
         ew->destEdit = edit;
     }
-    ew->btnBrowse = NewImageEditButton(ew, StrL("..."), MkFunc0(OnBrowse, ew));
+    ew->btnBrowse = NewImageEditButton(ew, StrL("..."), MkFunc0(OnBrowse, ew), VirtButtonStyle::Ghost);
     if (!fromRenderedBitmap) {
         ew->staticPathLabel = NewVirtText({
             .s = filePath ? filePath : Str{},
             .font = ew->font,
-            .textColor = GetSysColor(COLOR_BTNTEXT),
+            .textColor = gColsBtn[kColBtnTextDisabled],
             .pathEllipsis = true,
         });
     }
@@ -2119,14 +2230,16 @@ void ShowImageEditWindow(HWND parent, ImageEditMode mode, Str filePath, Rendered
     ew->staticInfoLabel = NewVirtText({
         .s = infoStr,
         .font = ew->font,
-        .textColor = GetSysColor(COLOR_BTNTEXT),
+        .textColor = gColsBtn[kColBtnTextDisabled],
         .ellipsis = true,
     });
 
     // buttons
-    ew->btnSave = NewImageEditButton(ew, Tr("&Save"), MkFunc0(OnSave, ew));
-    ew->btnCrop = NewImageEditButton(ew, Tr("&Crop"), MkFunc0(OnCropButton, ew));
-    ew->btnResize = NewImageEditButton(ew, Tr("&Resize"), MkFunc0(OnResizeButton, ew));
+    ew->btnSave = NewImageEditButton(ew, HostTr(StrL("&Save")), MkFunc0(OnSave, ew), VirtButtonStyle::Filled);
+    ew->btnCrop = NewImageEditButton(ew, HostTr(StrL("&Crop")), MkFunc0(OnCropButton, ew), VirtButtonStyle::Ghost);
+    ew->btnResize =
+        NewImageEditButton(ew, HostTr(StrL("&Resize")), MkFunc0(OnResizeButton, ew), VirtButtonStyle::Ghost);
+    ew->btnCopy = NewImageEditButton(ew, HostTr(StrL("C&opy")), MkFunc0(OnCopyButton, ew), VirtButtonStyle::Outline);
 
     // format dropdown
     {
@@ -2137,7 +2250,12 @@ void ShowImageEditWindow(HWND parent, ImageEditMode mode, Str filePath, Rendered
         dd->Create(args);
         StrVec items;
         int defaultDdIdx = 0;
-        int wantFmtIdx = selectPdf ? kPdfFormatIdx : kDefaultFormatIdx;
+        int wantFmtIdx = kDefaultFormatIdx;
+        if (selectPdf) {
+            wantFmtIdx = kPdfFormatIdx;
+        } else if (origExt) {
+            wantFmtIdx = FormatIdxFromExt(origExt);
+        }
         for (int i = 0; i < dimofi(gImageFormats); i++) {
             if (!gImageFormats[i].available) {
                 continue;
@@ -2145,11 +2263,11 @@ void ShowImageEditWindow(HWND parent, ImageEditMode mode, Str filePath, Rendered
             if (i == wantFmtIdx) {
                 defaultDdIdx = len(ew->formatIndices);
             }
-            ew->formatIndices.Append(i);
+            VecAppend(ew->formatIndices, i);
             items.Append(gImageFormats[i].label);
         }
         dd->SetItems(items);
-        dd->SetCurrentSelection(defaultDdIdx);
+        CbSetCurrentSelection(dd, defaultDdIdx);
         dd->onSelectionChanged = MkFunc0<ImageEditWindow>(OnFormatChanged, ew);
         ew->dropFormat = dd;
         if (selectPdf) {
@@ -2174,8 +2292,14 @@ void ShowImageEditWindow(HWND parent, ImageEditMode mode, Str filePath, Rendered
             row2->alignMain = MainAxisAlign::MainStart;
             row2->alignCross = CrossAxisAlign::CrossCenter;
             row2->gap = ew->font->averageCharWidth;
-            row2->AddChild(ew->destEdit, 1);
+            // the destination, a bare field over a hairline
+            auto* dest = new VBox();
+            dest->alignCross = CrossAxisAlign::Stretch;
+            dest->AddChild(ew->destEdit);
+            dest->AddChild(new VirtLine());
+            row2->AddChild(dest, 1);
             row2->AddChild(ew->btnBrowse);
+            row2->AddChild(ew->btnCopy);
             row2->AddChild(ew->btnSave);
             auto* row2Pad = new Padding(row2, {0, 0, ImageEditRowPadding(), 0});
             vbox->AddChild(row2Pad);
@@ -2199,7 +2323,7 @@ void ShowImageEditWindow(HWND parent, ImageEditMode mode, Str filePath, Rendered
             vbox->AddChild(row3);
         }
 
-        ew->controlLayout = new Padding(vbox, DpiScaledInsets(kRowPadding, kButtonPadding));
+        ew->controlLayout = new Padding(vbox, DpiScaledInsets(kStripPadDy, kButtonPadding));
         // WindowBase owns and tab-navigates `layout`; it is the same tree
         ew->layout = ew->controlLayout;
     }
@@ -2264,5 +2388,53 @@ TempStr ImageResizeArrowKeyResultTemp(Str imagePath, int* exitCodeOut) {
         *exitCodeOut = 0;
     }
     DestroyWindow(ew->hwnd);
+    return ToStrTemp(out);
+}
+
+// Resize via the same DrawResizedBitmap path as Apply Resize / Save, and
+// report dest size plus the RGB of the left and right edge pixels so a test
+// can catch the half-pixel shift (issue #3434, resize follow-up).
+TempStr ImageResizeEdgesResultTemp(Str imagePath, int newW, int newH, int* exitCodeOut) {
+    str::Builder out;
+    auto fail = [&](Str msg) -> Str {
+        out.Append(msg);
+        out.AppendChar('\n');
+        if (exitCodeOut) {
+            *exitCodeOut = 1;
+        }
+        return ToStrTemp(out);
+    };
+
+    if (len(imagePath) == 0 || !file::Exists(imagePath) || newW < 2 || newH < 1) {
+        return fail(StrL("ERROR bad-args"));
+    }
+    if (!gImageEditHost.LoadImageFile) {
+        return fail(StrL("ERROR no-loader"));
+    }
+    Bitmap* src = gImageEditHost.LoadImageFile(imagePath);
+    if (!src) {
+        return fail(StrL("ERROR load-failed"));
+    }
+    Bitmap* dst = new Bitmap(newW, newH, src->GetPixelFormat());
+    if (!dst) {
+        delete src;
+        return fail(StrL("ERROR alloc-failed"));
+    }
+    {
+        Graphics g(dst);
+        DrawResizedBitmap(g, src, newW, newH);
+    }
+    delete src;
+
+    Gdiplus::Color left, right;
+    dst->GetPixel(0, newH / 2, &left);
+    dst->GetPixel(newW - 1, newH / 2, &right);
+    delete dst;
+
+    out.Append(fmt("size=%dx%d left=%d,%d,%d right=%d,%d,%d\n", newW, newH, left.GetR(), left.GetG(), left.GetB(),
+                   right.GetR(), right.GetG(), right.GetB()));
+    if (exitCodeOut) {
+        *exitCodeOut = 0;
+    }
     return ToStrTemp(out);
 }

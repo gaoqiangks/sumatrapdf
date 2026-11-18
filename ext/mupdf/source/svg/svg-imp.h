@@ -31,12 +31,35 @@ struct svg_cycle_list_s {
 
 typedef struct svg_document_s svg_document;
 
+/* SumatraPDF: one ".name { decl }" rule from a <style> sheet. The list is in reverse
+ * document order, so the first match is the one the cascade prefers. */
+typedef struct svg_class_s svg_class;
+struct svg_class_s
+{
+	svg_class *next;
+	char *name;
+	char *decl;
+};
+
+/* SumatraPDF: an @font-face font from a <style> sheet (#6339) */
+typedef struct svg_font_face_s svg_font_face;
+struct svg_font_face_s
+{
+	svg_font_face *next;
+	char *family;
+	int is_bold;
+	int is_italic;
+	fz_font *font;
+};
+
 struct svg_document_s
 {
 	fz_document super;
 	fz_xml_doc *xml;
 	fz_xml *root;
 	fz_tree *idmap;
+	svg_class *classes;
+	svg_font_face *fonts;
 	float width;
 	float height;
 	svg_cycle_list *cycle; /* for detecting mutual recursive <use> invocations */
@@ -61,12 +84,16 @@ float svg_parse_angle(const char *str);
 void svg_parse_color_from_style(fz_context *ctx, svg_document *doc, const char *str,
 	int *fill_is_set, float fill[3], int *stroke_is_set, float stroke[3]);
 void svg_parse_color(fz_context *ctx, svg_document *doc, const char *str, float *rgb);
+float svg_parse_color_alpha(const char *str);
 fz_matrix svg_parse_transform(fz_context *ctx, svg_document *doc, const char *str, fz_matrix transform);
 
 int svg_is_whitespace_or_comma(int c);
 int svg_is_whitespace(int c);
 int svg_is_alpha(int c);
 int svg_is_digit(int c);
+
+void svg_build_class_map(fz_context *ctx, svg_document *doc, fz_xml *root);
+void svg_drop_class_map(fz_context *ctx, svg_document *doc);
 
 void svg_parse_document_bounds(fz_context *ctx, svg_document *doc, fz_xml *root);
 void svg_run_document(fz_context *ctx, svg_document *doc, fz_xml *root, fz_device *dev, fz_matrix ctm);

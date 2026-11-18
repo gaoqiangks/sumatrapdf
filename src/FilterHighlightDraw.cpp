@@ -2,7 +2,7 @@
    License: Simplified BSD (see COPYING.BSD) */
 
 #include "base/Base.h"
-#include "base/ScopedWin.h"
+#include "base/AutoWin.h"
 #include "base/Win.h"
 #include "gui/Dpi.h"
 
@@ -11,6 +11,17 @@
 
 #include "Theme.h"
 #include "FilterHighlightDraw.h"
+// the underlay of a matched range: a tint of the accent on the default
+// theme, a shade of the row on the others
+constexpr u8 kFilterMatchAlpha = 72;
+
+static void FillFilterMatchRect(Gfx* gfx, const Rect& r, Color bg) {
+    if (IsCurrentThemeDefault()) {
+        gfx->FillRects(&r, 1, ThemeAccentColor(), kFilterMatchAlpha);
+        return;
+    }
+    gfx->FillRect(r, AccentColor(bg, 40));
+}
 
 // approximate "is this UTF-8 byte part of a word character?": any byte >= 0x80
 // is part of a multi-byte rune (CJK / Cyrillic / accented Latin -> treat as a
@@ -32,17 +43,17 @@ void DrawMaybeHighlightedText(Gfx* gfx, Rect rc, Str text, const StrVec& filterW
 
     // find all match ranges in text
     int textLen = text.len;
-    u8* hl = VecReserve(highlighted, textLen);
+    u8* hl = VecGrow(highlighted, textLen);
     memset(hl, 0, textLen);
     for (int w = 0; w < nWords; w++) {
         Str word = filterWords[w];
-        int wordLen = word.len;
         if (len(word) == 0) {
             continue;
         }
         Str rest = text;
         while (rest) {
-            int idx = str::IndexOfI(rest, word);
+            int wordLen = 0;
+            int idx = FilterIndexOf(rest, word, &wordLen);
             if (idx < 0) {
                 break;
             }
@@ -89,11 +100,18 @@ void DrawMaybeHighlightedText(Gfx* gfx, Rect rc, Str text, const StrVec& filterW
         }
     }
 
-    // measure total string width for RTL positioning
+    // measure the string for RTL positioning and the underlay's height
+    Size sizeTotal = gfx->MeasureText(text, font);
     int strOriginX = rc.x;
     if (isRtl) {
-        Size sizeTotal = gfx->MeasureText(text, font);
         strOriginX = rc.x + rc.dx - sizeTotal.dx;
+    }
+    // the underlay covers the text's line, not the whole row
+    int hlY = rc.y;
+    int hlDy = rc.dy;
+    if ((drawFlags & gfxTextVCenter) && sizeTotal.dy < rc.dy) {
+        hlY = rc.y + ((rc.dy - sizeTotal.dy) / 2);
+        hlDy = sizeTotal.dy;
     }
 
     // compute pixel rectangles for each highlighted range
@@ -101,36 +119,22 @@ void DrawMaybeHighlightedText(Gfx* gfx, Rect rc, Str text, const StrVec& filterW
     for (int i = 0; i < nRanges; i++) {
         Size sizeStart = gfx->MeasureText(Str(text.s, byteRanges[i].start), font);
         Size sizeEnd = gfx->MeasureText(Str(text.s, byteRanges[i].end), font);
-        highlightRects[i] = {strOriginX + sizeStart.dx, rc.y, sizeEnd.dx - sizeStart.dx, rc.dy};
+        highlightRects[i] = {strOriginX + sizeStart.dx, hlY, sizeEnd.dx - sizeStart.dx, hlDy};
     }
 
     // draw highlight background rectangles for matches
-    {
-        Color highlightCol;
-        if (IsCurrentThemeDefault()) {
-            highlightCol = kColYellow; // yellow for default theme
-        } else {
-            highlightCol = AccentColor(colBg, 40);
-        }
-        for (int i = 0; i < nRanges; i++) {
-            // highlightRects are computed from the full (untruncated) string, but
-            // the text is drawn clipped/ellipsized to rc. Clip to rc so a match
-            // in the truncated-away tail doesn't paint a stray box outside the label.
-            Rect clipped = highlightRects[i].Intersect(rc);
-            if (!clipped.IsEmpty()) {
-                gfx->FillRect(clipped, highlightCol);
-            }
+    for (int i = 0; i < nRanges; i++) {
+        // highlightRects are computed from the full (untruncated) string, but
+        // the text is drawn clipped/ellipsized to rc. Clip to rc so a match
+        // in the truncated-away tail doesn't paint a stray box outside the label.
+        Rect clipped = highlightRects[i].Intersect(rc);
+        if (!clipped.IsEmpty()) {
+            FillFilterMatchRect(gfx, clipped, colBg);
         }
     }
 
     // draw the whole string at once over the highlights
     gfx->DrawText(text, rc, drawFlags, font, colText);
-}
-
-// Ink that stays readable on a solid highlight underlay (black on yellow).
-static Color TextColorContrasting(Color bg) {
-    int lum = (GetRValue(bg) * 299 + GetGValue(bg) * 587 + GetBValue(bg) * 114) / 1000;
-    return lum >= 140 ? kColBlack : kColWhite;
 }
 
 // Sample the row background the TreeView already painted (indent/icon strip).
@@ -194,11 +198,34 @@ void ResolveTreeFilterItemColors(HDC hdc, Rect itemRc, Color treeBg, Color treeT
     *txtOut = IsSpecialColor(treeTxt) ? ThemeWindowTextColor() : treeTxt;
 }
 
+static Size MeasureStyledTextPrefix(Gfx* gfx, Str text, int prefixLen, PlatformFont* font, PlatformFont* boldFont,
+                                    int boldStart, int boldEnd) {
+    Size res{};
+    prefixLen = std::min(prefixLen, len(text));
+    auto addRun = [&](int start, int end, PlatformFont* runFont) {
+        if (end <= start) {
+            return;
+        }
+        Size size = gfx->MeasureText(Str(text.s + start, end - start), runFont);
+        res.dx += size.dx;
+        res.dy = std::max(res.dy, size.dy);
+    };
+    addRun(0, std::min(prefixLen, boldStart), font);
+    if (prefixLen > boldStart) {
+        addRun(boldStart, std::min(prefixLen, boldEnd), boldFont);
+    }
+    if (prefixLen > boldEnd) {
+        addRun(boldEnd, prefixLen, font);
+    }
+    return res;
+}
+
 // TreeView post-paint: repaint the label with multi-word match underlays
-// (command-palette style). `font` should be the tree's font (WM_GETFONT) so
-// extents match the control's text; pass nullptr to keep the HDC font.
+// (command-palette style) and, optionally, a bold byte range. `font` should be
+// the tree's font (WM_GETFONT) so extents match the control's text; pass nullptr
+// to keep the HDC font.
 void DrawTreeItemFilterHighlight(Gfx* gfx, Rect labelRect, Str text, const StrVec& filterWords, Color bgCol,
-                                 Color txtCol, PlatformFont* font) {
+                                 Color txtCol, PlatformFont* font, int boldTextOffset, int boldTextLen) {
     // TreeView has already painted the row. We repaint only the text label:
     // solid bg (selection or window) so themed double-draw artifacts go away,
     // yellow/accent underlays for each match word, then the string in runs so
@@ -207,21 +234,26 @@ void DrawTreeItemFilterHighlight(Gfx* gfx, Rect labelRect, Str text, const StrVe
     // disappear on the focused selected row.
     // Use the tree's font for GetTextExtentPoint32 / DrawText or the bars
     // misalign and look oversized relative to the control's text.
-    if (!text || len(text) == 0 || len(filterWords) == 0) {
+    if (len(text) == 0) {
         return;
     }
 
     int textLen = text.len;
+    bool hasBold = font && boldTextOffset >= 0 && boldTextLen > 0 && boldTextOffset < textLen;
+    int boldStart = hasBold ? boldTextOffset : textLen;
+    int boldEnd = hasBold ? std::min(textLen, boldTextOffset + boldTextLen) : textLen;
+    PlatformFont* boldFont = hasBold ? GetBoldPlatformFont(font) : font;
     u8* hl = AllocArrayTemp<u8>(textLen);
+    memset(hl, 0, textLen);
     for (int w = 0; w < len(filterWords); w++) {
         Str word = filterWords[w];
-        int wordLen = word.len;
-        if (wordLen == 0) {
+        if (len(word) == 0) {
             continue;
         }
         Str rest = text;
         while (len(rest) > 0) {
-            int idx = str::IndexOfI(rest, word);
+            int wordLen = 0;
+            int idx = FilterIndexOf(rest, word, &wordLen);
             if (idx < 0) {
                 break;
             }
@@ -255,11 +287,11 @@ void DrawTreeItemFilterHighlight(Gfx* gfx, Rect labelRect, Str text, const StrVe
             }
         }
     }
-    if (nRanges == 0) {
+    if (nRanges == 0 && !hasBold) {
         return;
     }
 
-    Size sizeFull = gfx->MeasureText(text, font);
+    Size sizeFull = MeasureStyledTextPrefix(gfx, text, textLen, font, boldFont, boldStart, boldEnd);
     // center underlay height on the glyph height (labelRect can be taller than
     // the font, which made yellow bars spill into neighboring rows)
     int textTop = labelRect.y + ((labelRect.dy - sizeFull.dy) / 2);
@@ -272,36 +304,33 @@ void DrawTreeItemFilterHighlight(Gfx* gfx, Rect labelRect, Str text, const StrVe
     }
 
     // clear label so we do not stack on top of the control's text
+    if (hasBold) {
+        labelRect.dx = std::max(labelRect.dx, sizeFull.dx);
+    }
     gfx->FillRect(labelRect, bgCol);
 
-    Color highlightCol;
-    if (IsCurrentThemeDefault()) {
-        highlightCol = kColYellow;
-    } else {
-        highlightCol = AccentColor(bgCol, 40);
-    }
     for (int i = 0; i < nRanges; i++) {
-        Size sizeStart = gfx->MeasureText(Str(text.s, byteRanges[i].start), font);
-        Size sizeEnd = gfx->MeasureText(Str(text.s, byteRanges[i].end), font);
+        Size sizeStart = MeasureStyledTextPrefix(gfx, text, byteRanges[i].start, font, boldFont, boldStart, boldEnd);
+        Size sizeEnd = MeasureStyledTextPrefix(gfx, text, byteRanges[i].end, font, boldFont, boldStart, boldEnd);
         Rect hr{labelRect.x + sizeStart.dx, textTop, sizeEnd.dx - sizeStart.dx, textBottom - textTop};
         Rect clipped = hr.Intersect(labelRect);
         if (!clipped.IsEmpty()) {
-            gfx->FillRect(clipped, highlightCol);
+            FillFilterMatchRect(gfx, clipped, bgCol);
         }
     }
 
-    // Draw non-match runs in the row text color (white when selected+focused);
-    // match runs use ink that contrasts with the underlay so yellow+white does
-    // not wash out. Prefix extents keep run x positions aligned with underlays.
-    Color matchTxtCol = TextColorContrasting(highlightCol);
+    // the underlay is a tint, so a match keeps the row's text color. Prefix
+    // extents keep run x positions aligned with underlays.
+    Color matchTxtCol = txtCol;
     int pos = 0;
     while (pos < textLen) {
         bool isHl = hl[pos] != 0;
+        bool isBold = hasBold && pos >= boldStart && pos < boldEnd;
         int start = pos;
-        while (pos < textLen && (hl[pos] != 0) == isHl) {
+        while (pos < textLen && (hl[pos] != 0) == isHl && (hasBold && pos >= boldStart && pos < boldEnd) == isBold) {
             pos++;
         }
-        Size sizeStart = gfx->MeasureText(Str(text.s, start), font);
+        Size sizeStart = MeasureStyledTextPrefix(gfx, text, start, font, boldFont, boldStart, boldEnd);
         Str run(text.s + start, pos - start);
         if (len(run) == 0) {
             continue;
@@ -310,40 +339,7 @@ void DrawTreeItemFilterHighlight(Gfx* gfx, Rect labelRect, Str text, const StrVe
         runRect.x = labelRect.x + sizeStart.dx;
         runRect.y = textTop;
         runRect.dy = textBottom - textTop;
-        gfx->DrawText(run, runRect, gfxTextSingleLine | gfxTextNoClip, font, isHl ? matchTxtCol : txtCol);
-    }
-}
-
-bool FilterMatches(Str str, const StrVec& words) {
-    int nWords = len(words);
-    for (int i = 0; i < nWords; i++) {
-        Str word = words[i];
-        if (len(word) == 0) {
-            continue;
-        }
-        if (!str::ContainsI(str, word)) {
-            return false;
-        }
-    }
-    return true;
-}
-
-void SplitFilterToWords(Str filter, StrVec& words) {
-    int i = 0;
-    while (i < filter.len && filter.s[i]) {
-        while (i < filter.len && str::IsWs(filter.s[i])) {
-            i++;
-        }
-        if (i >= filter.len || !filter.s[i]) {
-            break;
-        }
-        int start = i;
-        while (i < filter.len && filter.s[i] && !str::IsWs(filter.s[i])) {
-            i++;
-        }
-        Str word(filter.s + start, i - start);
-        if (len(word) > 0) {
-            AppendIfNotExists(&words, word);
-        }
+        PlatformFont* runFont = isBold ? boldFont : font;
+        gfx->DrawText(run, runRect, gfxTextSingleLine | gfxTextNoClip, runFont, isHl ? matchTxtCol : txtCol);
     }
 }

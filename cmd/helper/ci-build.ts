@@ -3,7 +3,15 @@
 import { existsSync, readFileSync, writeFileSync, statSync, rmSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { createHmac, createHash } from "node:crypto";
-import { getGitLinearVersion, extractSumatraVersion, runLogged, getGitSha1, detectVisualStudio2026 } from "../util";
+import {
+  getGitLinearVersion,
+  extractSumatraVersion,
+  runLogged,
+  getGitSha1,
+  detectVisualStudio2026,
+  msbuildDefinesArg,
+  preReleaseDefines,
+} from "../util";
 
 // const { msbuildPath, llvmPdbutilPath } = detectVisualStudio2022();
 // const slnPath = join("vs2022", "SumatraPDF.sln");
@@ -59,42 +67,6 @@ function ensureAllUploadCreds(): void {
 }
 
 // === Version Detection ===
-
-// === Build Config ===
-
-function buildConfigPath(): string {
-  return join("src", "BuildConfig.h");
-}
-
-function setBuildConfigPreRelease(sha1: string, preRelVer: string): void {
-  const todayDate = new Date().toISOString().slice(0, 10);
-  let s = `#define GIT_COMMIT_ID ${sha1}\n`;
-  s += `#define BUILT_ON ${todayDate}\n`;
-  s += `#define PRE_RELEASE_VER ${preRelVer}\n`;
-  writeFileSync(buildConfigPath(), s, "utf-8");
-}
-
-async function revertBuildConfig(): Promise<void> {
-  const proc = Bun.spawn(["git", "checkout", buildConfigPath()], {
-    stdout: "inherit",
-    stderr: "inherit",
-  });
-  await proc.exited;
-}
-
-function ensureEmbeddedIsBuilt(): void {
-  const path = join(".work", "embedded.dat");
-  let size = 0;
-  try {
-    size = statSync(path).size;
-  } catch {
-    // file doesn't exist
-  }
-  // mermaid alone is ~2.6MB; a tiny archive means packing failed or docs missing
-  if (size < 100 * 1024) {
-    throw new Error(`size of '${path}' is ${size} which indicates we didn't build it`);
-  }
-}
 
 // === Command Execution ===
 
@@ -228,38 +200,33 @@ function removeReleaseBuilds(): void {
   }
 }
 
-async function buildPreRelease(preRelVer: string, sha1: string, vsplatform: string, outDir: string): Promise<void> {
-  ensureEmbeddedIsBuilt();
+async function buildPreRelease(preRelVer: string, sha1: string, vsplatform: string): Promise<void> {
   console.log(`building pre-release version ${preRelVer}`);
   const buildStart = performance.now();
 
-  setBuildConfigPreRelease(sha1, preRelVer);
-  try {
-    const p = `/p:Configuration=Release;Platform=${vsplatform}`;
+  const defines = msbuildDefinesArg(preReleaseDefines(sha1, preRelVer));
+  const p = `/p:Configuration=Release;Platform=${vsplatform}`;
 
-    // build and run tests (skip for ARM64)
-    // Nested under the "tools" solution folder → MSBuild target is tools\test_util
-    await runLogged(msbuildPath, [slnPath, String.raw`/t:tools\test_util:Rebuild`, p, `/m`]);
-    if (vsplatform !== "ARM64") {
-      const testUtil = resolve(join(outDir, "test_util.exe"));
-      await runLogged(testUtil, [], outDir);
-    }
-
-    // build all targets. The tools\* utilities (nested under the "tools" solution
-    // folder) are built too so CI catches breakage in them (e.g. bit-rot).
-    const targets = [
-      "PdfFilter",
-      "PdfPreview",
-      "SumatraPDF",
-      "SumatraPDF-static",
-      String.raw`tools\logview`,
-      String.raw`tools\MakeLZSA`,
-    ];
-    const t = `/t:${targets.map((t) => t + ":Rebuild").join(";")}`;
-    await runLogged(msbuildPath, [slnPath, t, p, `/m`]);
-  } finally {
-    await revertBuildConfig();
+  // unit tests are compiled into SumatraPDF only in Debug builds (skip for ARM64)
+  if (vsplatform !== "ARM64") {
+    const kind = vsplatform === "Win32" ? "-32" : "-dbg";
+    await runLogged("bun", [join("cmd", "run-unit-tests.ts"), kind]);
   }
+
+  // build all targets. The tools\* utilities (nested under the "tools" solution
+  // folder) are built too so CI catches breakage in them (e.g. bit-rot).
+  const targets = [
+    "PdfFilter",
+    "PdfPreview",
+    "SumatraPDF",
+    "SumatraPDF-static",
+    "SumatraPDF3_7",
+    "SumatraPDF3_7-static",
+    String.raw`tools\logview`,
+    String.raw`tools\MakeLZSA`,
+  ];
+  const t = `/t:${targets.map((t) => t + ":Rebuild").join(";")}`;
+  await runLogged(msbuildPath, [slnPath, t, p, defines, `/m`]);
 
   const elapsed = ((performance.now() - buildStart) / 1000).toFixed(1);
   console.log(`building pre-release version ${preRelVer} took ${elapsed}s`);
@@ -279,13 +246,13 @@ async function buildSmoke(): Promise<void> {
     throw new Error(`'${makeLzsa}' doesn't exist`);
   }
 
-  const t = String.raw`/t:SumatraPDF:Rebuild;tools\test_util:Rebuild`;
+  const t = "/t:SumatraPDF:Rebuild;SumatraPDF3_7:Rebuild";
   const p = `/p:Configuration=Release;Platform=x64`;
   await runLogged(msbuildPath, [slnPath, t, p, `/m`]);
 
   const outDir = join("out", "rel64");
-  const testUtil = resolve(join(outDir, "test_util.exe"));
-  await runLogged(testUtil, [], outDir);
+  // unit tests are compiled into the debug SumatraPDF only
+  await runLogged("bun", [join("cmd", "run-unit-tests.ts"), "-dbg"]);
 
   // create PDB LZSA
   await runLogged(
@@ -402,7 +369,7 @@ export async function buildCi() {
         const { main: genDocs } = await import("../gen-docs");
         await genDocs();
       }
-      await buildPreRelease(preRelVer, sha1, "Win32", join("out", "rel32"));
+      await buildPreRelease(preRelVer, sha1, "Win32");
       break;
     case "codeql":
       await buildSmoke();

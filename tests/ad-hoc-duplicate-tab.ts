@@ -1,11 +1,13 @@
 // Duplicate a document with a view different from the default, then compare
 // the two tabs and navigate one independently. Run with:
 //   bun tests/ad-hoc-duplicate-tab.ts [--no-build]
-// Uses the existing debug control queries and window-message helpers.
+// Set SUMATRA_TEST_VARIANT=custom for the isolated edition.
+// Uses six generated CBZ pages, debug control queries and window messages.
 import { mkdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { deflateSync } from "node:zlib";
 import { ControlClient, ControlCommand, withControlledSumatra } from "./control.ts";
-import { EXE, cmdId, runStandalone, tmpPath } from "./util.ts";
+import { EXE, cmdId, makeStoredZip, pngChunk, runStandalone, tmpPath } from "./util.ts";
 import {
   findCanvas,
   openContextMenu,
@@ -37,44 +39,37 @@ function fail(message: string): never {
 
 // Asymmetric content throughout each page makes a misplaced scroll position
 // or rotation visible even when the viewport contains no text.
-function makePdf(): Buffer {
-  const objects: string[] = [
-    "<< /Type /Catalog /Pages 2 0 R >>",
-    "",
-    "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
-  ];
-  const kids: number[] = [];
+function makeCbz(): Buffer {
+  const pages: { name: string; data: Buffer }[] = [];
+  const width = 612;
+  const height = 792;
   for (let page = 1; page <= 6; page++) {
-    const pageObject = objects.length + 1;
-    kids.push(pageObject);
-    const lines: string[] = [];
-    for (let row = 0; row < 16; row++) {
-      const red = ((row + page) % 7) / 8;
-      const green = ((row * 3 + page) % 9) / 10;
-      lines.push(`${red} ${green} 0.7 rg 0 ${row * 48} 612 35 re f`);
-      lines.push(`0 0 0 rg BT /F1 14 Tf 30 ${row * 48 + 10} Td (page ${page}, row ${row}) Tj ET`);
-      lines.push(`0.9 0.4 0.1 rg ${40 + row * 23} ${row * 48} 11 35 re f`);
+    const raw = Buffer.alloc((width * 3 + 1) * height);
+    for (let y = 0; y < height; y++) {
+      const row = Math.floor(y / 48);
+      for (let x = 0; x < width; x++) {
+        const offset = y * (width * 3 + 1) + 1 + x * 3;
+        const marker = x >= 40 + row * 23 && x < 51 + row * 23;
+        const stripe = y % 48 < 35;
+        raw[offset] = marker ? 230 : stripe ? ((row + page) % 7) * 31 : 245;
+        raw[offset + 1] = marker ? 102 : stripe ? ((row * 3 + page) % 9) * 25 : 245;
+        raw[offset + 2] = marker ? 26 : stripe ? 178 : 245;
+      }
     }
-    const content = lines.join("\n");
-    objects.push(
-      `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents ${pageObject + 1} 0 R >>`,
-      `<< /Length ${content.length} >>\nstream\n${content}\nendstream`,
-    );
+    const ihdr = Buffer.alloc(13);
+    ihdr.writeUInt32BE(width, 0);
+    ihdr.writeUInt32BE(height, 4);
+    ihdr[8] = 8;
+    ihdr[9] = 2;
+    const png = Buffer.concat([
+      Buffer.from("89504e470d0a1a0a", "hex"),
+      pngChunk("IHDR", ihdr),
+      pngChunk("IDAT", deflateSync(raw)),
+      pngChunk("IEND", Buffer.alloc(0)),
+    ]);
+    pages.push({ name: `${page}.png`, data: png });
   }
-  objects[1] = `<< /Type /Pages /Kids [${kids.map((n) => `${n} 0 R`).join(" ")}] /Count ${kids.length} >>`;
-  let pdf = "%PDF-1.7\n";
-  const offsets: number[] = [];
-  for (const [index, object] of objects.entries()) {
-    offsets.push(Buffer.byteLength(pdf, "latin1"));
-    pdf += `${index + 1} 0 obj\n${object}\nendobj\n`;
-  }
-  const xref = Buffer.byteLength(pdf, "latin1");
-  pdf += `xref\n0 ${objects.length + 1}\n0000000000 65535 f \n`;
-  for (const offset of offsets) {
-    pdf += `${String(offset).padStart(10, "0")} 00000 n \n`;
-  }
-  pdf += `trailer\n<< /Size ${objects.length + 1} /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF\n`;
-  return Buffer.from(pdf, "latin1");
+  return makeStoredZip(pages);
 }
 
 async function tabs(client: ControlClient): Promise<Tab[]> {
@@ -162,18 +157,20 @@ async function runScenario(
     join(appdata, "SumatraPDF-settings.txt"),
     `UiLanguage = ${language}\nCheckForUpdates = false\nRestoreSession = false\nRememberOpenedFiles = false\nRememberStatePerDocument = false\nUseTabs = ${useTabs}\nNoHomeTab = true\nShowToc = false\nShowFavorites = false\nEscToExit = false\nReloadModifiedDocuments = false\nDefaultDisplayMode = ${rotate ? "single page" : "continuous"}\nDefaultZoom = 100\nScrollbars = windows\nScrollbarInSinglePage = true\nSmoothScroll = false\nTabWidth = 240\n`,
   );
-  const source = join(dir, missing ? "missing-source.pdf" : "source.pdf");
+  const source = join(dir, missing ? "missing-source.cbz" : "source.cbz");
   if (missing) {
-    writeFileSync(source, makePdf());
+    writeFileSync(source, makeCbz());
     rmSync(`${source}.moved`, { force: true });
   }
-  const other = join(dir, "other.pdf");
+  const other = join(dir, "other.cbz");
   await withControlledSumatra(
     EXE,
     async (client, proc) => {
       // A modal menu that did not accept the synthetic keys must fail the
       // probe instead of leaving a control request waiting indefinitely.
       client.socket.setTimeout(20000, () => client.socket.destroy());
+      // Keep transient zoom/relayout messages out of document pixel comparisons.
+      await client.setNotificationsEnabled(false);
       const frame = (await waitForFrame(proc.pid!)) || fail(`${name}: no frame`);
       const canvas = findCanvas(frame) || fail(`${name}: no canvas`);
       await client.waitForRenderIdle();
@@ -290,8 +287,8 @@ export async function testit(): Promise<void> {
   setProcessDpiAware();
   const dir = tmpPath("duplicate-tab");
   mkdirSync(dir, { recursive: true });
-  writeFileSync(join(dir, "source.pdf"), makePdf());
-  writeFileSync(join(dir, "other.pdf"), makePdf());
+  writeFileSync(join(dir, "source.cbz"), makeCbz());
+  writeFileSync(join(dir, "other.cbz"), makeCbz());
   const failures: string[] = [];
   const scenarios: [string, boolean, boolean, boolean, boolean, string][] = [
     ["continuous", true, false, false, false, "en"],

@@ -12,34 +12,36 @@
 #include "gui/Gfx.h"
 
 #include "Settings.h"
-#include "GlobalPrefs.h"
 #include "SumatraPDF.h"
 #include "MainWindow.h"
 #include "Commands.h"
-#include "Canvas.h"
 #include "Menu.h"
 #include "HomePage.h"
 #include "Theme.h"
 #include "FileHistory.h"
 #include "AppSettings.h"
+#include "Canvas.h"
+
+int gHomePagePaintCount = 0;
 
 static void OnPaintAbout(MainWindow* win) {
     auto t = TimeGet();
     PAINTSTRUCT ps;
     HDC hdc = BeginPaint(win->hwndCanvas, &ps);
+    SetLayout(hdc, 0);
     if (!win->buffer) {
         EndPaint(win->hwndCanvas, &ps);
         return;
     }
     HDC bufDC = win->buffer->GetDC();
-    GlobalPrefs* prefs = gGlobalPrefs;
+    Settings* prefs = gSettings;
     bool hasPerms = HasPermission(Perm::SavePreferences | Perm::DiskAccess);
     bool drawHome = hasPerms && prefs->rememberOpenedFiles && prefs->showStartPage;
     Gfx* gfx = GfxCreate(bufDC);
     if (drawHome) {
         DrawHomePage(win, gfx);
     } else {
-        HomePageDestroySearch(win);
+        HomePageHideSearch(win);
         // DrawAboutPage swaps the canvas root's child from the home page's
         // chrome to the About page's controls
         DrawAboutPage(win, gfx);
@@ -49,6 +51,10 @@ static void OnPaintAbout(MainWindow* win) {
     DrawCanvasKeyboardFocusIfNeeded(win, hdc);
 
     EndPaint(win->hwndCanvas, &ps);
+    if (drawHome) {
+        gHomePagePaintCount++;
+        HomePageRepaintWinScrollbar(win);
+    }
     win->ShowFrameRateDur(TimeSinceInMs(t));
 }
 
@@ -130,7 +136,7 @@ LRESULT WndProcCanvasAbout(MainWindow* win, HWND hwnd, UINT msg, WPARAM wp, LPAR
                     return 0;
                 case VK_RETURN: {
                     Str path = HomePageSelectedFilePathTemp(win);
-                    if (!path) {
+                    if (len(path) == 0) {
                         return 0;
                     }
                     LoadArgs args(path, win);
@@ -195,6 +201,11 @@ LRESULT WndProcCanvasAbout(MainWindow* win, HWND hwnd, UINT msg, WPARAM wp, LPAR
             HomePageOnMouseWheel(win, delta);
             return 0;
         }
+
+        // nothing scrolls sideways; DefWindowProc hands it to the frame, which
+        // sends it back here until the stack overflows
+        case WM_MOUSEHWHEEL:
+            return 0;
 
         default:
             return DefWindowProc(hwnd, msg, wp, lp);

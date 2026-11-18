@@ -28,26 +28,27 @@ type SearchHit = { file: string; title: string; text: string };
 function loadSearchFns(): {
   parseAllDocs: (text: string) => DocFile[];
   searchAllDocs: (files: DocFile[], query: string) => SearchHit[];
+  assembleAllDocs: (names: string[], pages: string[]) => string;
 } {
   const src = readFileSync(join(ROOT, "docs", "gen_docs.fulltext_search.js"), "utf-8");
-  // Guard: the bug was using markers[i+1].index without storing index.
-  if (!/index:\s*match\.index/.test(src)) {
-    throw new Error(
-      "issue-5875: parseAllDocs must store match.index (doc end bound); fix regressed",
-    );
-  }
   const parseSrc = extractFn(src, "parseAllDocs");
   const lineMatchesSrc = extractFn(src, "lineMatchesAll");
   const searchSrc = extractFn(src, "searchAllDocs");
-  // searchAllDocs closes over kMaxResults and lineMatchesAll
+  const assembleSrc = extractFn(src, "assembleAllDocs");
+  const svgRe = /const kSvgFenceRe = (.*);/.exec(src);
+  if (!svgRe) {
+    throw new Error("issue-5875: kSvgFenceRe not found in gen_docs.fulltext_search.js");
+  }
+  // searchAllDocs closes over kMaxResults and lineMatchesAll, assembleAllDocs over kSvgFenceRe
   const factory = new Function(
-    `${lineMatchesSrc}\nconst kMaxResults = 32;\n${parseSrc}\n${searchSrc}\nreturn { parseAllDocs, searchAllDocs };`,
+    `${lineMatchesSrc}\nconst kMaxResults = 32;\nconst kSvgFenceRe = ${svgRe[1]};\n` +
+      `${parseSrc}\n${searchSrc}\n${assembleSrc}\nreturn { parseAllDocs, searchAllDocs, assembleAllDocs };`,
   );
   return factory();
 }
 
 export async function testit(): Promise<void> {
-  const { parseAllDocs, searchAllDocs } = loadSearchFns();
+  const { parseAllDocs, searchAllDocs, assembleAllDocs } = loadSearchFns();
 
   // Synthetic: only Commands.md and Late.md mention both "show" and "links".
   // With the old bug, Early.md's content included later files and matched too.
@@ -76,9 +77,7 @@ export async function testit(): Promise<void> {
   }
   const earlyText = early.lines.join("\n");
   if (earlyText.includes("Show Links") || earlyText.includes("show links")) {
-    throw new Error(
-      "Early.md content must not include later docs (parseAllDocs end-bound bug)",
-    );
+    throw new Error("Early.md content must not include later docs (parseAllDocs end-bound bug)");
   }
   if (!earlyText.includes("unique early content only")) {
     throw new Error("Early.md missing its own content");
@@ -96,30 +95,32 @@ export async function testit(): Promise<void> {
     throw new Error(`expected Late.md in results, got: ${hitFiles.join(", ")}`);
   }
 
-  // Against real all-docs.md when present (after gen-docs): "show links" must
-  // not flood with ~32 junk hits from early docs absorbing the whole corpus.
-  const allDocsPath = join(ROOT, ".work", "docs", "all-docs.md");
+  // Against the real manual when present (after gen-docs), assembled from
+  // all-docs.json's pages as the page does: "show links" must not flood with
+  // ~32 junk hits from early docs absorbing the whole corpus.
+  const manualDir = join(ROOT, ".work", "docs");
+  const allDocsPath = join(manualDir, "all-docs.json");
   if (existsSync(allDocsPath)) {
-    const real = parseAllDocs(readFileSync(allDocsPath, "utf-8"));
+    const pageNames: string[] = JSON.parse(readFileSync(allDocsPath, "utf-8"));
+    const pages = pageNames.map((n) => readFileSync(join(manualDir, n), "utf-8"));
+    const real = parseAllDocs(assembleAllDocs(pageNames, pages));
+    if (real.length !== pageNames.length) {
+      throw new Error(`real manual: assembled ${real.length} docs from ${pageNames.length} pages`);
+    }
     const realHits = searchAllDocs(real, "show links");
     if (realHits.length === 0) {
-      throw new Error('real all-docs.md: expected some hits for "show links"');
+      throw new Error('real manual: expected some hits for "show links"');
     }
     if (realHits.length >= 32) {
-      throw new Error(
-        `real all-docs.md: "show links" returned ${realHits.length} hits (likely parse bug)`,
-      );
+      throw new Error(`real manual: "show links" returned ${realHits.length} hits (likely parse bug)`);
     }
     const names = realHits.map((h) => h.title || h.file).join("; ");
     // Commands page should be among real hits (CmdToggleLinks / Show Links)
     const hasCommands = realHits.some(
-      (h) =>
-        /commands/i.test(h.file) ||
-        /commands/i.test(h.title) ||
-        /show links/i.test(h.text),
+      (h) => /commands/i.test(h.file) || /commands/i.test(h.title) || /show links/i.test(h.text),
     );
     if (!hasCommands) {
-      throw new Error(`real all-docs.md: no Commands/show-links hit among: ${names}`);
+      throw new Error(`real manual: no Commands/show-links hit among: ${names}`);
     }
   }
 }

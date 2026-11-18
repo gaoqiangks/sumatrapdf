@@ -3,11 +3,11 @@
 
 #include "base/Base.h"
 #include "base/ByteReaderWriter.h"
-#include "base/LzmaSimpleArchive.h"
 #include "base/File.h"
 
 #include <LzmaDec.h>
 #include <Bra.h>
+#include "base/LzmaSimpleArchive.h"
 
 /*
 Implements extracting data from a simple archive format, made up by me.
@@ -17,12 +17,12 @@ there's a tool for creating them in ../MakeLzSA.cpp
 
 LzmaDecode / x86_Convert come from ext/lzma/C (LzmaDec.c, Bra86.c) compiled into
 base and SumatraPDF.exe — not from libsumatrapdf.dll (libarchive uses liblzma instead).
-The installer must decompress IDR_DLL_PAK (which contains libsumatrapdf.dll) without
+The installer must decompress IDR_EMBEDDED_PAK (which contains libsumatrapdf.dll) without
 calling into that DLL.
 */
 
 // 'LzSA' for "Lzma Simple Archive"
-#define LZMA_MAGIC_ID 0x41537a4c
+constexpr int kLzmaMagicId = 0x41537a4c;
 
 namespace lzma {
 
@@ -73,7 +73,7 @@ static u32 lzma_crc32(u32 crc32, const u8* data, size_t data_len) {
 // adapted from lzma/C/Lzma86Dec.c
 // (main difference: the uncompressed size isn't stored in bytes 6 to 13)
 
-#define LZMA_HEADER_SIZE (1 + LZMA_PROPS_SIZE)
+constexpr int kLzmaHeaderSize = 1 + LZMA_PROPS_SIZE;
 
 // the first compressed byte indicates whether compression is LZMA (0), LZMA+BJC (1) or none (-1)
 static bool Decompress(const u8* compressed, size_t compressedSize, u8* uncompressed, size_t uncompressedSize,
@@ -92,25 +92,29 @@ static bool Decompress(const u8* compressed, size_t compressedSize, u8* uncompre
         return true;
     }
 
-    if (compressedSize < LZMA_HEADER_SIZE || usesX86Filter > 1) {
+    if (compressedSize < kLzmaHeaderSize || usesX86Filter > 1) {
         return false;
     }
 
     SizeT uncompressedSizeCmp = uncompressedSize;
-    SizeT compressedSizeTmp = compressedSize - LZMA_HEADER_SIZE;
+    SizeT compressedSizeTmp = compressedSize - kLzmaHeaderSize;
 
     ISzAllocatorAlloc lzmaAlloc(a);
     ELzmaStatus status;
     u8* dest = uncompressed;
-    u8* src = (u8*)(compressed + LZMA_HEADER_SIZE);
+    u8* src = (u8*)(compressed + kLzmaHeaderSize);
     u8* propData = (u8*)(compressed + 1);
     int res = LzmaDecode(dest, &uncompressedSizeCmp, src, &compressedSizeTmp, propData, LZMA_PROPS_SIZE,
                          LZMA_FINISH_END, &status, &lzmaAlloc);
 
     if (SZ_OK != res || status != LZMA_STATUS_FINISHED_WITH_MARK) {
+        logf("lzma::Decompress: LzmaDecode failed, res=%d status=%d, decoded %d of %d bytes, consumed %d of %d\n", res,
+             (int)status, (int)uncompressedSizeCmp, (int)uncompressedSize, (int)compressedSizeTmp,
+             (int)(compressedSize - kLzmaHeaderSize));
         return false;
     }
     if (uncompressedSizeCmp != uncompressedSize) {
+        logf("lzma::Decompress: decoded %d bytes, expected %d\n", (int)uncompressedSizeCmp, (int)uncompressedSize);
         return false;
     }
 
@@ -142,36 +146,36 @@ Integers are little-endian.
 */
 
 // magic_id + number of files
-#define HEADER_START_SIZE (4 + 4)
+constexpr int kHeaderStartSize = 4 + 4;
 
 // 4 * u32 + FILETIME + name
-#define FILE_ENTRY_MIN_SIZE ((4 * 4) + 8 + 1)
+constexpr int kFileEntryMinSize = (4 * 4) + 8 + 1;
 
 bool ParseSimpleArchive(const u8* archiveHeader, int dataLen, SimpleArchive* archiveOut) {
-    if (dataLen < HEADER_START_SIZE) {
+    if (dataLen < kHeaderStartSize) {
         return false;
     }
 
     ByteReader br(archiveHeader, dataLen);
     u32 magic_id = br.UInt32LE();
-    if (magic_id != LZMA_MAGIC_ID) {
+    if (magic_id != kLzmaMagicId) {
         return false;
     }
 
     u32 filesCount = br.UInt32LE();
-    archiveOut->filesCount = (int)filesCount;
     if (filesCount > dimof(archiveOut->files)) {
         return false;
     }
+    archiveOut->filesCount = (int)filesCount;
 
     FileInfo* fi;
     for (u32 i = 0; i < filesCount; i++) {
-        if (br.Offset() + FILE_ENTRY_MIN_SIZE > dataLen) {
+        if (br.Offset() + kFileEntryMinSize > dataLen) {
             return false;
         }
 
         u32 fileHeaderSize = br.UInt32LE();
-        if (fileHeaderSize < FILE_ENTRY_MIN_SIZE || fileHeaderSize > 1024) {
+        if (fileHeaderSize < kFileEntryMinSize || fileHeaderSize > 1024) {
             return false;
         }
         int fileHdrSize = (int)fileHeaderSize;
@@ -185,9 +189,12 @@ bool ParseSimpleArchive(const u8* archiveHeader, int dataLen, SimpleArchive* arc
         fi->uncompressedCrc32 = br.UInt32LE();
         fi->ftModified.dwLowDateTime = br.UInt32LE();
         fi->ftModified.dwHighDateTime = br.UInt32LE();
-        fi->name = Str((char*)archiveHeader + br.Offset());
-        br.Skip(fileHdrSize - FILE_ENTRY_MIN_SIZE);
-        if (br.Char() != '\0') {
+        // the name fills the rest of the entry, then its NUL: no strlen on
+        // bytes that haven't been checked yet
+        int nameLen = fileHdrSize - kFileEntryMinSize;
+        fi->name = Str((char*)archiveHeader + br.Offset(), nameLen);
+        br.Skip(nameLen);
+        if (br.Char() != '\0' || memchr(fi->name.s, 0, (size_t)nameLen)) {
             return false;
         }
     }
@@ -240,6 +247,7 @@ u8* GetFileDataByIdx(SimpleArchive* archive, int idx, Arena* a) {
     size_t allocSize = (size_t)fi->uncompressedSize + 2;
     u8* uncompressed = (u8*)Alloc(a, allocSize);
     if (!uncompressed) {
+        logf("lzma::GetFileDataByIdx: '%s': failed to allocate %d bytes\n", fi->name, (int)allocSize);
         return nullptr;
     }
     uncompressed[fi->uncompressedSize] = 0;
@@ -247,69 +255,21 @@ u8* GetFileDataByIdx(SimpleArchive* archive, int idx, Arena* a) {
 
     bool ok = Decompress(fi->compressedData, fi->compressedSize, uncompressed, fi->uncompressedSize, a);
     if (!ok) {
+        logf("lzma::GetFileDataByIdx: '%s': decompression failed, method byte %d, compressed %d bytes\n", fi->name,
+             fi->compressedSize > 0 ? (int)fi->compressedData[0] : -1, (int)fi->compressedSize);
         Free(a, uncompressed);
         return nullptr;
     }
 
     u32 realCrc = lzma_crc32(0, (const u8*)uncompressed, fi->uncompressedSize);
     if (realCrc != fi->uncompressedCrc32) {
+        logf("lzma::GetFileDataByIdx: '%s': crc32 mismatch, got 0x%08x, expected 0x%08x\n", fi->name, realCrc,
+             fi->uncompressedCrc32);
         Free(a, uncompressed);
         return nullptr;
     }
 
     return uncompressed;
-}
-
-u8* GetFileDataByName(SimpleArchive* archive, Str fileName, Arena* a) {
-    int idx = GetIdxFromName(archive, fileName);
-    if (-1 != idx) {
-        return GetFileDataByIdx(archive, idx, a);
-    }
-    return nullptr;
-}
-
-static bool ExtractFileByIdx(SimpleArchive* archive, int idx, Str dstDir, Arena* a) {
-    FileInfo* fi = &archive->files[idx];
-
-    u8* uncompressed = GetFileDataByIdx(archive, idx, a);
-    if (!uncompressed) {
-        return false;
-    }
-
-    bool ok = false;
-    Str filePath = path::Join(a, dstDir, fi->name);
-    if (filePath) {
-        Str d = Str((char*)uncompressed, (int)fi->uncompressedSize);
-        ok = file::WriteFile(filePath, d);
-    }
-
-    Free(a, filePath.s);
-    Free(a, uncompressed);
-
-    return ok;
-}
-
-// files is an array of Str entries, last element must be empty
-bool ExtractFiles(Str archivePath, Str dstDir, Str* files, Arena* a) {
-    auto d = file::ReadFileWithArena(archivePath, a);
-    if (len(d) == 0) {
-        return false;
-    }
-
-    AutoCall freeData(Free, a, (void*)d.s);
-
-    SimpleArchive archive;
-    bool ok = ParseSimpleArchive((u8*)d.s, d.len, &archive);
-    if (!ok) {
-        return false;
-    }
-    for (; files->s; files++) {
-        int idx = GetIdxFromName(&archive, *files);
-        if (-1 != idx) {
-            ok &= ExtractFileByIdx(&archive, idx, dstDir, a);
-        }
-    }
-    return ok;
 }
 
 } // namespace lzma
