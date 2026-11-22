@@ -1197,6 +1197,12 @@ const fileState: Field[] = [
     "how often the document was opened, halved every week so that the Frequently Read " +
       "list reflects what's relevant now instead of what used to be opened a lot",
   ).doc("number of times this document has been opened recently"),
+  compactStruct("LastOpenedTime", fileTime, "last time this document was opened; zero means unknown").structName(
+    "FILETIME",
+  ),
+  compactStruct("LastClosedTime", fileTime, "last time this document was closed; zero means unknown").structName(
+    "FILETIME",
+  ),
   field(
     "DecryptionKey",
     Str,
@@ -1373,6 +1379,8 @@ const fileStateLayout = [
   "MeasurementUnit",
   "MeasurementScale",
   "OpenCount",
+  "LastOpenedTime",
+  "LastClosedTime",
   "PageNo",
   "PageCount",
   "Rotation",
@@ -1539,6 +1547,18 @@ const globalPrefs: Field[] = [
   )
     .enum(["thumbnails", "list"])
     .ver("3.7"),
+  field(
+    "HomePageSortBy",
+    Str,
+    "opened",
+    "home page recency order: opened or closed; HomePageSortByFrequentlyRead takes precedence",
+  ).enum(["opened", "closed"]),
+  field(
+    "HomePageListColumns",
+    Str,
+    "path,size,progress",
+    "optional home page list columns, separated by commas: path, size, opened, closed, modified, progress; name is always shown, and name alone hides all optional columns",
+  ),
   field(
     "ThumbnailsType",
     Str,
@@ -2473,6 +2493,8 @@ const globalPrefsLayout = [
   "DefaultZoom",
   "InverseSearchCmdLine",
   "HomePageViewMode",
+  "HomePageSortBy",
+  "HomePageListColumns",
   "ThumbnailsType",
   "FilePicker",
   "CustomColors",

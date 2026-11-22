@@ -134,6 +134,8 @@ void CollectHomePageFiles(Str searchQuery, Vec<FileState*>& fileStates, StrVec& 
     Vec<FileState*> allFileStates;
     if (gSettings->homePageSortByFrequentlyRead) {
         FileHistoryGetFrequencyOrder(allFileStates);
+    } else if (str::EqI(gSettings->homePageSortBy, StrL("closed"))) {
+        FileHistoryGetRecentlyClosedOrder(allFileStates);
     } else {
         FileHistoryGetRecentlyOpenedOrder(allFileStates);
     }
@@ -162,6 +164,8 @@ int CountHomePageFiles() {
     Vec<FileState*> all;
     if (gSettings && gSettings->homePageSortByFrequentlyRead) {
         FileHistoryGetFrequencyOrder(all);
+    } else if (gSettings && str::EqI(gSettings->homePageSortBy, StrL("closed"))) {
+        FileHistoryGetRecentlyClosedOrder(all);
     } else {
         FileHistoryGetRecentlyOpenedOrder(all);
     }
@@ -259,6 +263,7 @@ TempStr HomeThumbnailMetaTemp(FileState* fs, float* progressOut) {
 struct HomeFileSizeEntry {
     Str path;
     i64 size = kHomeFileSizePending;
+    FILETIME modified{};
     u64 lookedUpMs = 0;
     bool lookingUp = false;
 };
@@ -269,6 +274,7 @@ constexpr u64 kHomeFileSizeTtlMs = 60 * 1000;
 struct HomeFileSizeLookup {
     Str path;
     i64 size = -1;
+    FILETIME modified{};
 };
 
 static HomeFileSizeEntry* FindHomeFileSize(Str path) {
@@ -284,6 +290,7 @@ static void HomeFileSizeDone(HomeFileSizeLookup* res) {
     HomeFileSizeEntry* e = FindHomeFileSize(res->path);
     if (e) {
         e->size = res->size;
+        e->modified = res->modified;
         e->lookedUpMs = GetTickCount64();
         e->lookingUp = false;
     }
@@ -293,7 +300,7 @@ static void HomeFileSizeDone(HomeFileSizeLookup* res) {
 }
 
 static void HomeFileSizeThread(HomeFileSizeLookup* res) {
-    res->size = file::GetSize(res->path);
+    res->size = file::GetSize(res->path, &res->modified);
     uitask::Post(MkFunc0<HomeFileSizeLookup>(HomeFileSizeDone, res), "HomeFileSizeDone");
 }
 
@@ -313,9 +320,9 @@ static bool SizeLookupMayBlock(Str path) {
 
 // size of a file the Home page lists: -1 if unknown, kHomeFileSizePending while
 // being looked up
-i64 GetHomeFileSize(Str path) {
+i64 GetHomeFileSize(Str path, FILETIME* modifiedOut) {
     if (!SizeLookupMayBlock(path)) {
-        return file::GetSize(path);
+        return file::GetSize(path, modifiedOut);
     }
     HomeFileSizeEntry* e = FindHomeFileSize(path);
     if (!e) {
@@ -328,6 +335,9 @@ i64 GetHomeFileSize(Str path) {
         e->lookingUp = true;
         auto* res = new HomeFileSizeLookup{str::Dup(path), -1};
         RunAsync(MkFunc0<HomeFileSizeLookup>(HomeFileSizeThread, res), StrL("HomeFileSize"));
+    }
+    if (modifiedOut) {
+        *modifiedOut = e->modified;
     }
     return e->size;
 }

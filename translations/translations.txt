@@ -1,5 +1,5 @@
 AppTranslator: SumatraPDF
-9d7d5cede0146e32e6d97a695863d60ab447f16f
+f5fa45878b67b1e6e9674ad133630a03a07a8dee
 :# File History
 af:# Lêergeskiedenis
 am:# Ֆայլի պատմություն
@@ -68794,3 +68794,33 @@ vn:↑ ↓ để điều hướng
 :View As Hex
 :Custom AI chat...
 :Browse Files In Folder...
+:Recently Closed
+tw:最近關閉
+cn:最近关闭
+:Name
+tw:名稱
+cn:名称
+:Path
+tw:路徑
+cn:路径
+:Size
+tw:大小
+cn:大小
+:Last opened
+tw:最近開啟時間
+cn:最近打开时间
+:Last closed
+tw:最近關閉時間
+cn:最近关闭时间
+:Date modified
+tw:修改時間
+cn:修改时间
+:Reading progress
+tw:閱讀進度
+cn:阅读进度
+:Sort by
+tw:排序方式
+cn:排序方式
+:Choose columns
+tw:選擇顯示欄位
+cn:选择显示列

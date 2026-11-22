@@ -371,6 +371,7 @@ import { testit as annotCutPaste } from "./annot-cut-paste.ts";
 import { testit as ctxMenuReload } from "./ctx-menu-reload.ts";
 import { testit as ctxMenuPick } from "./ctx-menu-pick.ts";
 import { testit as homeTwoWindows } from "./home-two-windows.ts";
+import { testit as homeHistory } from "./home-history.ts";
 import { testit as annotUndoRedo } from "./annot-undo-redo.ts";
 import { testit as annotUndoOneStep } from "./annot-undo-one-step.ts";
 import { testit as textAnnotationPlacement } from "./text-annotation-placement.ts";
@@ -673,6 +674,7 @@ export const tests: NamedTest[] = [
   ["ctx-menu-reload", ctxMenuReload],
   ["ctx-menu-pick", ctxMenuPick],
   ["home-two-windows", homeTwoWindows],
+  ["home-history", homeHistory],
   ["issue-5870", issue5870],
   ["issue-6199", issue6199],
   ["issue-6216", issue6216],

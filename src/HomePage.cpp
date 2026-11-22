@@ -807,6 +807,76 @@ constexpr int kThumbsBorderDx = 1;
 #define kHomeListRowDy DpiScale(46)
 #define kHomeListRowGapDx DpiScale(8)
 
+enum HomeListColumn {
+    HomeName,
+    HomePath,
+    HomeSize,
+    HomeOpened,
+    HomeClosed,
+    HomeModified,
+    HomeProgress,
+    HomeColumnCount
+};
+
+static const Str kHomeColumnNames[] = {StrL("name"),   StrL("path"),     StrL("size"),    StrL("opened"),
+                                       StrL("closed"), StrL("modified"), StrL("progress")};
+
+static Str HomeColumnLabel(int column) {
+    switch (column) {
+        case HomeName:
+            return Tr("Name");
+        case HomePath:
+            return Tr("Path");
+        case HomeSize:
+            return Tr("Size");
+        case HomeOpened:
+            return Tr("Last opened");
+        case HomeClosed:
+            return Tr("Last closed");
+        case HomeModified:
+            return Tr("Date modified");
+        case HomeProgress:
+            return Tr("Reading progress");
+    }
+    return {};
+}
+
+static uint HomeColumnMask() {
+    uint mask = 1 << HomeName;
+    StrVec columns;
+    Split(&columns, gSettings->homePageListColumns, StrL(","), true);
+    for (Str column : columns) {
+        str::TrimWsBoth(column);
+        for (int i = HomePath; i < HomeColumnCount; i++) {
+            if (str::EqI(column, kHomeColumnNames[i])) {
+                mask |= 1 << i;
+            }
+        }
+    }
+    if (!gSettings->showHomePageReadingProgress) {
+        mask &= ~(1 << HomeProgress);
+    }
+    return mask;
+}
+
+static int HomeSortOrder() {
+    if (gSettings->homePageSortByFrequentlyRead) {
+        return 2;
+    }
+    return str::EqI(gSettings->homePageSortBy, StrL("closed")) ? 1 : 0;
+}
+
+static Str HomeSortLabel() {
+    switch (HomeSortOrder()) {
+        case 1:
+            return Tr("Recently Closed");
+        case 2:
+            return Tr("Frequently Read");
+        default:
+            return Tr("Recently Opened");
+    }
+}
+
 // ThumbnailLayout::fileSize cache: AppendBlanks zero-fills, so set
 // kSizeNotFetched after each AppendBlanks (default member init never runs).
 constexpr i64 kSizeNotFetched = -2;
@@ -823,16 +893,16 @@ struct ThumbnailLayout {
     Rect rcListPath;
     Rect rcListSize;
     Rect rcListProgress;
+    Rect rcListOpened;
+    Rect rcListClosed;
+    Rect rcListModified;
     Rect rcListRemove;
     Rect rcListPin;
     FileState* fs = nullptr; // info needed to draw the thumbnail
     // Cached file::GetSize() so we don't hit the disk on every paint.
     // AppendBlanks zero-fills, so set to kSizeNotFetched after AppendBlanks.
     i64 fileSize = kSizeNotFetched;
-    // false until MeasureHomeListRowText() has split rcListFileName into name +
-    // directory. Also relies on AppendBlanks zero-fill, so false must mean "not
-    // measured yet"
-    bool listTextMeasured = false;
+    FILETIME modifiedTime{};
 };
 
 static TempStr FileSizeForHomeListTemp(i64 size);
@@ -842,7 +912,7 @@ static i64 HomeFileSize(ThumbnailLayout& t) {
     if (t.fileSize != kSizeNotFetched) {
         return t.fileSize;
     }
-    i64 size = GetHomeFileSize(t.fs->filePath);
+    i64 size = GetHomeFileSize(t.fs->filePath, &t.modifiedTime);
     // not cached in t while pending, so the repaint after the lookup sees it
     if (size == kHomeFileSizePending) {
         return kSizeFetchFail;
@@ -884,6 +954,8 @@ struct HomePageLayout {
     Rect rcIconListView;
     Rect rcIconThumbnailView;
     Rect rcLogo;
+    Rect rcListHeader;
+    Rect listColumns[HomeColumnCount]{};
 
     VirtText* freqRead = nullptr;
     VirtText* openDoc = nullptr;
@@ -1061,7 +1133,6 @@ constexpr int kThumbsMiddleMargin = 32;
 // draw a gray separator line between list-view rows
 static bool gShowListSeparatorLine = false;
 constexpr int kSearchEditDy = 28;
-constexpr int kSearchThumbnailsGapY = 28;
 constexpr int kHomeHeaderTopY = 24;
 constexpr int kHomeSearchMaxDx = 340;
 
@@ -1242,7 +1313,8 @@ struct HomePageLayoutCache {
     int scrollY = 0;
     int nFiles = 0;
     bool listView = false;
-    bool sortByFreq = false;
+    int sortOrder = 0;
+    uint columnMask = 0;
     bool showTips = false;
     bool isRtl = false;
     int tipIdx = -1;
@@ -1255,6 +1327,8 @@ struct HomePageLayoutCache {
     Rect rcIconListView;
     Rect rcIconThumbnailView;
     Rect rcLogo;
+    Rect rcListHeader;
+    Rect listColumns[HomeColumnCount]{};
     Rect rcTip;
     Rect rcFreqRead;
     Rect rcOpenDoc;
@@ -1326,6 +1400,10 @@ static void OffsetThumbnailLayouts(Vec<ThumbnailLayout>& thumbs, int dy) {
         t.rcListFileName.y += dy;
         t.rcListPath.y += dy;
         t.rcListSize.y += dy;
+        t.rcListProgress.y += dy;
+        t.rcListOpened.y += dy;
+        t.rcListClosed.y += dy;
+        t.rcListModified.y += dy;
         t.rcListRemove.y += dy;
         t.rcListPin.y += dy;
     }
@@ -1353,7 +1431,7 @@ static bool HomeLayoutCacheMatches(MainWindow* win, const Rect& rc, Str filterTe
     if (c.listView != HomePageIsListView()) {
         return false;
     }
-    if (c.sortByFreq != (gSettings && gSettings->homePageSortByFrequentlyRead)) {
+    if (c.sortOrder != HomeSortOrder() || c.columnMask != HomeColumnMask()) {
         return false;
     }
     if (c.showTips != (gSettings && gSettings->showTips)) {
@@ -1395,7 +1473,8 @@ static void SaveHomeLayoutCache(const HomePageLayout& l, Str filterText, int scr
     c.scrollY = scrollY;
     c.nFiles = len(l.thumbnails);
     c.listView = HomePageIsListView();
-    c.sortByFreq = gSettings && gSettings->homePageSortByFrequentlyRead;
+    c.sortOrder = HomeSortOrder();
+    c.columnMask = HomeColumnMask();
     c.showTips = gSettings && gSettings->showTips;
     c.isRtl = IsUIRtl();
     c.tipIdx = gSelectedTipIdx;
@@ -1407,6 +1486,10 @@ static void SaveHomeLayoutCache(const HomePageLayout& l, Str filterText, int scr
     c.rcIconListView = l.rcIconListView;
     c.rcIconThumbnailView = l.rcIconThumbnailView;
     c.rcLogo = l.rcLogo;
+    c.rcListHeader = l.rcListHeader;
+    for (int i = 0; i < HomeColumnCount; i++) {
+        c.listColumns[i] = l.listColumns[i];
+    }
     c.rcTip = l.rcTip;
     c.rcFreqRead = l.freqRead ? l.freqRead->lastBounds : Rect{};
     c.rcOpenDoc = l.openDoc ? l.openDoc->lastBounds : Rect{};
@@ -1446,6 +1529,10 @@ static void ApplyHomeLayoutCache(HomePageLayout& l, int scrollY) {
     l.rcIconListView = c.rcIconListView;
     l.rcIconThumbnailView = c.rcIconThumbnailView;
     l.rcLogo = c.rcLogo;
+    l.rcListHeader = c.rcListHeader;
+    for (int i = 0; i < HomeColumnCount; i++) {
+        l.listColumns[i] = c.listColumns[i];
+    }
     l.rcTip = c.rcTip;
     l.totalContentDy = c.totalContentDy;
     l.thumbsVisibleDy = c.thumbsVisibleDy;
@@ -1455,13 +1542,10 @@ static void ApplyHomeLayoutCache(HomePageLayout& l, int scrollY) {
     l.filterWords = c.filterWords;
     l.highlighted = c.highlighted;
 
-    PlatformFont* hdrFont = HomePageFont(24);
+    PlatformFont* hdrFont = HomePageFont(13);
     PlatformFont* fontText = HomePageFont(14);
 
-    Str txt = Tr("Recently Opened");
-    if (gSettings->homePageSortByFrequentlyRead) {
-        txt = Tr("Frequently Read");
-    }
+    Str txt = fmt("%s \xE2\x96\xBE", HomeSortLabel());
     HomeChromeCtrl* chrome = EnsureHomeChrome(win);
     VirtText* hdr = chrome->hdr;
     hdr->SetText(txt);
@@ -1485,6 +1569,8 @@ static void LayoutHomePage(HomePageLayout& l) {
     Vec<FileState*> allFileStates;
     if (gSettings->homePageSortByFrequentlyRead) {
         FileHistoryGetFrequencyOrder(allFileStates);
+    } else if (HomeSortOrder() == 1) {
+        FileHistoryGetRecentlyClosedOrder(allFileStates);
     } else {
         FileHistoryGetRecentlyOpenedOrder(allFileStates);
     }
@@ -1540,13 +1626,13 @@ static void LayoutHomePage(HomePageLayout& l) {
     rcIconView.dx = rcIconView.dy = HomePageIconSize();
 
     HomeChromeCtrl* chrome = EnsureHomeChrome(win);
-    // the section title is no longer shown; empty bounds keep it unpainted
     VirtText* hdr = chrome->hdr;
-    hdr->SetBounds({});
+    hdr->SetText(fmt("%s \xE2\x96\xBE", HomeSortLabel()));
+    hdr->font = fontText;
+    hdr->isRtl = isRtl;
     l.freqRead = hdr;
 
     int searchEditDy = DpiScale(kSearchEditDy);
-    int searchThumbsGap = DpiScale(kSearchThumbnailsGapY);
     int borderDy = searchEditDy + 2; // 1px border on each side
 
     chrome->logo->font = HomeBrandFont();
@@ -1616,7 +1702,19 @@ static void LayoutHomePage(HomePageLayout& l) {
     openDoc->SetBounds(rcOpenDoc);
     l.openDoc = openDoc;
 
-    int headerBottomY = hdrY + rowDy + searchThumbsGap;
+    int sortY = hdrY + rowDy + DpiScale(12);
+    Size sortSize = hdr->GetIdealSize();
+    int sortDx = std::min(sortSize.dx, hdrRow.rowDx);
+    int sortX = isRtl ? rc.dx - hdrRow.rowX - sortDx : hdrRow.rowX;
+    hdr->SetBounds({sortX, sortY, sortDx, sortSize.dy});
+    int headerBottomY = sortY + sortSize.dy + DpiScale(10);
+    bool showList = HomePageIsListView();
+    int listX = DpiScale(kInnerPadding);
+    int listDx = std::max(0, rc.dx - 2 * listX);
+    if (showList) {
+        l.rcListHeader = {listX, headerBottomY, listDx, DpiScale(28)};
+        headerBottomY += l.rcListHeader.dy;
+    }
 
     // --- Step 2: calculate tip area at the bottom (before thumbnails) ---
     int tipHeight = 0;
@@ -1630,7 +1728,7 @@ static void LayoutHomePage(HomePageLayout& l) {
     }
 
     // --- Step 3: middle area for thumbnails/list ---
-    // content starts directly after headerBottomY (which includes kSearchThumbnailsGapY)
+    // Keep the list header fixed while the file rows scroll below it.
     int thumbsTopY = headerBottomY;
     int thumbsBottomY = rc.dy - tipHeight - kThumbsMiddleMargin;
     int thumbsVisibleDy = std::max(0, thumbsBottomY - thumbsTopY);
@@ -1638,7 +1736,6 @@ static void LayoutHomePage(HomePageLayout& l) {
     l.rcThumbsArea = {0, thumbsTopY, rc.dx, thumbsVisibleDy};
 
     int nFiles = len(fileStates);
-    bool showList = HomePageIsListView();
     // Leave room above the first row so RoundRect / selection outline top edges
     // aren't clipped by rcThumbsArea (they extend a few px upward).
     int thumbsContentPadTop = showList ? DpiScale(2) : DpiScale(5);
@@ -1671,25 +1768,38 @@ static void LayoutHomePage(HomePageLayout& l) {
     Point ptOff(thumbsStartX, thumbsTopY + thumbsContentPadTop - scrollY);
 
     if (showList) {
-        int listX = thumbsStartX;
-        if (isRtl) {
-            listX = rc.dx - thumbsStartX - thumbsContentWidth;
-        }
         int listIconDx = l.rcIconListView.dx;
         int listIconGap = DpiScale(6);
-        // fixed size column — never call file::GetSize during layout (disk/network I/O)
-        int listSizeDx = DpiScale(56);
-        bool showProgress = gSettings && gSettings->showHomePageReadingProgress;
-        int listProgressDx = showProgress ? DpiScale(56) : 0;
-        int listProgressGap = listProgressDx > 0 ? listIconGap : 0;
-        // one-row margin so a quick scroll still has measured name/path splits ready
+        int textX = listX + kHomeListThumbDx + kHomeListRowGapDx;
+        int textDx = std::max(0, listDx - (textX - listX) - 2 * listIconDx - 2 * listIconGap);
+        uint columns = HomeColumnMask();
+        const int weights[] = {220, 220, 80, 145, 145, 145, 100};
+        int totalWeight = 0;
+        for (int i = 0; i < HomeColumnCount; i++) {
+            if (columns & (1 << i)) {
+                totalWeight += weights[i];
+            }
+        }
+        int usedWeight = 0;
+        for (int i = 0; i < HomeColumnCount; i++) {
+            if (!(columns & (1 << i))) {
+                continue;
+            }
+            int x = textX + textDx * usedWeight / totalWeight;
+            usedWeight += weights[i];
+            int dx = textX + textDx * usedWeight / totalWeight - x;
+            if (isRtl) {
+                x = rc.dx - x - dx;
+            }
+            l.listColumns[i] = {x, l.rcListHeader.y, dx, l.rcListHeader.dy};
+        }
         int listPrefetchY = kHomeListRowDy;
         for (int row = 0; row < nFiles; row++) {
             ThumbnailLayout& thumb = *VecAppendBlanks(l.thumbnails, 1);
             thumb.fileSize = kSizeNotFetched;
             FileState* fs = fileStates[row];
             thumb.fs = fs;
-            Rect rcRow(listX, ptOff.y + (row * kHomeListRowDy), thumbsContentWidth, kHomeListRowDy);
+            Rect rcRow(listX, ptOff.y + (row * kHomeListRowDy), listDx, kHomeListRowDy);
             thumb.rcListRow = rcRow;
             bool onScreen = IsHomeThumbOnScreen(rcRow, l.rcThumbsArea, listPrefetchY);
 
@@ -1697,31 +1807,33 @@ static void LayoutHomePage(HomePageLayout& l) {
             Rect rcPin(rcRow.x + rcRow.dx - listIconDx, rcRow.y + ((rcRow.dy - listIconDx) / 2), listIconDx,
                        listIconDx);
             Rect rcRemove(rcPin.x - listIconGap - listIconDx, rcPin.y, listIconDx, listIconDx);
-            Rect rcSize(rcRemove.x - listIconGap - listSizeDx, rcRow.y, listSizeDx, rcRow.dy);
-            Rect rcProgress(rcSize.x - listProgressGap - listProgressDx, rcRow.y, listProgressDx, rcRow.dy);
-            Rect rcFileName(rcThumb.x + rcThumb.dx + kHomeListRowGapDx, rcRow.y,
-                            rcProgress.x - (rcThumb.x + rcThumb.dx + kHomeListRowGapDx) - kHomeListRowGapDx, rcRow.dy);
             if (isRtl) {
                 rcThumb.x = rcRow.x + rcRow.dx - rcThumb.dx;
                 rcPin.x = rcRow.x;
                 rcRemove.x = rcPin.x + listIconDx + listIconGap;
-                rcSize.x = rcRemove.x + listIconDx + listIconGap;
-                rcProgress.x = rcSize.x + rcSize.dx + listProgressGap;
-                rcFileName.x = rcProgress.x + rcProgress.dx + kHomeListRowGapDx;
-                rcFileName.dx = rcThumb.x - rcFileName.x - kHomeListRowGapDx;
             }
-            rcFileName.dx = std::max(rcFileName.dx, 0);
-            // rcFileName is the whole name+path span; MeasureHomeListRowText()
-            // splits it when the row is first painted. Doing it here would
-            // measure text for every history entry on every layout, and doing it
-            // only for rows that happen to be on screen *now* left rows scrolled
-            // in later without their directory (#5870 follow-up).
             thumb.rcListThumb = rcThumb;
             thumb.rcListPin = rcPin;
             thumb.rcListRemove = rcRemove;
-            thumb.rcListSize = rcSize;
-            thumb.rcListProgress = rcProgress;
-            thumb.rcListFileName = rcFileName;
+            auto cell = [&](int column) -> Rect {
+                Rect r = l.listColumns[column];
+                if (r.IsEmpty()) {
+                    return {};
+                }
+                r.y = rcRow.y;
+                r.dy = rcRow.dy;
+                int pad = std::min(DpiScale(4), r.dx / 2);
+                r.x += pad;
+                r.dx -= 2 * pad;
+                return r;
+            };
+            thumb.rcListFileName = cell(HomeName);
+            thumb.rcListPath = cell(HomePath);
+            thumb.rcListSize = cell(HomeSize);
+            thumb.rcListOpened = cell(HomeOpened);
+            thumb.rcListClosed = cell(HomeClosed);
+            thumb.rcListModified = cell(HomeModified);
+            thumb.rcListProgress = cell(HomeProgress);
             // already-cached in-memory thumb size only (no LoadThumbnail / disk)
             if (onScreen && fs->thumbnail) {
                 thumb.szThumb = Size(fs->thumbnail->width, fs->thumbnail->height);
@@ -1838,34 +1950,62 @@ static void DrawHomeSelectionOutline(Gfx* gfx, const Rect& r, int radius) {
     DrawHomeRoundedOutline(gfx, r, radius, col, penDx);
 }
 
-// Give the file name the width it needs and put the directory path in what's
-// left, right-aligned (mirrored for RTL). Done on first paint of a row, not
-// during layout: measuring every history entry made layout (and so scrolling)
-// slow, and measuring only the rows visible at layout time meant rows scrolled
-// into view later never got a directory.
-static void MeasureHomeListRowText(Gfx* gfx, ThumbnailLayout& thumb, PlatformFont* font, bool isRtl) {
-    if (thumb.listTextMeasured) {
-        return;
+static TempStr HomeTimeTextTemp(const FILETIME& time) {
+    if (time.dwHighDateTime == 0 && time.dwLowDateTime == 0) {
+        return StrL("");
     }
-    thumb.listTextMeasured = true;
+    SYSTEMTIME utc{};
+    SYSTEMTIME st{};
+    if (!FileTimeToSystemTime(&time, &utc) || !SystemTimeToTzSpecificLocalTime(nullptr, &utc, &st)) {
+        return StrL("");
+    }
+    WCHAR date[128]{};
+    WCHAR clock[128]{};
+    if (!GetDateFormatW(LOCALE_USER_DEFAULT, DATE_SHORTDATE, &st, nullptr, date, dimof(date)) ||
+        !GetTimeFormatW(LOCALE_USER_DEFAULT, TIME_NOSECONDS, &st, nullptr, clock, dimof(clock))) {
+        return StrL("");
+    }
+    return fmt("%s %s", ToUtf8Temp(date), ToUtf8Temp(clock));
+}
 
-    Rect rcFileName = thumb.rcListFileName;
-    TempStr fileName = path::GetBaseNameTemp(thumb.fs->filePath);
-    int nameDx = gfx->MeasureText(fileName, font).dx + DpiScale(4);
-    int minPathDx = DpiScale(80);
-    if (nameDx + kHomeListRowGapDx + minPathDx > rcFileName.dx) {
-        // no room for a path, the name gets the whole span
-        return;
+static Rect HomeCellRect(const ThumbnailLayout& t, int column) {
+    switch (column) {
+        case HomeName:
+            return t.rcListFileName;
+        case HomePath:
+            return t.rcListPath;
+        case HomeSize:
+            return t.rcListSize;
+        case HomeOpened:
+            return t.rcListOpened;
+        case HomeClosed:
+            return t.rcListClosed;
+        case HomeModified:
+            return t.rcListModified;
+        case HomeProgress:
+            return t.rcListProgress;
     }
-    int pathDx = rcFileName.dx - nameDx - kHomeListRowGapDx;
-    if (isRtl) {
-        thumb.rcListPath = Rect(rcFileName.x, rcFileName.y, pathDx, rcFileName.dy);
-        rcFileName.x = rcFileName.x + rcFileName.dx - nameDx;
-    } else {
-        thumb.rcListPath = Rect(rcFileName.x + nameDx + kHomeListRowGapDx, rcFileName.y, pathDx, rcFileName.dy);
+    return {};
+}
+
+static TempStr HomeCellTextTemp(const ThumbnailLayout& t, int column) {
+    switch (column) {
+        case HomeName:
+            return path::GetBaseNameTemp(t.fs->filePath);
+        case HomePath:
+            return path::GetDirTemp(t.fs->filePath);
+        case HomeSize:
+            return FileSizeForHomeListTemp(t.fileSize);
+        case HomeOpened:
+            return HomeTimeTextTemp(t.fs->lastOpenedTime);
+        case HomeClosed:
+            return HomeTimeTextTemp(t.fs->lastClosedTime);
+        case HomeModified:
+            return HomeTimeTextTemp(t.modifiedTime);
+        case HomeProgress:
+            return FormatFileStateProgressTemp(t.fs);
     }
-    rcFileName.dx = nameDx;
-    thumb.rcListFileName = rcFileName;
+    return StrL("");
 }
 
 // True when keyboard focus is in the home search box (hide list selection then).
@@ -1877,7 +2017,6 @@ static void DrawHomeListRow(Gfx* gfx, ThumbnailLayout& thumb, const StrVec& filt
                             PlatformFont* fontText, Color backgroundColor, bool isRtl, bool isSelected) {
     FileState* fs = thumb.fs;
     Rect row = thumb.rcListRow;
-    MeasureHomeListRowText(gfx, thumb, fontText, isRtl);
     if (isSelected) {
         DrawHomeSelectionOutline(gfx, HomeSelectionOutlineRect(thumb), 4);
     }
@@ -1902,30 +2041,26 @@ static void DrawHomeListRow(Gfx* gfx, ThumbnailLayout& thumb, const StrVec& filt
     DrawMaybeHighlightedText(gfx, thumb.rcListFileName, fileName, filterWords, highlighted, backgroundColor, isRtl,
                              false, nameFmt, fontText, ThemeWindowTextColor());
 
-    // directory path, right-aligned and muted, in the space the file name doesn't need.
-    // Must use DrawTextW: dirPath is UTF-8; DrawTextA treated it as the system ANSI
-    // code page and mangled non-ASCII path characters (#5824).
+    // Fetch both filesystem fields together, only for rows that need them.
+    if (!thumb.rcListSize.IsEmpty() || !thumb.rcListModified.IsEmpty()) {
+        HomeFileSize(thumb);
+    }
     if (!thumb.rcListPath.IsEmpty()) {
         TempStr dirPath = path::GetDirTemp(path);
-        u32 pathFmt = gfxTextVCenter | gfxTextPathEllipsis | (isRtl ? gfxTextLeft : gfxTextRight);
+        u32 pathFmt = gfxTextVCenter | gfxTextPathEllipsis | (isRtl ? gfxTextRight : gfxTextLeft);
         Rect pathRect = thumb.rcListPath;
         gfx->DrawText(dirPath, pathRect, pathFmt, fontText, ThemeWindowDarkerTextColor());
     }
 
-    // file::GetSize once per row, then cache on ThumbnailLayout (scroll reuses
-    // it). kSizeNotFetched = not tried; kSizeFetchFail = GetSize failed; >= 0
-    // is a real size (including empty files).
-    TempStr fileSize = FileSizeForHomeListTemp(HomeFileSize(thumb));
-    u32 sizeFmt = gfxTextVCenter | gfxTextEllipsis | (isRtl ? gfxTextLeft : gfxTextRight);
-    Rect sizeRect = thumb.rcListSize;
-    gfx->DrawText(fileSize, sizeRect, sizeFmt, fontText, ThemeWindowTextColor());
-
-    if (!thumb.rcListProgress.IsEmpty()) {
-        TempStr progress = FormatFileStateProgressTemp(fs);
-        if (len(progress) > 0) {
-            u32 progFmt = gfxTextVCenter | gfxTextEllipsis | (isRtl ? gfxTextLeft : gfxTextRight);
-            gfx->DrawText(progress, thumb.rcListProgress, progFmt, fontText, ThemeWindowTextColor());
+    for (int column = HomeSize; column < HomeColumnCount; column++) {
+        Rect r = HomeCellRect(thumb, column);
+        if (r.IsEmpty()) {
+            continue;
         }
+        TempStr text = HomeCellTextTemp(thumb, column);
+        bool right = column == HomeSize || column == HomeProgress;
+        u32 align = (right != isRtl) ? gfxTextRight : gfxTextLeft;
+        gfx->DrawText(text, r, gfxTextVCenter | gfxTextEllipsis | align, fontText, ThemeWindowTextColor());
     }
 
     if (fs->isPinned) {
@@ -2140,6 +2275,25 @@ TempStr HomeListRowsResultTemp(int* exitCodeOut) {
         out.Append(fmt("row=%d size='%s' sizeRect=%d,%d,%d,%d progress='%s' path=%s\n", i,
                        FileSizeForHomeListTemp(t.fileSize), r.x, r.y, r.dx, r.dy, progress, path));
     }
+    Rect sort = c.rcFreqRead;
+    Rect header = c.rcListHeader;
+    Str order = c.sortOrder == 2 ? StrL("frequent") : c.sortOrder == 1 ? StrL("closed") : StrL("opened");
+    out.Append(fmt("home sort=%s columns=%s sortRect=%d,%d,%d,%d headerRect=%d,%d,%d,%d\n", order,
+                   gSettings->homePageListColumns, sort.x, sort.y, sort.dx, sort.dy, header.x, header.y, header.dx,
+                   header.dy));
+    for (int column = 0; column < HomeColumnCount; column++) {
+        Rect r = c.listColumns[column];
+        if (r.IsEmpty()) {
+            continue;
+        }
+        out.Append(fmt("column name=%s rect=%d,%d,%d,%d\n", kHomeColumnNames[column], r.x, r.y, r.dx, r.dy));
+        for (int row = 0; row < len(c.thumbs); row++) {
+            ThumbnailLayout& t = c.thumbs[row];
+            Rect cell = HomeCellRect(t, column);
+            out.Append(fmt("cell row=%d column=%s rect=%d,%d,%d,%d text=%s\n", row, kHomeColumnNames[column], cell.x,
+                           cell.y, cell.dx, cell.dy, HomeCellTextTemp(t, column)));
+        }
+    }
     return finish(0);
 }
 
@@ -2314,6 +2468,119 @@ static void HomeViewModeClicked(MainWindow* win, VirtMouseEvent* ev) {
     ScheduleSaveSettings();
     HomePageRelayout(win);
     win->RedrawAll(true);
+}
+
+static void HomeOptionsChanged() {
+    for (MainWindow* win : gWindows) {
+        win->homePageScrollY = 0;
+        win->homePageSelIdx = 0;
+    }
+    HomePageInvalidateLayoutCache();
+    ScheduleSaveSettings();
+    MaybeRedrawHomePage();
+}
+
+static void SetHomeSortOrder(int order) {
+    gSettings->homePageSortByFrequentlyRead = order == 2;
+    if (order != 2) {
+        str::ReplaceWithCopy(&gSettings->homePageSortBy, order == 1 ? StrL("closed") : StrL("opened"));
+    }
+    HomeOptionsChanged();
+}
+
+static void HomeSortClicked(MainWindow* win, VirtMouseEvent* ev) {
+    HMENU menu = CreatePopupMenu();
+    AppendMenuW(menu, MF_STRING, 1, ToWStrTemp(Tr("Recently Opened")).s);
+    AppendMenuW(menu, MF_STRING, 2, ToWStrTemp(Tr("Recently Closed")).s);
+    AppendMenuW(menu, MF_STRING, 3, ToWStrTemp(Tr("Frequently Read")).s);
+    CheckMenuRadioItem(menu, 1, 3, HomeSortOrder() + 1, MF_BYCOMMAND);
+    Rect r = ev->target->BoundsInWindow();
+    Point pt = HwndMapWindowPoint(win->hwndCanvas, HWND_DESKTOP, {r.x, r.Bottom()});
+    int cmd = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON, pt.x, pt.y, 0, win->hwndFrame, nullptr);
+    DestroyMenu(menu);
+    if (cmd >= 1 && cmd <= 3 && IsMainWindowValidAndNotClosing(win)) {
+        SetHomeSortOrder(cmd - 1);
+    }
+}
+
+static void HomeColumnMenu(MainWindow* win, Point pt) {
+    uint columns = HomeColumnMask();
+    HMENU menu = CreatePopupMenu();
+    for (int column = 0; column < HomeColumnCount; column++) {
+        uint flags = MF_STRING;
+        if (columns & (1 << column)) {
+            flags |= MF_CHECKED;
+        }
+        if (column == HomeName) {
+            flags |= MF_GRAYED;
+        }
+        AppendMenuW(menu, flags, column + 1, ToWStrTemp(HomeColumnLabel(column)).s);
+    }
+    Point screen = HwndMapWindowPoint(win->hwndCanvas, HWND_DESKTOP, pt);
+    int cmd = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON, screen.x, screen.y, 0, win->hwndFrame, nullptr);
+    DestroyMenu(menu);
+    if (cmd <= 1 || cmd > HomeColumnCount || !IsMainWindowValidAndNotClosing(win)) {
+        return;
+    }
+    int column = cmd - 1;
+    columns ^= 1 << column;
+    if (column == HomeProgress && (columns & (1 << HomeProgress))) {
+        gSettings->showHomePageReadingProgress = true;
+    }
+    str::Builder setting;
+    for (int i = HomePath; i < HomeColumnCount; i++) {
+        if (columns & (1 << i)) {
+            if (len(setting) > 0) {
+                setting.Append(StrL(","));
+            }
+            setting.Append(kHomeColumnNames[i]);
+        }
+    }
+    if (len(setting) == 0) {
+        // Empty string settings are omitted on save, which would restore the defaults.
+        setting.Append(kHomeColumnNames[HomeName]);
+    }
+    str::ReplaceWithCopy(&gSettings->homePageListColumns, ToStrTemp(setting));
+    HomeOptionsChanged();
+}
+
+static bool HomeHeaderMessage(MainWindow* win, UINT msg, LPARAM lp, LRESULT& res) {
+    auto& c = HomeLayout(win);
+    if (!c.valid || !c.listView) {
+        return false;
+    }
+    Point pt{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
+    if (msg == WM_CONTEXTMENU) {
+        if (pt.x == -1 || pt.y == -1) {
+            return false;
+        }
+        pt = HwndScreenToClient(win->hwndCanvas, pt);
+    } else if (msg == WM_SETCURSOR) {
+        if (GetForegroundWindow() != win->hwndFrame) {
+            return false;
+        }
+        pt = HwndGetCursorPos(win->hwndCanvas);
+    }
+    if (!c.rcListHeader.Contains(pt)) {
+        return false;
+    }
+    if (msg == WM_RBUTTONUP || msg == WM_CONTEXTMENU) {
+        HomeColumnMenu(win, pt);
+    } else if (msg == WM_LBUTTONUP) {
+        if (c.listColumns[HomeOpened].Contains(pt)) {
+            SetHomeSortOrder(0);
+        } else if (c.listColumns[HomeClosed].Contains(pt)) {
+            SetHomeSortOrder(1);
+        }
+    } else if (msg == WM_SETCURSOR) {
+        bool sort = c.listColumns[HomeOpened].Contains(pt) || c.listColumns[HomeClosed].Contains(pt);
+        SetCursorCached(sort ? IDC_HAND : IDC_ARROW);
+        win->ShowToolTip(Tr("Choose columns"), c.rcListHeader);
+    } else if (msg != WM_RBUTTONDOWN && msg != WM_LBUTTONDOWN) {
+        return false;
+    }
+    res = msg == WM_SETCURSOR ? TRUE : 0;
+    return true;
 }
 
 static void HomeOpenDocClicked(MainWindow* win, VirtMouseEvent*) {
@@ -2694,6 +2961,10 @@ static HomeChromeCtrl* EnsureHomeChrome(MainWindow* win) {
     chrome->AddChild(chrome->listView);
 
     chrome->hdr = new VirtText(StrL(""));
+    chrome->hdr->SetFlag(vwfNoHitTest, false);
+    chrome->hdr->cursor = CursorId::Hand;
+    chrome->hdr->onClick = MkFunc1(HomeSortClicked, win);
+    chrome->hdr->SetTooltip(Tr("Sort by"));
     chrome->AddChild(chrome->hdr);
 
     // the brand at the top left. It is hit-testable so hovering it can open
@@ -2731,6 +3002,13 @@ void HomePageDestroyChrome(MainWindow* win) {
 bool HomePageOnCanvasMessage(MainWindow* win, UINT msg, WPARAM wp, LPARAM lp, LRESULT& res) {
     VirtRoot* root = win->homeRoot;
     if (!root || !root->owned) {
+        return false;
+    }
+    if (HomeHeaderMessage(win, msg, lp, res)) {
+        return true;
+    }
+    if (msg == WM_RBUTTONDOWN || msg == WM_RBUTTONUP || msg == WM_CONTEXTMENU) {
+        // File-row context menus still belong to CanvasAboutUI.
         return false;
     }
     // Hover feedback (highlight, ✕ button, tooltips) must stay quiet while
@@ -2882,6 +3160,34 @@ static void HomePageSyncChrome(HomePageLayout& l) {
     od->text->SetBounds(l.openDoc->lastBounds);
 }
 
+static void DrawHomeListHeader(Gfx* gfx, MainWindow* win) {
+    auto& c = HomeLayout(win);
+    if (!c.listView || c.rcListHeader.IsEmpty()) {
+        return;
+    }
+    Rect header = c.rcListHeader;
+    Color line = AccentColor(ThemeMainWindowBackgroundColor(), 30);
+    gfx->FillRect(header, ThemeControlBackgroundColor());
+    gfx->DrawLine({header.x, header.Bottom() - 1, header.dx, 0}, line);
+    bool isRtl = IsUIRtl();
+    PlatformFont* font = HomePageFont(12);
+    for (int column = 0; column < HomeColumnCount; column++) {
+        Rect r = c.listColumns[column];
+        if (r.IsEmpty()) {
+            continue;
+        }
+        gfx->DrawLine({isRtl ? r.x : r.Right(), r.y + DpiScale(5), 0, r.dy - DpiScale(10)}, line);
+        r.x += DpiScale(4);
+        r.dx = std::max(0, r.dx - DpiScale(8));
+        Str label = HomeColumnLabel(column);
+        if ((column == HomeOpened && c.sortOrder == 0) || (column == HomeClosed && c.sortOrder == 1)) {
+            label = fmt("%s \xE2\x96\xBE", label);
+        }
+        u32 align = isRtl ? gfxTextRight : gfxTextLeft;
+        gfx->DrawText(label, r, gfxTextEllipsis | gfxTextVCenter | align, font, ThemeWindowTextColor());
+    }
+}
+
 static void DrawHomePageLayout(HomePageLayout& l) {
     Gfx* gfx = l.gfx;
     auto* win = l.win;
@@ -2898,6 +3204,7 @@ static void DrawHomePageLayout(HomePageLayout& l) {
     // (thumbnails / list rows), tip band, header (palette / logo / help),
     // view buttons, and "Open a document..."
     win->homeRoot->Paint(gfx, l.rc);
+    DrawHomeListHeader(gfx, win);
 
     // thumbnails selection outline: after the entries so it sits on top of the
     // thumbnail, clipped so it cannot paint over the search field or the tip

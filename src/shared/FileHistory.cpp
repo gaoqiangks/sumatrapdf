@@ -54,6 +54,8 @@ void FileHistoryClear(bool keepFavorites) {
     for (FileState* fs : *gStates) {
         if (keepFavorites && len(*fs->favorites) > 0) {
             fs->openCount = 0;
+            fs->lastOpenedTime = {};
+            fs->lastClosedTime = {};
             (*gStates)[kept++] = fs;
             continue;
         }
@@ -80,6 +82,19 @@ FileState* FileHistoryFindByPath(Str filePath) {
     return nullptr;
 }
 
+// Break ties from the clock's resolution, without following future-dated
+// settings from another machine or carrying a clock correction forward.
+static FILETIME HistoryEventTime() {
+    FILETIME now;
+    GetSystemTimeAsFileTime(&now);
+    u64 ticks = FileTimeToU64(now);
+    static u64 lastClock = 0;
+    static u64 sameClockEvents = 0;
+    sameClockEvents = ticks == lastClock ? sameClockEvents + 1 : 0;
+    lastClock = ticks;
+    return FileTimeFromU64(ticks + sameClockEvents);
+}
+
 FileState* FileHistoryMarkFileLoaded(Str filePath) {
     ReportIf(len(filePath) == 0);
     // if a history entry with the same name already exists,
@@ -95,7 +110,21 @@ FileState* FileHistoryMarkFileLoaded(Str filePath) {
     }
     VecInsertAt(*gStates, 0, fs);
     fs->openCount++;
+    fs->lastOpenedTime = HistoryEventTime();
+    HomePageInvalidateLayoutCache();
     return fs;
+}
+
+void FileHistoryMarkFileClosed(Str filePath) {
+    if (!gStates || !gSettings || !gSettings->rememberOpenedFiles || len(filePath) == 0) {
+        return;
+    }
+    FileState* fs = FileHistoryFindByPath(filePath);
+    if (!fs) {
+        return;
+    }
+    fs->lastClosedTime = HistoryEventTime();
+    HomePageInvalidateLayoutCache();
 }
 
 void FileHistoryDemote(Str filePath, bool hide) {
@@ -124,7 +153,7 @@ void FileHistoryDemote(Str filePath, bool hide) {
     logf("MarkFileInexistent: '%s', isMissing: %d\n", filePath, (int)hide);
 }
 
-static int cmpRecentlyOpened(FileState* const* a, FileState* const* b) {
+static int cmpHistoryOrder(FileState* const* a, FileState* const* b) {
     FileState* dsA = *a;
     FileState* dsB = *b;
     // sort pinned documents before unpinned ones
@@ -135,7 +164,25 @@ static int cmpRecentlyOpened(FileState* const* a, FileState* const* b) {
     if (dsA->isPinned) {
         return str::CmpNatural(path::GetBaseNameTemp(dsA->filePath), path::GetBaseNameTemp(dsB->filePath));
     }
-    return dsA->index < dsB->index ? -1 : 1;
+    return dsA->index - dsB->index;
+}
+
+static int cmpRecentlyOpened(FileState* const* a, FileState* const* b) {
+    u64 timeA = FileTimeToU64((*a)->lastOpenedTime);
+    u64 timeB = FileTimeToU64((*b)->lastOpenedTime);
+    if (!(*a)->isPinned && !(*b)->isPinned && timeA != timeB) {
+        return timeA > timeB ? -1 : 1;
+    }
+    return cmpHistoryOrder(a, b);
+}
+
+static int cmpRecentlyClosed(FileState* const* a, FileState* const* b) {
+    u64 timeA = FileTimeToU64((*a)->lastClosedTime);
+    u64 timeB = FileTimeToU64((*b)->lastClosedTime);
+    if (!(*a)->isPinned && !(*b)->isPinned && timeA != timeB) {
+        return timeA > timeB ? -1 : 1;
+    }
+    return cmpHistoryOrder(a, b);
 }
 
 static int cmpOpenCount(FileState* const* a, FileState* const* b) {
@@ -144,13 +191,16 @@ static int cmpOpenCount(FileState* const* a, FileState* const* b) {
     if (!dsA->isPinned && !dsB->isPinned && dsA->openCount != dsB->openCount) {
         return dsB->openCount - dsA->openCount;
     }
-    return cmpRecentlyOpened(a, b);
+    return cmpHistoryOrder(a, b);
 }
 
 // fills `list` with a shallow copy of the file history list (the states stay
 // owned by the history), with all missing states filtered out, sorted by `cmp`
 static void GetSortedStates(Vec<FileState*>& list, VecSortCmp<FileState*>::Fn cmp) {
     ReportIf(len(list) > 0);
+    if (!gStates) {
+        return;
+    }
     int i = 0;
     for (FileState* ds : *gStates) {
         ds->index = i++;
@@ -168,6 +218,10 @@ void FileHistoryGetFrequencyOrder(Vec<FileState*>& list) {
 
 void FileHistoryGetRecentlyOpenedOrder(Vec<FileState*>& list) {
     GetSortedStates(list, cmpRecentlyOpened);
+}
+
+void FileHistoryGetRecentlyClosedOrder(Vec<FileState*>& list) {
+    GetSortedStates(list, cmpRecentlyClosed);
 }
 
 // removes file history entries which shouldn't be saved anymore

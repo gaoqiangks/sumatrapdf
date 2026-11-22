@@ -28,6 +28,7 @@
 #include "EngineBase.h"
 #include "EngineAll.h"
 #include "AppSettings.h"
+#include "FileHistory.h"
 #include "AIChatTypes.h"
 #include "WindowTab.h"
 #include "Flags.h"
@@ -150,6 +151,75 @@ static void SidebarViewSettingTest() {
         utassert(SidebarViewFromStr(got, SidebarView::Bookmarks) == v);
         DeleteSettings(settings);
     }
+}
+
+static void FileHistoryTimesTest() {
+    Settings* previous = gSettings;
+    Vec<FileState*>* previousStates = FileHistoryStates();
+    gSettings = NewSettings(
+        StrL("FileStates [\n"
+             " [\n FilePath = C:\\legacy.txt\n ]\n"
+             " [\n FilePath = C:\\a.txt\n LastOpenedTime = 1 100\n LastClosedTime = 1 300\n OpenCount = 5\n ]\n"
+             " [\n FilePath = C:\\b.txt\n LastOpenedTime = 1 200\n LastClosedTime = 1 100\n OpenCount = 5\n ]\n"
+             " [\n FilePath = C:\\pinned.txt\n IsPinned = true\n ]\n]\n"));
+    FileHistorySetStates(gSettings->fileStates);
+    defer {
+        FileHistoryClear(false);
+        DeleteSettings(gSettings);
+        gSettings = previous;
+        FileHistorySetStates(previousStates);
+    };
+    FileState* legacy = FileHistoryGet(0);
+    FileState* a = FileHistoryGet(1);
+    FileState* b = FileHistoryGet(2);
+    FileState* pinned = FileHistoryGet(3);
+    utassert(FileTimeToU64(legacy->lastOpenedTime) == 0);
+    utassert(FileTimeToU64(a->lastOpenedTime) == ((u64)1 << 32) + 100);
+    Vec<FileState*> order;
+    FileHistoryGetRecentlyOpenedOrder(order);
+    utassert(order[0] == pinned && order[1] == b && order[2] == a && order[3] == legacy);
+    VecReset(order);
+    FileHistoryGetRecentlyClosedOrder(order);
+    utassert(order[0] == pinned && order[1] == a && order[2] == b && order[3] == legacy);
+    legacy->openCount = 10;
+    VecReset(order);
+    FileHistoryGetFrequencyOrder(order);
+    utassert(order[0] == pinned && order[1] == legacy && order[2] == a && order[3] == b);
+
+    // History remains useful even when per-document zoom/page state is disabled.
+    gSettings->rememberStatePerDocument = false;
+    Str serialized = SerializeSettings(gSettings, {}, SerializeOpt::All);
+    Settings* restored = NewSettings(serialized);
+    utassert(FileTimeToU64((*restored->fileStates)[1]->lastOpenedTime) == FileTimeToU64(a->lastOpenedTime));
+    utassert(FileTimeToU64((*restored->fileStates)[1]->lastClosedTime) == FileTimeToU64(a->lastClosedTime));
+    DeleteSettings(restored);
+
+    VecAppend(*a->favorites, NewFavorite(1, StrL("Keep me")));
+    gSettings->rememberOpenedFiles = false;
+    u64 closedBefore = FileTimeToU64(a->lastClosedTime);
+    FileHistoryMarkFileClosed(a->filePath);
+    utassert(FileTimeToU64(a->lastClosedTime) == closedBefore);
+    Str privateSettings = SerializeSettings(gSettings, serialized, SerializeOpt::All);
+    utassert(!str::Contains(privateSettings, StrL("LastOpenedTime =")));
+    utassert(!str::Contains(privateSettings, StrL("LastClosedTime =")));
+    str::Free(privateSettings);
+    str::Free(serialized);
+
+    gSettings->rememberOpenedFiles = true;
+    a->lastOpenedTime = FileTimeFromU64(UINT64_MAX);
+    FileHistoryMarkFileLoaded(b->filePath);
+    FILETIME now;
+    GetSystemTimeAsFileTime(&now);
+    utassert(FileTimeToU64(b->lastOpenedTime) <= FileTimeToU64(now) + kFileTimeTicksPerSec);
+    FileHistoryMarkFileClosed(b->filePath);
+    FileHistoryMarkFileClosed(a->filePath);
+    utassert(FileTimeToU64(a->lastClosedTime) > FileTimeToU64(b->lastClosedTime));
+    int count = len(*FileHistoryStates());
+    FileHistoryMarkFileClosed(StrL("C:\\not-remembered.txt"));
+    utassert(len(*FileHistoryStates()) == count);
+    FileHistoryClear(true);
+    utassert(len(*FileHistoryStates()) == 1 && FileHistoryGet(0) == a);
+    utassert(FileTimeToU64(a->lastOpenedTime) == 0 && FileTimeToU64(a->lastClosedTime) == 0);
 }
 
 static void PaletteRowColorTest() {
@@ -360,6 +430,7 @@ static void SumatraPDF_UnitTests() {
     CommandPaletteModel_UnitTests();
     PaletteRowColorTest();
     SidebarViewSettingTest();
+    FileHistoryTimesTest();
     GhostButtonDisabledTest();
     DocPropertiesTest();
     parseCommandsTest();

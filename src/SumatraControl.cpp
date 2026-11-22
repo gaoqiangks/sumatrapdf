@@ -5,6 +5,7 @@
 #include "base/AutoWin.h"
 #include "base/UITask.h"
 #include "base/Win.h"
+#include "base/SettingsUtil.h"
 #include "gui/Dpi.h"
 
 #include "gui/UIModels.h"
@@ -699,6 +700,8 @@ enum class ControlCmd : u16 {
     WaitHomePainted = 163,
     // [idx]: select tab idx; idx < 0 only reports the current tab and count
     TestSelectTab = 164,
+    // Read back the serializer without writing settings in a -for-testing run.
+    TestSettingsSnapshot = 165,
 };
 
 static_assert((u16)ControlCmd::Quit == (u16)ControlFrameCmd::Quit);
@@ -2111,6 +2114,13 @@ static void ExecuteControlRequest(ControlRequest* req) {
             int exitCode = 0;
             Str res = HomeListRowsResultTemp(&exitCode);
             AppendTestResult(req, exitCode, res);
+            break;
+        }
+
+        case ControlCmd::TestSettingsSnapshot: {
+            Str serialized = SerializeSettings(gSettings, {}, SerializeOpt::NoSecrets);
+            AppendTestResult(req, 0, serialized);
+            str::Free(serialized);
             break;
         }
 

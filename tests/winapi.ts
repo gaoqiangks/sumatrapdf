@@ -2457,6 +2457,12 @@ export function getMenuItemDisabled(hmenu: bigint, pos: number): boolean {
   return (st & (MF_GRAYED | MF_DISABLED)) !== 0;
 }
 
+export function getMenuItemChecked(hmenu: bigint, pos: number): boolean {
+  const MF_CHECKED = 0x0008;
+  const state = user32.symbols.GetMenuState(hmenu, pos, MF_BYPOSITION);
+  return state !== 0xffffffff && (state & MF_CHECKED) !== 0;
+}
+
 // the whole menu tree, submenus included. Separators (empty labels) are skipped
 export function readMenuTree(hmenu: bigint): MenuItem[] {
   const out: MenuItem[] = [];

@@ -313,6 +313,10 @@ struct FileState {
     // Frequently Read list reflects what's relevant now instead of what
     // used to be opened a lot
     int openCount;
+    // last time this document was opened; zero means unknown
+    FILETIME lastOpenedTime;
+    // last time this document was closed; zero means unknown
+    FILETIME lastClosedTime;
     // number of the last read page, or `bm:<bookmark>` for documents with
     // chapters (folds in ReparseIdx; see PagePosition.cpp)
     Str pageNo;
@@ -972,6 +976,13 @@ struct Settings {
     // how the home page shows the document history: thumbnails (a grid of
     // page previews) or list (one row per file)
     Str homePageViewMode;
+    // home page recency order: opened or closed;
+    // HomePageSortByFrequentlyRead takes precedence
+    Str homePageSortBy;
+    // optional home page list columns, separated by commas: path, size,
+    // opened, closed, modified, progress; name is always shown, and name
+    // alone hides all optional columns
+    Str homePageListColumns;
     // how the home page thumbnail is made from a document's first page:
     // legacy (the top of the page, cropped to a 212x150 frame) or full
     // (the whole page, scaled to fit a 150x212 frame). Changing it
@@ -1475,7 +1486,7 @@ struct FieldInfo;
 struct StructInfo;
 extern const StructInfo gFavoriteInfo;
 extern const StructInfo gFileEBookUIInfo;
-extern const FieldInfo gFileStateFields[36];
+extern const FieldInfo gFileStateFields[38];
 extern StructInfo gFileStateInfo;
 extern const StructInfo gTabStateInfo;
 extern const StructInfo gSessionDataInfo;

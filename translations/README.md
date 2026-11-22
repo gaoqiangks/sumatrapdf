@@ -5,9 +5,8 @@
 It contains all 72 supported non-English languages; English uses the source strings.
 Simplified and traditional Chinese cover all 936 UI strings from that snapshot.
 Strings added upstream since then fall back to English until translated.
-On 2026-11-18, the bundled file was extended offline with the current source
-originals and local tab labels, preserving the earlier translations. It contains
-1,596 originals, including all 1,492 currently extracted originals.
+The bundled file includes the current source strings and this fork's Chinese
+labels for duplicate tabs, Home sorting and visible columns.
 
 The snapshot was generated from the public, read-only history endpoint
 `https://www.apptranslator.org/api/transhist?app=SumatraPDF&lang=<code>` for each
@@ -21,7 +20,7 @@ variant of Set Tab Color, and retains untranslated internal command originals fo
 debug lookup. Other languages may fall back to English for new untranslated labels.
 The file's second line is the SHA-1 of its UTF-8 body, including the final newline.
 
-Bundled file SHA-256: `42d21f1906b1a69cc31fab70abb0802439f58a9bac58a08bec7cea0a57608ede`.
+Bundled file SHA-256: `1e5297b7fa4f1dc6ed9c78896d8dbd2f9b0dcbf1f75a73dad0132b40b434846c`.
 
 The build's embedded-data preparation uses this snapshot when the
 downloaded `.work/translations.txt` cache is absent or empty. A nonempty downloaded

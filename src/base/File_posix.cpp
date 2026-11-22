@@ -389,13 +389,19 @@ i64 GetSize(FileHandle h) {
     return (i64)st.st_size;
 }
 
-i64 GetSize(Str path) {
+i64 GetSize(Str path, FILETIME* modifiedOut) {
+    if (modifiedOut) {
+        *modifiedOut = {};
+    }
     if (len(path) == 0) {
         return -1;
     }
     struct stat st;
     if (!StatPath(path, st) || S_ISDIR(st.st_mode)) {
         return -1;
+    }
+    if (modifiedOut) {
+        *modifiedOut = FileTimeFromTimespec(StatModificationTime(st));
     }
     return (i64)st.st_size;
 }

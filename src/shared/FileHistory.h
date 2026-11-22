@@ -16,9 +16,11 @@ void FileHistoryRemove(FileState* fs);
 FileState* FileHistoryGet(int index);
 FileState* FileHistoryFindByPath(Str filePath);
 FileState* FileHistoryMarkFileLoaded(Str filePath);
+void FileHistoryMarkFileClosed(Str filePath);
 void FileHistoryDemote(Str filePath, bool hide = false);
 void FileHistoryGetFrequencyOrder(Vec<FileState*>& list);
 void FileHistoryGetRecentlyOpenedOrder(Vec<FileState*>& list);
+void FileHistoryGetRecentlyClosedOrder(Vec<FileState*>& list);
 void FileHistoryPurge(bool alwaysUseDefaultState = false);
 
 // what Reopen Last Closed brings back: one closed tab, or a closed window's tabs

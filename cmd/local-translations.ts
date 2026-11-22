@@ -2,8 +2,20 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { extractStringsToTranslate } from "./trans-dl";
 
-// Keep this fork's tab label in the packaged translations without changing the
-// downloaded cache or submitting translations to apptranslator.
+// Keep this fork's UI labels in the package without changing the downloaded cache.
+const homeLabels = [
+  ["Recently Closed", "最近关闭", "最近關閉"],
+  ["Name", "名称", "名稱"],
+  ["Path", "路径", "路徑"],
+  ["Size", "大小", "大小"],
+  ["Last opened", "最近打开时间", "最近開啟時間"],
+  ["Last closed", "最近关闭时间", "最近關閉時間"],
+  ["Date modified", "修改时间", "修改時間"],
+  ["Reading progress", "阅读进度", "閱讀進度"],
+  ["Sort by", "排序方式", "排序方式"],
+  ["Choose columns", "选择显示列", "選擇顯示欄位"],
+] as const;
+
 export function addLocalTranslations(downloaded: string, sourceStrings = extractStringsToTranslate()): string {
   const lines = downloaded.trimEnd()
     ? downloaded.trimEnd().split(/\r?\n/)
@@ -18,6 +30,19 @@ export function addLocalTranslations(downloaded: string, sourceStrings = extract
   while (end < lines.length && !lines[end].startsWith(":")) end++;
   const otherLanguages = lines.slice(start + 1, end).filter((line) => !/^(cn|tw):/.test(line));
   lines.splice(start + 1, end - start - 1, "cn:复制标签页", "tw:複製分頁", ...otherLanguages);
+
+  for (const [name, cn, tw] of homeLabels) {
+    let index = lines.indexOf(":" + name);
+    if (index < 0) {
+      index = lines.length;
+      lines.push(":" + name);
+    }
+    let next = index + 1;
+    while (next < lines.length && !lines[next].startsWith(":")) next++;
+    const existing = lines.slice(index + 1, next);
+    if (!existing.some((line) => line.startsWith("cn:"))) lines.splice(next, 0, "cn:" + cn);
+    if (!existing.some((line) => line.startsWith("tw:"))) lines.splice(next, 0, "tw:" + tw);
+  }
 
   // The color picker adds an ellipsis to the existing translated command label.
   // Reuse that translation for every language until the new label is translated.

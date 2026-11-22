@@ -619,14 +619,19 @@ static void RememberSessionState() {
 // added or removed from the file history (in order to keep
 // the list of recently opened documents in sync)
 // force: Open Settings File. -for-testing and exit skip every other save.
-static bool SaveSettings(bool force) {
+enum class SaveSession {
+    Update,
+    Keep
+};
+
+static bool SaveSettings(bool force, SaveSession session = SaveSession::Update) {
     gSaveSettingsPending = false;
     if (!force && gForTesting) {
         // started with -for-testing for ad-hoc testing: don't modify
         // the settings of the tester
         return true;
     }
-    if (!force && gDontSaveSettings) {
+    if (!force && gDontSaveSettings && session == SaveSession::Update) {
         // if we are exiting the application by File->Exit,
         // OnMenuExit will have called SaveSettings() already
         // and we skip the call here to avoid saving incomplete session info
@@ -639,26 +644,28 @@ static bool SaveSettings(bool force) {
         return false;
     }
     logf("SaveSettings\n");
+    if (session == SaveSession::Update) {
 #if defined(SUMATRA_NG)
-    // update display states for all tabs, then snapshot the session
-    if (gRememberSessionStateFn) {
-        gRememberSessionStateFn();
+        // update display states for all tabs, then snapshot the session
+        if (gRememberSessionStateFn) {
+            gRememberSessionStateFn();
 #else
-    // update display states for all tabs
-    // we snapshot the list because SaveSettings() can be called re-entrantly
-    // (e.g. from LoadDocumentFinish while other documents are still loading/closing)
-    for (MainWindow* win : gWindows) {
-        Vec<WindowTab*> tabs = win->Tabs();
-        for (WindowTab* tab : tabs) {
-            UpdateTabFileDisplayStateForTab(tab);
+        // update display states for all tabs
+        // we snapshot the list because SaveSettings() can be called re-entrantly
+        // (e.g. from LoadDocumentFinish while other documents are still loading/closing)
+        for (MainWindow* win : gWindows) {
+            Vec<WindowTab*> tabs = win->Tabs();
+            for (WindowTab* tab : tabs) {
+                UpdateTabFileDisplayStateForTab(tab);
+            }
+#endif
         }
+#if !defined(SUMATRA_NG)
+        RememberSessionState();
+        SyncInitialSessionData();
+        SyncTabGroups();
 #endif
     }
-#if !defined(SUMATRA_NG)
-    RememberSessionState();
-    SyncInitialSessionData();
-    SyncTabGroups();
-#endif
 
     // remove entries which should (no longer) be remembered
     FileHistoryPurge(!gSettings->rememberStatePerDocument);
@@ -752,6 +759,11 @@ void FlushScheduledSaveSettings() {
 // the session, into the file. Still honors -for-testing and restricted use.
 void SaveSettingsNow() {
     SaveSettings();
+}
+
+// Exit already captured the session before closing its windows.
+void SaveSettingsPreserveSession() {
+    SaveSettings(false, SaveSession::Keep);
 }
 
 bool LoadSettings() {
@@ -1711,7 +1723,8 @@ static bool FileStateWorthKeepingWithoutHistory(FileState* fs) {
 // FileState identity kept when RememberStatePerDocument is false. Display
 // fields (page, zoom, scroll, window) are omitted (#5907).
 static SeqStrings kFileStateKeepNoPerDoc =
-    "Favorites\0EBookUI\0FilePath\0DecryptionKey\0OpenCount\0IsPinned\0IsMissing\0UseDefaultState\0";
+    "Favorites\0EBookUI\0FilePath\0DecryptionKey\0OpenCount\0LastOpenedTime\0LastClosedTime\0IsPinned\0IsMissing\0UseDe"
+    "faultState\0";
 
 // prevData is used to preserve fields that exists in prevField but not in Settings
 // caller has to free()
@@ -1746,7 +1759,8 @@ Str SerializeSettings(Settings* prefs, Str prevData, SerializeOpt opt) {
         const char* srcName = gFileStateInfo.fieldNames;
         for (int i = 0; i < dimofi(gFileStateFields); i++) {
             Str name = Str(srcName);
-            if (SeqStrIndex(kFileStateKeepNoPerDoc, name) >= 0) {
+            bool isHistoryTime = str::Eq(name, StrL("LastOpenedTime")) || str::Eq(name, StrL("LastClosedTime"));
+            if (SeqStrIndex(kFileStateKeepNoPerDoc, name) >= 0 && !(dropHistory && isHistoryTime)) {
                 keepFields[nKeep] = gFileStateFields[i];
                 int n = len(name);
                 ReportIf(namesLen + n + 1 > (int)sizeof(keepNames));

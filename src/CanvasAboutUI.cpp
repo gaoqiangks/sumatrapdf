@@ -106,6 +106,9 @@ LRESULT WndProcCanvasAbout(MainWindow* win, HWND hwnd, UINT msg, WPARAM wp, LPAR
         case WM_MOUSELEAVE:
         case WM_LBUTTONDOWN:
         case WM_LBUTTONUP:
+        case WM_RBUTTONDOWN:
+        case WM_RBUTTONUP:
+        case WM_CONTEXTMENU:
         case WM_LBUTTONDBLCLK: {
             LRESULT res = 0;
             if (HomePageOnCanvasMessage(win, msg, wp, lp, res)) {

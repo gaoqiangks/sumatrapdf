@@ -29,6 +29,12 @@ directories so each has its own `SumatraPDF-settings.txt`. Both retain this fork
 setting and duplicate-tab behavior. Static executables have `-static` appended
 to their names.
 
+On the Home page, click the sort selector to choose Recently Opened,
+Recently Closed or Frequently Read. In list view, right-click the column
+headers to show or hide the path, size, last opened time, last closed time,
+modification time and reading progress. Name stays visible. Pinned files
+stay first. Older history entries gain timestamps as you open and close them.
+
 To run UI tests against the custom edition, set `SUMATRA_TEST_VARIANT=custom`
 and select its executable with `-exe out/dbg64/texstudio37/SumatraPDF3.7.exe`
 or `SUMATRA_TEST_EXE`. Tests default to the standard edition.

@@ -3377,6 +3377,18 @@ void ShowErrorLoadingNotification(MainWindow* win, Str path, bool noSavePrefs, b
 
 static void SetTabState(WindowTab* tab, TabState* state);
 
+static void RecordTabCloseTime(WindowTab* tab) {
+    if (!tab || tab->IsNonDocumentTab() || tab->skipHistory || !SettingsRememberOpenedFiles()) {
+        return;
+    }
+    Str path = tab->filePath;
+    if (IsOpenCachePath(path) || path::IsEphemeralHostFile(path)) {
+        return;
+    }
+    FileHistoryMarkFileClosed(path);
+    ScheduleSaveSettings();
+}
+
 // delete a loaded-but-not-yet-attached controller when its target window went
 // away mid-load. If the window was already destroyed, its cbHandler is gone
 // too, so null cb to keep ~DisplayModel from calling into freed memory
@@ -3429,6 +3441,8 @@ MainWindow* LoadDocumentFinish(LoadArgs* args) {
     } else {
         if (openNewTab) {
             SaveCurrentWindowTab(args->win);
+        } else if (win->CurrentTab() && !str::EqI(win->CurrentTab()->filePath, fullPath)) {
+            RecordTabCloseTime(win->CurrentTab());
         }
         CloseDocumentInCurrentTab(win, true, args->forceReuse);
     }
@@ -4070,6 +4084,9 @@ void StartLoadDocument(LoadArgs* argsIn) {
         // old document immediately so the canvas paints the standard "Loading ..."
         // message while the engine loads on a background thread.
         WindowTab* tab = win->CurrentTab();
+        if (!str::EqI(tab->filePath, path)) {
+            RecordTabCloseTime(tab);
+        }
         DeleteOldSelectionInfo(win, true);
         if (tab->ctrl || win->ctrl) {
             CloseDocumentInCurrentTab(win, true, true);
@@ -4781,6 +4798,9 @@ static void OnMenuExit() {
     // saving its settings
     if (len(gWindows) > 0) {
         gDontSaveSettings = false;
+        ScheduleSaveSettings();
+    } else {
+        SaveSettingsPreserveSession();
     }
 }
 
@@ -5426,6 +5446,7 @@ void CloseTab(WindowTab* tab, bool quitIfLast) {
         if (win->GetTabIdx(tab) < 0) {
             return;
         }
+        RecordTabCloseTime(tab);
         RemoveTab(tab);
         // RemoveTab -> LoadModelIntoTab can pump messages, potentially destroying win
         // and its cbHandler. Since tab was already removed from win's tab list,
@@ -5581,6 +5602,11 @@ void CloseWindow(MainWindow* win, bool quitIfLast, bool forceClose) {
         return;
     }
 
+    if (!(forceClose && gDontSaveSettings)) {
+        for (WindowTab* tab : win->Tabs()) {
+            RecordTabCloseTime(tab);
+        }
+    }
     RememberClosedWindow(win);
     SyncTabGroup(win);
     // Stop eventual TTS reading
@@ -14436,6 +14462,13 @@ static LRESULT CALLBACK WndProcSumatraFrame(HWND hwnd, UINT msg, WPARAM wp, LPAR
         }
 
         case WM_ENDSESSION:
+            if (wp == TRUE && !gDontSaveSettings) {
+                for (MainWindow* closingWin : gWindows) {
+                    for (WindowTab* tab : closingWin->Tabs()) {
+                        RecordTabCloseTime(tab);
+                    }
+                }
+            }
             // the forced CloseWindow below aborts any print job still running
             ScheduleSaveSettings();
             FlushScheduledSaveSettings();

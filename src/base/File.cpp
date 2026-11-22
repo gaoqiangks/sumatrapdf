@@ -1523,7 +1523,10 @@ static bool GetInfo(Str path, WIN32_FILE_ATTRIBUTE_DATA& fileInfo) {
     return path::GetCachedAttributesEx(path, &fileInfo);
 }
 
-i64 GetSize(Str path) {
+i64 GetSize(Str path, FILETIME* modifiedOut) {
+    if (modifiedOut) {
+        *modifiedOut = {};
+    }
     ReportIf(len(path) == 0);
     if (len(path) == 0) {
         return -1;
@@ -1532,16 +1535,15 @@ i64 GetSize(Str path) {
     if (!GetInfo(path, fileInfo)) {
         // Cache can fail (e.g. "drive offline" short-circuit or a cached
         // negative attrs result). Probe directly and recover when the path is fine.
-        WIN32_FILE_ATTRIBUTE_DATA direct{};
-        BOOL ok = GetFileAttributesExW(CWStrTemp(path), GetFileExInfoStandard, &direct);
-        if (!ok || (direct.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) {
+        if (!GetFileAttributesExW(CWStrTemp(path), GetFileExInfoStandard, &fileInfo)) {
             return -1;
         }
-        u64 sz = ((u64)direct.nFileSizeHigh << 32) | (u64)direct.nFileSizeLow;
-        return (i64)sz;
     }
     if (fileInfo.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
         return -1;
+    }
+    if (modifiedOut) {
+        *modifiedOut = fileInfo.ftLastWriteTime;
     }
     LARGE_INTEGER size;
     size.HighPart = (LONG)fileInfo.nFileSizeHigh;

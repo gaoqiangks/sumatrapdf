@@ -20,7 +20,7 @@ int CountHomePageFiles();
 void CollectHomePageFiles(Str searchQuery, Vec<FileState*>& fileStates, StrVec& filterWords);
 TempStr HomeThumbnailMetaTemp(FileState* fs, float* progressOut);
 constexpr i64 kHomeFileSizePending = -2;
-i64 GetHomeFileSize(Str path);
+i64 GetHomeFileSize(Str path, FILETIME* modifiedOut = nullptr);
 extern Str sumatraTips;
 
 // the header row: [brand] [search] [Open icon "Open..."] [view icons]
