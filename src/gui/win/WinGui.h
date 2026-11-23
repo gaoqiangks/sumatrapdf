@@ -1110,6 +1110,7 @@ struct TreeView : ControlBase {
 
     // private
     TVITEMW item{};
+    int customDrawScrollX = 0;
 };
 
 TreeItem GetOrSelectTreeItemAtPos(ContextMenuEvent* args, Point& pt);

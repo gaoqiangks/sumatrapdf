@@ -204,6 +204,15 @@ void TreeView::WndProc(ControlBase::WndProcEvent* ev) {
     LPARAM lparam = ev->lparam;
     TreeView* w = this;
 
+    if (WM_PAINT == msg && onCustomDraw.IsValid()) {
+        int scrollX = GetScrollPos(hwnd, SB_HORZ);
+        if (scrollX != customDrawScrollX) {
+            // Native scrolling copies pixels, but custom page labels stay at the viewport edge.
+            customDrawScrollX = scrollX;
+            HwndInvalidate(hwnd, false);
+        }
+    }
+
     if (WM_RBUTTONDOWN == msg) {
         // this is needed to make right click trigger context menu
         // otherwise it gets turned into NM_CLICK and it somehow

@@ -534,6 +534,8 @@ import { testit as commandPaletteExternalReload } from "./command-palette-extern
 import { testit as tocTitleFallback } from "./toc-title-fallback.ts";
 import { testit as tocShowOnOpen } from "./toc-show-on-open.ts";
 import { testit as tocSelectionVisible } from "./toc-selection-visible.ts";
+import { testit as tocBackground } from "./toc-background.ts";
+import { testit as tocScrollBackground } from "./toc-scroll-background.ts";
 import { testit as tocTreeSentClick } from "./toc-tree-sent-click.ts";
 import { testit as issue6132 } from "./issue-6132.ts";
 import { testit as issue6133 } from "./issue-6133.ts";
@@ -1058,6 +1060,8 @@ export const tests: NamedTest[] = [
   ["toc-title-fallback", tocTitleFallback],
   ["toc-show-on-open", tocShowOnOpen],
   ["toc-selection-visible", tocSelectionVisible],
+  ["toc-background", tocBackground],
+  ["toc-scroll-background", tocScrollBackground],
   ["issue-6132", issue6132],
   ["toolbar-tab-switch-pos", toolbarTabSwitchPos],
   ["facing-fit-tiny-viewport", facingFitTinyViewport],

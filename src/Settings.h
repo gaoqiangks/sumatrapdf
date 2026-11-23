@@ -1395,6 +1395,9 @@ struct Settings {
     // if true, long bookmark / table-of-contents entries wrap to the
     // sidebar's width instead of being cut off
     bool tocWrapText;
+    // if true, also highlight bookmarks on the current page and their
+    // ancestor chain; otherwise highlight only the selected bookmark
+    bool showTocPageMatches;
     // if true, show a list of frequently read documents when no document
     // is loaded
     bool showStartPage;

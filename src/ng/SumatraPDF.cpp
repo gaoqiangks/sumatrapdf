@@ -332,6 +332,13 @@ void ApplySettingsToWindowsUi() {
         for (WindowTab* tab : win->Tabs()) {
             UpdateTabPageText(tab);
         }
+        if (win->ctrl) {
+            // Refresh page matches without moving the user's selected bookmark.
+            bool keepSelection = win->tocKeepSelection;
+            win->tocKeepSelection = true;
+            UpdateTocSelection(win, win->currPageNo);
+            win->tocKeepSelection = keepSelection;
+        }
         // force the relayout
         win->lastViewPortSize = Size{};
         win->RedrawAll(true);

@@ -198,10 +198,10 @@ void ClearTocBox(MainWindow* win) {
 // Fill win->tocMatchingItems with every entry that should look "current" for
 // bestMatch: all TOC items on the same page, plus the ancestor chain (so a
 // nested 6 / 6.1 / 6.1.1 path all highlight together). TreeView still has only
-// one selection; extras are painted in OnTocCustomDraw when gShowAllMatchingTOC.
+// one selection; extras are painted when ShowTocPageMatches is enabled.
 static void SetTocMultiHighlight(MainWindow* win, TreeView* treeView, TocItem* bestMatch) {
     Vec<TocItem*> next;
-    if (gShowAllMatchingTOC && bestMatch && treeView) {
+    if (gSettings->showTocPageMatches && bestMatch && treeView) {
         // All bookmarks that point at the same page as the best match (the issue's
         // "subsequent" same-page entries that TreeView single-select cannot show).
         if (bestMatch->pageNo >= 1 && treeView->treeModel) {
@@ -835,6 +835,26 @@ static void OnTocMeasureLines(TreeView::MeasureLinesEvent* ev) {
     ReleaseDC(tv->hwnd, hdc);
 }
 
+static void TocItemColors(TreeView::CustomDrawEvent* ev, bool isSelected, bool hasFocus, Color* bg, Color* text) {
+    TreeView* tv = ev->treeView;
+    if (isSelected && hasFocus) {
+        *bg = GetSysColor(COLOR_HIGHLIGHT);
+        *text = GetSysColor(COLOR_HIGHLIGHTTEXT);
+        return;
+    }
+    // Scrolling can put text or stale pixels at the row's left edge. Never sample them as a background.
+    *bg = IsSpecialColor(tv->bgColor) ? ThemeControlBackgroundColor() : tv->bgColor;
+    *text = IsSpecialColor(tv->textColor) ? ThemeWindowTextColor() : tv->textColor;
+    if (isSelected) {
+        *bg = AccentColor(*bg, 40);
+        return;
+    }
+    bool hot = (ev->nm->nmcd.uItemState & CDIS_HOT) != 0;
+    if (hot && !ThemeUsesHighContrastColors()) {
+        *bg = IsCurrentThemeDefault() ? MkRgb(0xe5, 0xf3, 0xff) : AccentColor(*bg, 20);
+    }
+}
+
 // POSTPAINT: redraw title (optional filter highlight), optional right-aligned
 // page label, and multi-match "current page" highlight (issue #4642).
 static void DrawTocItemPostPaint(TreeView::CustomDrawEvent* ev, MainWindow* win) {
@@ -848,9 +868,6 @@ static void DrawTocItemPostPaint(TreeView::CustomDrawEvent* ev, MainWindow* win)
     if (!tv->GetItemRect(ev->treeItem, true, labelRect)) {
         return;
     }
-    Rect itemRect{};
-    tv->GetItemRect(ev->treeItem, false, itemRect);
-
     NMTVCUSTOMDRAW* tvcd = ev->nm;
     HDC hdc = tvcd->nmcd.hdc;
     NMCUSTOMDRAW* cd = &tvcd->nmcd;
@@ -872,7 +889,7 @@ static void DrawTocItemPostPaint(TreeView::CustomDrawEvent* ev, MainWindow* win)
     // Focus ring / highlight-text only for the real tree selection.
     bool hasFocus = isTreeSelected && (GetFocus() == tv->hwnd);
     Color bgCol, txtCol;
-    ResolveTreeFilterItemColors(hdc, itemRect, tv->bgColor, tv->textColor, isSelected, hasFocus, &bgCol, &txtCol);
+    TocItemColors(ev, isSelected, hasFocus, &bgCol, &txtCol);
     // Per-bookmark color from the document (when not the focused selection).
     if (!(isTreeSelected && hasFocus) && tocItem->color != kColorUnset) {
         txtCol = tocItem->color;
@@ -906,7 +923,7 @@ static void DrawTocItemPostPaint(TreeView::CustomDrawEvent* ev, MainWindow* win)
     // Label area extends to the visible right edge so the page number stays
     // right-aligned against the sidebar, not under a long title.
     RECT drawRc = ToRECT(labelRect);
-    drawRc.right = std::min(itemRect.x + itemRect.dx, (int)cd->rc.right);
+    drawRc.right = HwndClientRect(tv->hwnd).Right();
     if (drawRc.right <= drawRc.left) {
         return;
     }
@@ -987,7 +1004,7 @@ void OnTocCustomDraw(TreeView::CustomDrawEvent* ev) {
     MainWindow* win = FindMainWindowByHwnd(ev->treeView->hwnd);
     bool filterActive = HasTocFilter(win);
     bool showPageNumbers = gSettings->showTocPageNumbers;
-    bool multiHighlight = gShowAllMatchingTOC && win && len(win->tocMatchingItems) > 0;
+    bool multiHighlight = gSettings->showTocPageMatches && win && len(win->tocMatchingItems) > 0;
 
     if (cd->dwDrawStage == CDDS_ITEMPREPAINT) {
         TocItem* tocItem = (TocItem*)ev->treeItem;
@@ -1010,8 +1027,7 @@ void OnTocCustomDraw(TreeView::CustomDrawEvent* ev) {
             // Theme-aware selection fill/text; strip CDIS_SELECTED so Explorer
             // theme does not paint a light inactive selection over dark text.
             Color bgCol, txtCol;
-            ResolveTreeFilterItemColors(cd->hdc, ToRect(cd->rc), tv->bgColor, tv->textColor, true, hasFocus, &bgCol,
-                                        &txtCol);
+            TocItemColors(ev, true, hasFocus, &bgCol, &txtCol);
             if (!(isTreeSelected && hasFocus) && tocItem->color != kColorUnset) {
                 txtCol = tocItem->color;
             }

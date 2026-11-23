@@ -153,6 +153,22 @@ static void SidebarViewSettingTest() {
     }
 }
 
+static void TocPageMatchesSettingTest() {
+    Settings* defaults = NewSettings({});
+    utassert(!defaults->showTocPageMatches);
+    DeleteSettings(defaults);
+    for (int enabled = 0; enabled < 2; enabled++) {
+        Settings* settings = NewSettings(fmt("ShowTocPageMatches = %s\n", enabled ? StrL("true") : StrL("false")));
+        utassert(settings->showTocPageMatches == (enabled != 0));
+        Str serialized = SerializeSettings(settings, {}, SerializeOpt::All);
+        Settings* restored = NewSettings(serialized);
+        utassert(restored->showTocPageMatches == settings->showTocPageMatches);
+        str::Free(serialized);
+        DeleteSettings(restored);
+        DeleteSettings(settings);
+    }
+}
+
 static void FileHistoryTimesTest() {
     Settings* previous = gSettings;
     Vec<FileState*>* previousStates = FileHistoryStates();
@@ -430,6 +446,7 @@ static void SumatraPDF_UnitTests() {
     CommandPaletteModel_UnitTests();
     PaletteRowColorTest();
     SidebarViewSettingTest();
+    TocPageMatchesSettingTest();
     FileHistoryTimesTest();
     GhostButtonDisabledTest();
     DocPropertiesTest();
