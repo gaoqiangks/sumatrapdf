@@ -1,5 +1,5 @@
 AppTranslator: SumatraPDF
-f5fa45878b67b1e6e9674ad133630a03a07a8dee
+64e6e5e83994e573fcfb555c07a8dc4a925d8e98
 :# File History
 af:# Lêergeskiedenis
 am:# Ֆայլի պատմություն
@@ -68281,6 +68281,8 @@ vn:↑ ↓ để điều hướng
 :No result found
 :Couldn't save to the browser's storage, changes are lost when the tab is closed
 :&Settings...
+tw:一般設定(&S)...
+cn:常规设置(&S)...
 :Quit
 :Thumbnails
 :Layers
@@ -68343,6 +68345,8 @@ vn:↑ ↓ để điều hướng
 :Saved screenshot to '%s'
 :Failed to save the screenshot
 :Settings
+tw:設定
+cn:设置
 :Sign Document
 :Certificate file...
 :Signature
@@ -68721,6 +68725,8 @@ vn:↑ ↓ để điều hướng
 :You can [translate selected text](Help/Customize-search-translation-services#search-or-translate-the-selection).
 :Translate Selection with DeepL
 :Settings...
+tw:一般設定...
+cn:常规设置...
 :Debug: Toggle RTL
 :Extract Pages...
 :Toggle Read Aloud
@@ -68824,3 +68830,6 @@ cn:排序方式
 :Choose columns
 tw:選擇顯示欄位
 cn:选择显示列
+:Show toolbar tooltips
+tw:顯示工具列提示
+cn:显示工具栏提示

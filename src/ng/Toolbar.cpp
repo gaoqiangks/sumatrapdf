@@ -212,6 +212,10 @@ static ToolbarUI* Ui(MainWindow* win) {
 
 void CreateToolbar(MainWindow* win) {
     Toolbar* tb = Tb(win);
+    if (tb->showTooltips && !gSettings->showToolbarTooltips) {
+        HoverTooltipHideIn(win->gpuiWin);
+    }
+    tb->showTooltips = gSettings->showToolbarTooltips;
     tb->iconSize = ToolbarIconSize();
     tb->rowDy = ToolbarRowDy(tb->iconSize);
     win->isToolbarVisible = ShouldShowToolbar(win);
@@ -1665,7 +1669,7 @@ void ToolbarView::OnButtonHover(ToolbarView* self, gp::Ctx* cx, const gp::HoverE
             break;
         }
     }
-    if (len(tip) > 0 && tb->hoverCmdId != cmdId) {
+    if (tb->showTooltips && len(tip) > 0 && tb->hoverCmdId != cmdId) {
         HoverTooltipShow(cx, tip, ui->btnBounds[(int)idx]);
     }
     gp::Notify(cx);

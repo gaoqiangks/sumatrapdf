@@ -267,6 +267,7 @@ import { testit as issue6477 } from "./issue-6477.ts";
 import { testit as issue6137Contents } from "./issue-6137-contents.ts";
 import { testit as issue6093 } from "./issue-6093.ts";
 import { testit as toolbarHoverDropdown } from "./toolbar-hover-dropdown.ts";
+import { testit as toolbarTooltips } from "./toolbar-tooltips.ts";
 import { testit as issue6095 } from "./issue-6095.ts";
 import { testit as epubRelayoutStalePage } from "./epub-relayout-stale-page.ts";
 import { testit as epubRestyleFitContent } from "./epub-restyle-fit-content.ts";
@@ -658,6 +659,7 @@ export const tests: NamedTest[] = [
   ["issue-6276", issue6276],
   ["issue-6402", issue6402],
   ["toolbar-hover-dropdown", toolbarHoverDropdown],
+  ["toolbar-tooltips", toolbarTooltips],
   ["session-restore-tab-state", sessionRestoreTabState],
   ["exit-edit-pdf-deselects", exitEditPdfDeselects],
   ["issue-6113", issue6113],

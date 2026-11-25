@@ -33,6 +33,7 @@ struct Toolbar {
     ToolbarUI* ui = nullptr;
     int iconSize = 0;
     int rowDy = 0;
+    bool showTooltips = false;
 
     // the page / chapter boxes; gpui text fields, orig's win32 Edits
     gpui::InputState* pageEdit = nullptr;

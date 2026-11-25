@@ -2111,6 +2111,7 @@ const globalPrefs: Field[] = [
       "| is a separator and PageInfo is the page number box. Empty (the default) means " +
       "the standard layout. Buttons you added yourself (see Shortcuts) still come last",
   ).ver("3.7"),
+  field("ShowToolbarTooltips", Bool, false, "if true, hovering over a toolbar button shows its tooltip").ver("3.7"),
   field(
     "ToolbarShowReadAloud",
     Bool,
@@ -2587,6 +2588,7 @@ const globalPrefsLayout = [
   "HighlightLinkDestination",
   "FastScrollOverScrollbar",
   "PreventSleepInFullscreen",
+  "ShowToolbarTooltips",
   "ToolbarShowReadAloud",
   "DisableAntiAlias",
   "DisableAutoLinks",

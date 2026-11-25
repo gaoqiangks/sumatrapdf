@@ -1,9 +1,8 @@
 /* Copyright 2022 the SumatraPDF project authors (see AUTHORS file).
    License: GPLv3 */
 
-// ng: orig's SettingsDialog.cpp is a WS_POPUPWINDOW with two DropDowns and five
-// Checkboxes. Here it is a gpui Dialog with the same rows in the same order:
-// the "View" section (Default Layout, Default Zoom, the two checkboxes), the
+// ng: orig's SettingsDialog.cpp is a WS_POPUPWINDOW. Here it is a gpui Dialog
+// with the same rows in the same order: the "View" section, the
 // "Advanced" section (Use tabs, check for updates, remember opened files) and,
 // when TeX enhancements are on, the inverse search command line.
 
@@ -45,6 +44,7 @@ struct SettingsDlg {
     gpui::InputState* editInverse = nullptr;
     bool showToc = false;
     bool rememberState = false;
+    bool showToolbarTooltips = false;
     bool useTabs = false;
     bool checkUpdates = false;
     bool rememberOpened = false;
@@ -196,6 +196,7 @@ void ShowSettingsDialog(MainWindow* win) {
 
     gSettingsDlg.showToc = gSettings->showToc;
     gSettingsDlg.rememberState = gSettings->rememberStatePerDocument;
+    gSettingsDlg.showToolbarTooltips = gSettings->showToolbarTooltips;
     gSettingsDlg.useTabs = gSettings->useTabs;
     gSettingsDlg.checkUpdates = gSettings->checkForUpdates;
     gSettingsDlg.rememberOpened = gSettings->rememberOpenedFiles;
@@ -227,6 +228,7 @@ static void SettingsOk() {
     gSettings->defaultZoomFloat = SelectedZoom();
     gSettings->showToc = gSettingsDlg.showToc;
     gSettings->rememberStatePerDocument = gSettingsDlg.rememberState;
+    gSettings->showToolbarTooltips = gSettingsDlg.showToolbarTooltips;
     gSettings->useTabs = gSettingsDlg.useTabs;
     gSettings->checkForUpdates = gSettingsDlg.checkUpdates;
     gSettings->rememberOpenedFiles = gSettingsDlg.rememberOpened;
@@ -276,6 +278,9 @@ void SettingsView::OnToggle(SettingsView*, gp::Ctx* cx, const gp::ClickEvent*, i
             break;
         case 4:
             gSettingsDlg.rememberOpened = !gSettingsDlg.rememberOpened;
+            break;
+        case 5:
+            gSettingsDlg.showToolbarTooltips = !gSettingsDlg.showToolbarTooltips;
             break;
     }
     gp::Notify(cx);
@@ -331,6 +336,8 @@ gp::El* SettingsDialogBuild(MainWindow* win, gp::Ctx* cx) {
         check(StrL("opt-showtoc"), Tr("Show the &bookmarks sidebar when available"), gSettingsDlg.showToc, false, 0));
     view->Child(check(StrL("opt-remember"), Tr("&Remember these settings for each document"),
                       gSettingsDlg.rememberState, !gSettingsDlg.rememberOpened, 1));
+    view->Child(
+        check(StrL("opt-toolbar-tooltips"), Tr("Show toolbar tooltips"), gSettingsDlg.showToolbarTooltips, false, 5));
     col->Child(view);
     col->Child(DlgHairline(cx));
 

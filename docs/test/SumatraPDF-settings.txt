@@ -92,6 +92,7 @@ HelpTheme = app
 DocumentColorsFollowTheme = off
 TocDy = 0
 SidebarMiddleDy = 0
+ShowToolbarTooltips = false
 ToolbarShowReadAloud = false
 ToolbarSize = 18
 TreeFontName = automatic

@@ -176,6 +176,7 @@ export async function testit(): Promise<void> {
   writeFileSync(
     join(dir, "SumatraPDF-settings.txt"),
     `Theme = Dark
+ShowToolbarTooltips = true
 UiLanguage = en
 CheckForUpdates = false
 RestoreSession = false

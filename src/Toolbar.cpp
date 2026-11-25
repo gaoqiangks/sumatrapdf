@@ -2554,6 +2554,13 @@ static VirtCtrl* MakeToolbarSeparator(int rowDy) {
 
 static Edit* ToolbarCreateLocationEdit(MainWindow* win, PlatformFont* font, int iconDy);
 
+// Drop-down titles also use the stored button label, even with hover tips off.
+static void GetToolbarButtonTooltip(VirtTooltipEvent* ev) {
+    if (gSettings->showToolbarTooltips) {
+        ev->tip = str::DupTemp(ev->w->tooltip);
+    }
+}
+
 // (re)build the tree of virtual controls the toolbar is made of, one per button
 static void BuildToolbarLayout(MainWindow* win) {
     PopulateToolbarLayout();
@@ -2656,6 +2663,7 @@ static void BuildToolbarLayout(MainWindow* win) {
         }
         ApplyToolbarItemColors(w);
         w->id = bi.cmdId;
+        w->onGetTooltip = MkFunc1Void(GetToolbarButtonTooltip);
         if (bi.toolTip) {
             bool translate = !noTranslate && !bi.isText;
             w->SetTooltip(ToolbarTipTemp(bi.cmdId, bi.toolTip, translate));
@@ -2685,6 +2693,7 @@ static void BuildToolbarLayout(MainWindow* win) {
         }
         ApplyToolbarItemColors(w);
         w->id = bi.cmdId;
+        w->onGetTooltip = MkFunc1Void(GetToolbarButtonTooltip);
         if (bi.toolTip) {
             w->SetTooltip(ToolbarTipTemp(bi.cmdId, bi.toolTip, true));
         }

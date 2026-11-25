@@ -32,6 +32,7 @@
 //   Default Zoom:    [Fit Page         v]
 //   [ ] Show the bookmarks sidebar when available
 //   [ ] Remember these settings for each document
+//   [ ] Show toolbar tooltips
 //   ---------------------------------------------- hairline
 //   Advanced
 //   [ ] Use tabs
@@ -64,6 +65,7 @@ struct SettingsWnd : WindowBase {
 
     Checkbox* chkShowToc = nullptr;
     Checkbox* chkRememberState = nullptr;
+    Checkbox* chkToolbarTooltips = nullptr;
     Checkbox* chkUseTabs = nullptr;
     Checkbox* chkCheckUpdates = nullptr;
     Checkbox* chkRememberOpened = nullptr;
@@ -205,6 +207,9 @@ void SettingsWnd::OnOk(VirtMouseEvent*) {
     if (chkRememberState) {
         gSettings->rememberStatePerDocument = chkRememberState->IsChecked();
     }
+    if (chkToolbarTooltips) {
+        gSettings->showToolbarTooltips = chkToolbarTooltips->IsChecked();
+    }
     if (chkUseTabs) {
         gSettings->useTabs = chkUseTabs->IsChecked();
     }
@@ -321,6 +326,9 @@ bool SettingsWnd::Create(MainWindow* mainWin) {
         chkRememberState->SetIsEnabled(false);
     }
     addCheck(view, chkRememberState);
+    chkToolbarTooltips =
+        NewDlgCheckbox(hwnd, Tr("Show toolbar tooltips"), fontText, sett && gSettings->showToolbarTooltips);
+    addCheck(view, chkToolbarTooltips);
     vbox->AddChild(NewDlgSection(view));
     vbox->AddChild(new VirtLine());
 

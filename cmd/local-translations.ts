@@ -3,7 +3,7 @@ import { dirname, join, resolve } from "node:path";
 import { extractStringsToTranslate } from "./trans-dl";
 
 // Keep this fork's UI labels in the package without changing the downloaded cache.
-const homeLabels = [
+const localLabels = [
   ["Recently Closed", "最近关闭", "最近關閉"],
   ["Name", "名称", "名稱"],
   ["Path", "路径", "路徑"],
@@ -14,6 +14,10 @@ const homeLabels = [
   ["Reading progress", "阅读进度", "閱讀進度"],
   ["Sort by", "排序方式", "排序方式"],
   ["Choose columns", "选择显示列", "選擇顯示欄位"],
+  ["&Settings...", "常规设置(&S)...", "一般設定(&S)..."],
+  ["Settings...", "常规设置...", "一般設定..."],
+  ["Settings", "设置", "設定"],
+  ["Show toolbar tooltips", "显示工具栏提示", "顯示工具列提示"],
 ] as const;
 
 export function addLocalTranslations(downloaded: string, sourceStrings = extractStringsToTranslate()): string {
@@ -31,7 +35,7 @@ export function addLocalTranslations(downloaded: string, sourceStrings = extract
   const otherLanguages = lines.slice(start + 1, end).filter((line) => !/^(cn|tw):/.test(line));
   lines.splice(start + 1, end - start - 1, "cn:复制标签页", "tw:複製分頁", ...otherLanguages);
 
-  for (const [name, cn, tw] of homeLabels) {
+  for (const [name, cn, tw] of localLabels) {
     let index = lines.indexOf(":" + name);
     if (index < 0) {
       index = lines.length;
